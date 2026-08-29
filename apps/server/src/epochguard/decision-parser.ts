@@ -86,6 +86,29 @@ function redactionFor(secret: string): string {
     : "";
 }
 
+function redactPrivateKeyPreservingDecisionMarkers(
+  privateKeyBlock: string,
+): string {
+  let usedPrimaryPlaceholder = false;
+  return privateKeyBlock
+    .split(/(<\/?EPOCH_DECISION>)/g)
+    .map((segment) => {
+      if (
+        segment === EPOCH_DECISION_OPEN_MARKER ||
+        segment === EPOCH_DECISION_CLOSE_MARKER
+      ) {
+        return segment;
+      }
+      if (segment.length === 0) return "";
+      if (!usedPrimaryPlaceholder) {
+        usedPrimaryPlaceholder = true;
+        return EPOCH_PRIVATE_KEY_PLACEHOLDER;
+      }
+      return "*";
+    })
+    .join("");
+}
+
 /**
  * Fixed, deterministic and non-expanding redaction for replayable rejected
  * outputs. It intentionally handles both structured key/value text and common
@@ -97,6 +120,8 @@ export function redactRejectedDecisionOutput(rawOutput: string): string {
     /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/gi;
   const unterminatedPrivateKey =
     /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*$/gi;
+  const quotedBearerCredential =
+    /(\bBearer[ \t]+)(["'])((?:\\.|[^\\\r\n])*?)\2/gi;
   const bearerCredential = /(\bBearer[ \t]+)([^\s"'<>]+)/gi;
   const labeledQuotedSecret =
     /((?:["']?)\b(?:(?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|password|passwd|pwd|client[_-]?secret|secret|private[_-]?key))\b(?:["']?)\s*[:=]\s*)(["'])((?:\\.|[^\\\r\n])*?)\2/gi;
@@ -106,8 +131,13 @@ export function redactRejectedDecisionOutput(rawOutput: string): string {
   const prefixedApiKey = /\bsk-(?:proj-)?[a-z0-9_-]{12,}\b/gi;
 
   return rawOutput
-    .replace(privateKeyBlock, EPOCH_PRIVATE_KEY_PLACEHOLDER)
-    .replace(unterminatedPrivateKey, EPOCH_PRIVATE_KEY_PLACEHOLDER)
+    .replace(privateKeyBlock, redactPrivateKeyPreservingDecisionMarkers)
+    .replace(unterminatedPrivateKey, redactPrivateKeyPreservingDecisionMarkers)
+    .replace(
+      quotedBearerCredential,
+      (_match: string, prefix: string, quote: string, secret: string) =>
+        `${prefix}${quote}${redactionFor(secret)}${quote}`,
+    )
     .replace(
       bearerCredential,
       (_match: string, prefix: string, secret: string) =>

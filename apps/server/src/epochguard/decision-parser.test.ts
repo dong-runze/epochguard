@@ -292,6 +292,7 @@ describe("Decision parser and normalizer", () => {
       "bearer.secret.0123456789",
       "private-key-body-secret-0123456789",
       `AKIA${"1234567890ABCDEF"}`,
+      "quoted-bearer-secret-0123456789",
     ];
     const malformed = [
       "model preface without the required Epoch marker",
@@ -299,6 +300,7 @@ describe("Decision parser and normalizer", () => {
       `password: "${secrets[1]}"`,
       `OPENAI_API_KEY='${secrets[2]}'`,
       `Authorization: Bearer ${secrets[3]}`,
+      `Authorization: Bearer "${secrets[6]}"`,
       secrets[5],
       "-----BEGIN OPENSSH PRIVATE KEY-----",
       secrets[4],
@@ -463,6 +465,75 @@ describe("Decision parser and normalizer", () => {
       expect(fixture.database.attempts[0]!.status).toBe("OUTPUT_REJECTED");
       expect(fixture.database.decisions).toEqual([]);
     }
+  });
+
+  it("preserves the parser failure when a private-key block contains Epoch markers", () => {
+    const fixture = makeFixture();
+    const privateSecret = "marker-private-key-secret-0123456789";
+    const rawOutput = [
+      "-----BEGIN PRIVATE KEY-----",
+      renderEnvelope(fixture.envelope),
+      privateSecret,
+      "-----END PRIVATE KEY-----",
+    ].join("\n");
+    replaceRawOutput(fixture, rawOutput);
+    const originalFailure = parserFailure(rawOutput);
+    expect(originalFailure.message).toContain("leading or trailing free text");
+    const decisionPointersBefore = structuredClone(
+      fixture.database.sessions[0]!.activeDecisionCertificateIds,
+    );
+    const attemptPointersBefore = structuredClone(
+      fixture.database.sessions[0]!.activeAttemptIds,
+    );
+
+    const result = normalizeAndConsumeDecision(
+      fixture.database,
+      fixture.attemptId,
+      rawOutput,
+      {
+        rejectedOutputArtifactId: "artifact_private_key_markers",
+        createdAt: COMPLETED,
+      },
+    );
+    expect(result.status).toBe("OUTPUT_REJECTED");
+    if (result.status !== "OUTPUT_REJECTED") {
+      throw new Error("Expected private-key marker rejection");
+    }
+    const sanitizedContent = result.rejectedOutputArtifact.sanitizedContent!;
+    expect(sanitizedContent).not.toContain(privateSecret);
+    expect(
+      sanitizedContent.split(EPOCH_DECISION_OPEN_MARKER).length - 1,
+    ).toBe(1);
+    expect(
+      sanitizedContent.split(EPOCH_DECISION_CLOSE_MARKER).length - 1,
+    ).toBe(1);
+    expect(Buffer.byteLength(sanitizedContent, "utf8")).toBeLessThanOrEqual(
+      Buffer.byteLength(rawOutput, "utf8"),
+    );
+    expect(redactRejectedDecisionOutput(sanitizedContent)).toBe(
+      sanitizedContent,
+    );
+    const replayFailure = parserFailure(sanitizedContent);
+    expect({
+      reasonCode: replayFailure.reasonCode,
+      message: replayFailure.message,
+    }).toEqual({
+      reasonCode: originalFailure.reasonCode,
+      message: originalFailure.message,
+    });
+    expect(fixture.database.runAssignments[0]).toMatchObject({
+      status: "REJECTED",
+      consumedByDecisionCertificateId: null,
+      consumedAt: null,
+    });
+    expect(fixture.database.attempts[0]!.status).toBe("OUTPUT_REJECTED");
+    expect(fixture.database.decisions).toEqual([]);
+    expect(
+      fixture.database.sessions[0]!.activeDecisionCertificateIds,
+    ).toEqual(decisionPointersBefore);
+    expect(fixture.database.sessions[0]!.activeAttemptIds).toEqual(
+      attemptPointersBefore,
+    );
   });
 
   it("stores no rejected content or fragment when authoritative output exceeds 16 KiB", () => {
