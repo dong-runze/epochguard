@@ -47,6 +47,7 @@ async function mockDelay(
 export class MockSessionSource implements EpochGuardSessionSource {
   private scenarioKey: MockScenarioKey;
   private reads = 0;
+  private sessionAvailable = true;
   private transitionTimer: number | null = null;
 
   constructor(initialScenario: MockScenarioKey) {
@@ -72,6 +73,7 @@ export class MockSessionSource implements EpochGuardSessionSource {
     const parsed = CreateSessionRequestSchema.parse(request);
     this.dispose();
     this.reads = 0;
+    this.sessionAvailable = true;
     this.scenarioKey =
       parsed.scenarioId === "normal-world-v1"
         ? "normal-ready"
@@ -84,6 +86,9 @@ export class MockSessionSource implements EpochGuardSessionSource {
     options?: SessionSourceRequestOptions,
   ): Promise<unknown> {
     await mockDelay(options);
+    if (this.scenarioKey === "bodyless-404" && this.reads > 0) {
+      this.sessionAvailable = false;
+    }
     this.assertSession(sessionId);
     this.reads += 1;
     if (this.scenarioKey === "stale" && this.reads > 1) {
@@ -148,9 +153,9 @@ export class MockSessionSource implements EpochGuardSessionSource {
   }
 
   private assertSession(sessionId: string): void {
-    if (sessionId !== this.sessionId) {
+    if (!this.sessionAvailable || sessionId !== this.sessionId) {
       throw new EpochGuardSessionSourceError(
-        `Mock session ${sessionId} does not exist.`,
+        "Mock session is unavailable.",
         { status: 404 },
       );
     }

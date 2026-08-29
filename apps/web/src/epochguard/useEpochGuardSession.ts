@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { SessionDashboardSnapshot } from "./contracts";
+import {
+  SESSION_NOT_FOUND_MESSAGE,
+  type SessionDashboardSnapshot,
+} from "./contracts";
 import {
   decodeEpochGuardSnapshot,
   type SnapshotDecodeFailure,
@@ -71,9 +74,27 @@ interface ImmediateSourceFailure {
 }
 
 function immediateSourceFailure(error: unknown): ImmediateSourceFailure | null {
-  if (!(error instanceof EpochGuardSessionSourceError) || error.body === null) {
+  if (!(error instanceof EpochGuardSessionSourceError)) {
     return null;
   }
+
+  if (error.status === 404) {
+    const body =
+      error.body?.error === "SESSION_NOT_FOUND" ? error.body : null;
+    return {
+      error: {
+        kind: "SESSION_NOT_FOUND",
+        message: body?.message ?? SESSION_NOT_FOUND_MESSAGE,
+        details: [
+          ...(body === null ? [] : [`Session: ${body.sessionId}`]),
+          "HTTP status: 404",
+        ],
+      },
+      clearSnapshot: true,
+    };
+  }
+
+  if (error.body === null) return null;
 
   const body = error.body;
   switch (body.error) {

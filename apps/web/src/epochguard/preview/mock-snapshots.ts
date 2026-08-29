@@ -12,6 +12,7 @@ export const MOCK_PREVIEW_NOTICE =
 export const MOCK_SCENARIO_KEYS = [
   "collecting",
   "normal-ready",
+  "bodyless-404",
   "normal-released",
   "impossible-blocked",
   "refreshing-budget",
@@ -784,6 +785,13 @@ export const MOCK_SCENARIOS: Readonly<Record<MockScenarioKey, MockScenarioDefini
     key: "normal-ready",
     label: "Normal · Ready",
     description: "Three current ALLOW Decisions; Commit is available.",
+    sessionId: normalReady.sessionId,
+    payload: normalReady,
+  },
+  "bodyless-404": {
+    key: "bodyless-404",
+    label: "Bodyless 404",
+    description: "READY loads once; the first body-null 404 clears every mutation.",
     sessionId: normalReady.sessionId,
     payload: normalReady,
   },
