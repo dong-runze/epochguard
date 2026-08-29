@@ -813,7 +813,7 @@ npm run check
 | EG-04 | Refresh / Effect Gate | RUNNING | `e5f0b3a` | — | Gate B/C | 已激活，mock-first |
 | EG-05 | Diagnostics / Snapshot | RUNNING | `e5f0b3a` | — | Gate B/D | 已激活独立实现 |
 | EG-06 | Role Profiles / Run Adapter | RUNNING | `e5f0b3a` | — | Gate B/E | 已激活，mock-first |
-| EG-07 | Dashboard Preview | RUNNING | `e5f0b3a` | — | Gate D | 已激活，只做注入式 Preview |
+| EG-07 | Dashboard Preview | ACCEPTED | `e5f0b3a` | `bac3f6d` | Gate D Preview **PASS** | 逻辑与真实浏览器验收通过；按依赖顺序等待 EG-08 后合入 |
 | EG-08 | Coordinator / Routes | NOT_STARTED | `c6e07b8` | — | Gate B/C | 等待 EG-01～06 稳定后再更新基线并激活 |
 | EG-09 | Production Integration | NOT_STARTED | `c6e07b8` | — | Gate D/F | 等待 EG-07/08 后再更新基线并激活 |
 
@@ -868,7 +868,7 @@ BLOCKED
 | EG-04 | `01a04d0c-ad8e-7e10-a74e-e3b97f8414f6` | `epochguard/eg-04-gate` | `.epochguard-worktrees/eg-04` | ACTIVE IMPLEMENTATION |
 | EG-05 | `01a04d0c-b41b-7621-8890-ae88ddeaa17c` | `epochguard/eg-05-snapshot` | `.epochguard-worktrees/eg-05` | ACTIVE IMPLEMENTATION |
 | EG-06 | `01a04d0c-ba9a-75d0-8b42-3c1fe87973ca` | `epochguard/eg-06-run-adapter` | `.epochguard-worktrees/eg-06` | ACTIVE IMPLEMENTATION |
-| EG-07 | `01a04d0c-bff2-7670-b5a3-dce3c6a66246` | `epochguard/eg-07-dashboard` | `.epochguard-worktrees/eg-07` | ACTIVE IMPLEMENTATION |
+| EG-07 | `01a04d0c-bff2-7670-b5a3-dce3c6a66246` | `epochguard/eg-07-dashboard` | `.epochguard-worktrees/eg-07` | ACCEPTED / GATE D PREVIEW PASS |
 | EG-08 | `01a04d0c-c522-72d2-8db5-9c92c7042784` | `epochguard/eg-08-service-routes` | `.epochguard-worktrees/eg-08` | PREP_ONLY |
 | EG-09 | `01a04d0c-caae-7e72-9c22-696dcfe0c9ad` | `epochguard/eg-09-integration` | `.epochguard-worktrees/eg-09` | PREP_ONLY |
 
@@ -920,6 +920,25 @@ BLOCKED
 | Gate B World/Evidence 子项 | **PASS** |
 
 验收边界：本子项证明确定性 WorldLedger、Receipt 与 canonical Evidence Pack 的本地安全语义；真实 Run 绑定、联合验证和协调器端到端门仍分别由 EG-06、EG-03 与 EG-08 承担，不能以本记录替代 Gate E 或完整 Gate B/C。
+
+### 15.6 EG-07 / Dashboard Preview 验收记录
+
+| 字段 | 结果 |
+| --- | --- |
+| 初始模块提交 | `3a4c55b2efda9376c7986c1b0d6eb82d2339d965` |
+| 逻辑修复提交 | `d92000688ee1b943d9a32eb1e92187a793e79924` |
+| 404 修复提交 | `bac3f6d92f2c9740291461133d56b38ea8c3528d` |
+| 变更边界 | 3 个线性提交；恰好只新增 EG-07 allowlist 内 10 个 Web Preview 文件 |
+| 静态门 | Contracts **27/27 PASS**；Web typecheck / production build **PASS** |
+| 投影纪律 | 单一 frozen Snapshot；前端不计算 L/U、witness、Gate、Effect count 或 refresh owner |
+| Fail-closed | 首次 body-less typed 404、unsupported schema、projection mismatch、stale/command pending 均禁用 mutation；404 清空可执行 Snapshot |
+| Refresh owner | 严格从 `snapshot.refreshPlan.agentIds` 映射当前 Agent 卡；P0 Preview 为 Budget-only |
+| 浏览器桌面门 | Normal Commit `0→1`；Impossible `effect=0`；Recovered DENY `effect=0`；首次 404 显示 `Actions disabled` |
+| 浏览器窄屏门 | 390×844 的顶部、Agent 卡、No-Cut/Effect Gate、Refresh 与 Ledger 分段截图均可读，页面无整体横向溢出 |
+| 截图证据 | `C:\Users\董润泽\Desktop\hackathon\.epochguard-audits\eg07-bac3f6d` |
+| Gate D Preview 子项 | **PASS / ACCEPTED，尚未合入** |
+
+非阻断可用性提示：窄屏 Preview 的场景选择器和 interval table 使用局部横向滚动；测试控件高度约 27～31 px，满足最小点击目标但低于舒适的 44 px 触控建议。它们不改变 Dashboard 安全投影或 Gate D P0 结论，生产接线后的最终屏幕仍需在 EG-09 候选 SHA 上复验。
 
 ---
 
