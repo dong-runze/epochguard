@@ -19,6 +19,7 @@ import {
   SessionViewBuilderError,
   buildSessionDashboardSnapshotFromSnapshot,
 } from "./session-view-builder.js";
+import { assertSafetyDiagnosticCausalChains } from "./safety-diagnostics.js";
 
 const SESSION_ID = "session_eg05";
 const HEAD = 21;
@@ -995,9 +996,198 @@ describe("single-snapshot isolation and fail-closed projection", () => {
     ];
     expect(() => snapshot(database)).toThrowError(SessionViewBuilderError);
   });
+
+  it("rejects Validation A combined with Proof B and arbitrary same-Session Receipts", () => {
+    const database = makeNoCutDatabase();
+    database.noCutProofs.push({
+      ...database.noCutProofs[0]!,
+      proofId: "proof_unrelated",
+      validationId: "validation_unrelated",
+    });
+    database.diagnostics[0]!.artifactRefs = [
+      { kind: "VALIDATION", id: "validation_no_cut" },
+      { kind: "PROOF", id: "proof_unrelated" },
+      { kind: "RECEIPT", id: receiptId("inventory") },
+      { kind: "RECEIPT", id: receiptId("budget") },
+      { kind: "REFRESH_PLAN", id: "refresh_budget" },
+    ];
+
+    expect(() => snapshot(database)).toThrowError(SessionViewBuilderError);
+  });
+
+  it("rejects missing, duplicate, and unrelated No-Cut closure refs", () => {
+    const missingPlan = makeNoCutDatabase();
+    missingPlan.diagnostics[0]!.artifactRefs =
+      missingPlan.diagnostics[0]!.artifactRefs.filter(
+        (reference) => reference.kind !== "REFRESH_PLAN",
+      );
+    expect(() => snapshot(missingPlan)).toThrowError(SessionViewBuilderError);
+
+    const duplicate = makeNoCutDatabase();
+    duplicate.diagnostics[0]!.artifactRefs.push({
+      kind: "VALIDATION",
+      id: "validation_no_cut",
+    });
+    expect(() => snapshot(duplicate)).toThrowError(SessionViewBuilderError);
+
+    const unrelatedReceipt = makeNoCutDatabase();
+    unrelatedReceipt.diagnostics[0]!.artifactRefs =
+      unrelatedReceipt.diagnostics[0]!.artifactRefs.map((reference) =>
+        reference.kind === "RECEIPT" && reference.id === receiptId("policy")
+          ? { kind: "RECEIPT", id: receiptId("inventory") }
+          : reference,
+      );
+    expect(() => snapshot(unrelatedReceipt)).toThrowError(
+      SessionViewBuilderError,
+    );
+  });
+
+  it("accepts the authoritative COMMIT_RACE chain and rejects an unrelated Permit", () => {
+    const diagnostic = {
+      diagnosticId: "diagnostic_commit_race",
+      sessionId: SESSION_ID,
+      actionHash: GOLDEN_ACTION_HASH,
+      sessionRevision: 8,
+      fixtureRef: null,
+      kind: "TRANSIENT_RACE" as const,
+      stage: "COMMIT" as const,
+      reasonCode: "COMMIT_RACE" as const,
+      role: null,
+      attemptId: null,
+      assignmentId: null,
+      runId: null,
+      artifactRefs: [
+        { kind: "VALIDATION" as const, id: "validation_current" },
+        { kind: "PERMIT" as const, id: "permit_current" },
+      ],
+      causedByDiagnosticIds: [],
+      expected: null,
+      actual: null,
+      rejectedOutputArtifactId: null,
+      auditSeq: 2,
+      recommendedAction: "NONE" as const,
+    };
+    const valid = makeDatabase();
+    valid.diagnostics.push(diagnostic);
+    expect(() => snapshot(valid)).not.toThrow();
+
+    const advancedHead = makeDatabase();
+    advancedHead.headSeq = HEAD + 1;
+    advancedHead.resourceVersions[0]!.validUntilSeq = HEAD + 1;
+    advancedHead.diagnostics.push(diagnostic);
+    expect(() =>
+      assertSafetyDiagnosticCausalChains(advancedHead, SESSION_ID),
+    ).not.toThrow();
+
+    const unrelated = makeDatabase();
+    unrelated.permits.push({
+      ...unrelated.permits[0]!,
+      permitId: "permit_unrelated",
+      dependencySetHash: sha256Digest("unrelated dependency set"),
+      jointValidityCertificateId: "jvc_unrelated",
+    });
+    unrelated.diagnostics.push({
+      ...diagnostic,
+      artifactRefs: [
+        { kind: "VALIDATION", id: "validation_current" },
+        { kind: "PERMIT", id: "permit_unrelated" },
+      ],
+    });
+
+    expect(() => snapshot(unrelated)).toThrowError(SessionViewBuilderError);
+  });
+
+  it("rejects an old claimed Attempt when the active pointer names the rerun", () => {
+    const database = makeReobservingDatabase();
+    database.refreshPlans[0]!.claimedAttemptId = attemptId("budget");
+
+    expect(() => snapshot(database)).toThrowError(SessionViewBuilderError);
+  });
+
+  it("rejects a claimed Attempt from another action", () => {
+    const database = makeReobservingDatabase();
+    const activeAttempt = database.attempts.find(
+      (attempt) => attempt.attemptId === attemptId("budget", 2),
+    )!;
+    database.attempts.push({
+      ...activeAttempt,
+      attemptId: "attempt_budget_cross_action",
+      actionHash: sha256Digest("different action"),
+    });
+    database.refreshPlans[0]!.claimedAttemptId = "attempt_budget_cross_action";
+
+    expect(() => snapshot(database)).toThrowError(SessionViewBuilderError);
+  });
+
+  it("rejects a claimed Attempt with a cross-role owner binding", () => {
+    const database = makeReobservingDatabase();
+    const activeAttempt = database.attempts.find(
+      (attempt) => attempt.attemptId === attemptId("budget", 2),
+    )!;
+    database.attempts.push({
+      ...activeAttempt,
+      attemptId: "attempt_budget_cross_role",
+      role: "inventory",
+    });
+    database.refreshPlans[0]!.claimedAttemptId = "attempt_budget_cross_role";
+
+    expect(() => snapshot(database)).toThrowError(SessionViewBuilderError);
+  });
 });
 
 describe("fixed redaction boundary", () => {
+  it("redacts a bare GitHub PAT from an Agent display name", () => {
+    const database = makeDatabase();
+    const secret = `ghp_${"Ab3Cd5Ef7Gh9Jk2Mn4Pq6Rs8Tu0Vw1Xy"}`;
+    database.runAssignments[0]!.agentNameAtAssignment = secret;
+
+    const result = snapshot(database);
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(result.agents[0]!.agentNameAtAssignment).toBe("inventory Agent");
+  });
+
+  it("redacts a github_pat token from a runtime label", () => {
+    const database = makeDatabase();
+    const secret = `github_pat_${"Ab1_Cd2_Ef3_Gh4_Jk5_Mn6_Pq7_Rs8"}`;
+    database.runAssignments[1]!.runtimeLabelAtDispatch = secret;
+
+    const result = snapshot(database);
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(result.agents[1]!.activeDecision?.runtimeProof.runtimeLabel).toBe(
+      "redacted-runtime",
+    );
+  });
+
+  it("redacts a Bearer credential from a thread field", () => {
+    const database = makeDatabase();
+    const secret = "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJlZzA1In0.signature";
+    database.attempts[2]!.threadId = secret;
+
+    const result = snapshot(database);
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(result.agents[2]!.activeDecision?.runtimeProof.threadId).toBeNull();
+  });
+
+  it("redacts private-key material from an event token", () => {
+    const database = makeDatabase();
+    const secret = "-----BEGIN PRIVATE KEY-----";
+    database.auditEvents[0]!.type = secret;
+
+    const result = snapshot(database);
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(result.events[0]!.type).toBe("EVENT");
+  });
+
+  it("redacts an unknown high-entropy value from an event status", () => {
+    const database = makeDatabase();
+    const secret = "aB3dE5fG7hJ9kL2mN4pQ6rS8tV0wX1yZ";
+    database.auditEvents[0]!.status = secret;
+
+    const result = snapshot(database);
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(result.events[0]!.status).toBe("REDACTED");
+  });
+
   it("keeps secrets, env dumps, absolute paths, prompts, and raw output out", () => {
     const database = makeDatabase();
     database.runAssignments[0]!.agentNameAtAssignment =

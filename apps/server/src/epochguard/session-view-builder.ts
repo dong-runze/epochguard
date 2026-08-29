@@ -147,7 +147,12 @@ const SENSITIVE_TEXT_PATTERNS = [
   /\b[A-Z][A-Z0-9_]{2,}\s*=\s*\S+/,
   /\bBearer\s+[A-Za-z0-9._~+\/-]+/i,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-  /\bsk-[A-Za-z0-9_-]{8,}/,
+  /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/i,
+  /\bsk-(?:proj-|svcacct-|ant-)?[A-Za-z0-9_-]{8,}/i,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/,
+  /\bAIza[A-Za-z0-9_-]{30,}\b/,
+  /\bLTAI[A-Za-z0-9]{16,}\b/,
+  /\b(?:xox[baprs]-|glpat-|npm_|hf_|sk_live_|rk_live_)[A-Za-z0-9_-]{12,}\b/i,
   /\bprocess\.env\b/i,
   /<EPOCH_DECISION>/i,
   /\bYou are the (?:Inventory|Budget|Policy) Agent\b/i,
@@ -156,16 +161,67 @@ const SENSITIVE_TEXT_PATTERNS = [
   /\b(?:RAW_PROMPT|RAW_OUTPUT|ENV_DUMP|ABSOLUTE_PATH|SECRET|API_KEY)_SENTINEL\b/i,
 ] as const;
 
+function tokenEntropy(value: string): number {
+  const frequencies = new Map<string, number>();
+  for (const character of value) {
+    frequencies.set(character, (frequencies.get(character) ?? 0) + 1);
+  }
+  let entropy = 0;
+  for (const count of frequencies.values()) {
+    const probability = count / value.length;
+    entropy -= probability * Math.log2(probability);
+  }
+  return entropy;
+}
+
+function isKnownStructuredToken(
+  value: string,
+  containingValue: string,
+  offset: number,
+): boolean {
+  if (/^[0-9A-HJKMNP-TV-Z]{26}$/.test(value)) return true;
+  if (/^[0-9a-f]{64}$/i.test(value)) {
+    return containingValue.slice(Math.max(0, offset - 7), offset) === "sha256:";
+  }
+  return false;
+}
+
+function containsHighEntropySecret(value: string): boolean {
+  for (const match of value.matchAll(/[A-Za-z0-9+_=-]{24,}/g)) {
+    const token = match[0];
+    const offset = match.index ?? 0;
+    if (isKnownStructuredToken(token, value, offset)) continue;
+    const characterClasses = [
+      /[a-z]/.test(token),
+      /[A-Z]/.test(token),
+      /[0-9]/.test(token),
+      /[+_=-]/.test(token),
+    ].filter(Boolean).length;
+    const entropy = tokenEntropy(token);
+    if (
+      (characterClasses >= 3 && entropy >= 3.25) ||
+      (characterClasses >= 2 && entropy >= 4.25)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function containsSensitiveText(value: string): boolean {
-  return SENSITIVE_TEXT_PATTERNS.some((pattern) => pattern.test(value));
+  return (
+    SENSITIVE_TEXT_PATTERNS.some((pattern) => pattern.test(value)) ||
+    containsHighEntropySecret(value)
+  );
 }
 
 function sanitizeDisplayText(value: string, fallback: string): string {
   const normalized = value.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
   if (
     normalized.length === 0 ||
-    normalized.length > 500 ||
-    containsSensitiveText(normalized)
+    normalized.length > 256 ||
+    containsSensitiveText(normalized) ||
+    !/^[\p{L}\p{N}][\p{L}\p{N} ._():+&-]*$/u.test(normalized)
   ) {
     return fallback;
   }
@@ -196,28 +252,28 @@ function sanitizeThreadId(value: string | null): string | null {
 function assertSnapshotContainsNoSensitiveMaterial(
   snapshot: SessionDashboardSnapshot,
 ): void {
-  const visit = (value: unknown, key: string | null): void => {
+  const visit = (value: unknown, path: string): void => {
     if (typeof value === "string") {
-      if (key !== "evidencePackRelativePath" && containsSensitiveText(value)) {
+      if (containsSensitiveText(value)) {
         projectionFailure(
           snapshot.sessionId,
           snapshot.snapshotRevision,
-          "Dashboard projection contains sensitive or untrusted text.",
+          `Dashboard projection field ${path} contains sensitive or untrusted text.`,
         );
       }
       return;
     }
     if (Array.isArray(value)) {
-      value.forEach((item) => visit(item, key));
+      value.forEach((item, index) => visit(item, `${path}[${index}]`));
       return;
     }
     if (value !== null && typeof value === "object") {
-      for (const [childKey, childValue] of Object.entries(value)) {
-        visit(childValue, childKey);
+      for (const [key, childValue] of Object.entries(value)) {
+        visit(childValue, `${path}.${key}`);
       }
     }
   };
-  visit(snapshot, null);
+  visit(snapshot, "snapshot");
 }
 
 function parseDatabase(input: unknown, sessionId: string): EpochDatabase {
@@ -1107,19 +1163,41 @@ function buildRefreshPlan(
     );
   }
   if (plan.status === "CLAIMED") {
-    if (
-      plan.claimedAttemptId === null ||
-      !database.attempts.some(
-        (attempt) =>
-          attempt.attemptId === plan.claimedAttemptId &&
-          attempt.sessionId === session.sessionId &&
-          plan.agentIds.includes(attempt.agentId),
-      )
-    ) {
+    if (plan.claimedAttemptId === null) {
       projectionFailure(
         session.sessionId,
         database.snapshotRevision,
         "Claimed RefreshPlan is missing its owner Attempt.",
+      );
+    }
+    const claimedAttempt = unique(
+      database.attempts,
+      (attempt) => attempt.attemptId === plan.claimedAttemptId,
+      session.sessionId,
+      database.snapshotRevision,
+      "claimed RefreshPlan Attempt",
+    );
+    const expectedAgentId =
+      session.frozenAssignments[ROLE_ASSIGNMENT_KEYS[claimedAttempt.role]];
+    const projectedOwner = agents.find(
+      (agent) =>
+        agent.role === claimedAttempt.role &&
+        agent.agentId === claimedAttempt.agentId,
+    );
+    if (
+      claimedAttempt.sessionId !== session.sessionId ||
+      claimedAttempt.actionHash !== session.actionHash ||
+      claimedAttempt.agentId !== expectedAgentId ||
+      claimedAttempt.status === "ACCEPTED" ||
+      !plan.agentIds.includes(claimedAttempt.agentId) ||
+      session.activeAttemptIds[claimedAttempt.role] !==
+        claimedAttempt.attemptId ||
+      projectedOwner?.inFlightAttempt?.attemptId !== claimedAttempt.attemptId
+    ) {
+      projectionFailure(
+        session.sessionId,
+        database.snapshotRevision,
+        "Claimed RefreshPlan Attempt is not the active in-flight owner Attempt.",
       );
     }
   } else if (plan.status === "AVAILABLE" && plan.claimedAttemptId !== null) {
