@@ -10,6 +10,7 @@ import {
   ARTIFACT_REF_KINDS,
   ARTIFACT_REF_TARGETS,
   ActionIntentSchema,
+  AgentAttemptSchema,
   ApiErrorBodySchema,
   ArtifactRefSchema,
   CommitSessionRequestSchema,
@@ -70,6 +71,13 @@ function mutableClone<T>(value: T): any {
   return structuredClone(value) as any;
 }
 
+function localPropertySchema(schema: any, propertyName: string): any {
+  const property = schema.properties[propertyName];
+  if (typeof property?.$ref !== "string") return property;
+  const definitionName = property.$ref.split("/").at(-1);
+  return schema.$defs[definitionName];
+}
+
 function expectSnapshotRejected(candidate: unknown): void {
   let serverResult: ReturnType<
     typeof SessionDashboardSnapshotSchema.safeParse
@@ -88,10 +96,13 @@ function expectSnapshotRejected(candidate: unknown): void {
 }
 
 function expectSnapshotAccepted(candidate: unknown): void {
-  expect(SessionDashboardSnapshotSchema.safeParse(candidate).success).toBe(true);
-  expect(webContracts.safeDecodeSessionDashboardSnapshot(candidate).success).toBe(
-    true,
-  );
+  const serverResult = SessionDashboardSnapshotSchema.safeParse(candidate);
+  const webResult = webContracts.safeDecodeSessionDashboardSnapshot(candidate);
+  expect(serverResult.success).toBe(true);
+  expect(webResult.success).toBe(true);
+  if (!serverResult.success || !webResult.success) return;
+  expect(webResult.data).toEqual(serverResult.data);
+  expect(serverResult.data).toEqual(candidate);
 }
 
 function makeEqualBoundaryNoCutSnapshot(): any {
@@ -232,12 +243,22 @@ function makeHistoricalRefreshInProgressSnapshot(): any {
 function makeCanonicalTieNoCutSnapshot(): any {
   const snapshot = makeEqualBoundaryNoCutSnapshot();
   const inventoryReceipt = snapshot.agents[0].activeDecision.receipt;
+  const policyReceipt = snapshot.agents[2].activeDecision.receipt;
   inventoryReceipt.sourceRevision = 20;
   inventoryReceipt.observedAtSeq = 20;
   inventoryReceipt.validFromSeq = 20;
+  inventoryReceipt.receiptId = "receipt_z_inventory_tie";
+  policyReceipt.receiptId = "receipt_a_policy_tie";
+  snapshot.jointValidity.noCutProof.dependencySetHash = sha256Digest(
+    canonicalJson(
+      snapshot.agents
+        .map((agent: any) => agent.activeDecision.receipt.receiptId)
+        .sort(),
+    ),
+  );
   snapshot.jointValidity.noCutProof.witness[1] = {
-    role: "inventory",
-    receiptId: inventoryReceipt.receiptId,
+    role: "policy",
+    receiptId: policyReceipt.receiptId,
     from: 20,
     until: null,
   };
@@ -293,6 +314,51 @@ function makePartialCollectingSnapshot(): any {
   return snapshot;
 }
 
+function makeReversePartialCollectingSnapshot(): any {
+  const snapshot = makeTwoOwnerRefreshInProgressSnapshot();
+  snapshot.sessionState = "COLLECTING";
+  snapshot.gate = {
+    state: "WAITING",
+    reasonCode: null,
+    effectsInSession: 0,
+    permitId: null,
+    effectId: null,
+  };
+  replaceActiveDecisionWithCurrent(snapshot, 2);
+  snapshot.jointValidity = {
+    state: "PENDING",
+    lowerBound: null,
+    upperBound: null,
+    currentHeadCovered: null,
+    noCutProof: null,
+  };
+  snapshot.availableActions = [];
+  return snapshot;
+}
+
+function makeThreeOwnerRefreshInProgressSnapshot(): any {
+  const snapshot = makeTwoOwnerRefreshInProgressSnapshot();
+  snapshot.refreshPlan.agentIds = [
+    "agent_inventory",
+    "agent_budget",
+    "agent_policy",
+  ];
+  snapshot.metrics.rerunsAvoided = 0;
+  snapshot.agents[0].runCount = 2;
+  snapshot.agents[0].activeDecision.evidenceState = "INVALID_AT_HEAD";
+  snapshot.agents[0].activeDecision.receipt.validUntilSeq = snapshot.worldHead;
+  snapshot.agents[0].inFlightAttempt = {
+    attemptId: "attempt_inventory_2",
+    assignmentId: "assignment_inventory_2",
+    runId: "run_inventory_2",
+    status: "RUNNING",
+    runStartedAt: "2026-08-29T12:00:01.000Z",
+    runCompletedAt: null,
+  };
+  snapshot.metrics.reobservedAgents = 3;
+  return snapshot;
+}
+
 function makeRefreshValidatingSnapshot(): any {
   const snapshot = mutableClone(RECOVERED_GOLDEN_SNAPSHOT);
   snapshot.sessionState = "VALIDATING";
@@ -335,18 +401,74 @@ function makeInitialValidatingSnapshot(): any {
   return snapshot;
 }
 
+function makeInitialImpossibleValidatingSnapshot(): any {
+  const snapshot = mutableClone(IMPOSSIBLE_GOLDEN_SNAPSHOT);
+  snapshot.sessionState = "VALIDATING";
+  snapshot.gate = {
+    state: "CHECKING",
+    reasonCode: null,
+    effectsInSession: 0,
+    permitId: null,
+    effectId: null,
+  };
+  snapshot.jointValidity = {
+    state: "PENDING",
+    lowerBound: null,
+    upperBound: null,
+    currentHeadCovered: null,
+    noCutProof: null,
+  };
+  snapshot.refreshPlan = null;
+  snapshot.metrics.rerunsAvoided = 0;
+  snapshot.availableActions = [];
+  return snapshot;
+}
+
+function makeTerminalClaimedSnapshot(
+  sessionState: "FAILED" | "INTERRUPTED" = "FAILED",
+  attemptStatus: "FAILED" | "INTERRUPTED" | "OUTPUT_REJECTED" = "FAILED",
+): any {
+  const snapshot = makeRefreshInProgressSnapshot();
+  snapshot.sessionState = sessionState;
+  snapshot.gate.reasonCode = "RUN_FAILED";
+  snapshot.agents[1].inFlightAttempt.status = attemptStatus;
+  snapshot.agents[1].inFlightAttempt.runCompletedAt =
+    "2026-08-29T12:00:02.000Z";
+  return snapshot;
+}
+
+function makePersistedAttempt(status: string): any {
+  return {
+    attemptId: `attempt_${status.toLowerCase()}`,
+    sessionId: "session_attempt_timeline",
+    actionHash: GOLDEN_ACTION_HASH,
+    role: "budget",
+    agentId: "agent_budget",
+    assignmentId: `assignment_${status.toLowerCase()}`,
+    runId: null,
+    status,
+    runStartedAt: null,
+    runCompletedAt: null,
+    threadId: null,
+    usage: null,
+    outputDigest: null,
+  };
+}
+
 describe("EpochGuard frozen contract", () => {
-  it("freezes v5 over complete JSON Schemas, invariants, fixtures, and Snapshots", () => {
-    expect(CONTRACT_VERSION).toBe("epochguard-contract-v5");
+  it("freezes v6 over complete JSON Schemas, invariants, fixtures, and Snapshots", () => {
+    expect(CONTRACT_VERSION).toBe("epochguard-contract-v6");
     expect(CONTRACT_DIGEST).toBe(
-      "sha256:da04cd74212dc564efd3349790d64f27691bd8a2b073d9663949e322da7b5ae8",
+      "sha256:5bdce49d3daa3764bbc67dcafb26c231b328d92b184e59e56d01a90eddc59dbf",
     );
     expect(computeContractDigest()).toBe(CONTRACT_DIGEST);
     expect(computeContractDigest(CONTRACT_MANIFEST)).toBe(CONTRACT_DIGEST);
 
     const document = buildContractDigestDocument() as any;
     expect(document.algorithm).toEqual(CONTRACT_DIGEST_ALGORITHM);
-    expect(document.schemas.AgentAttempt.properties.threadId.anyOf).toEqual(
+    expect(
+      localPropertySchema(document.schemas.AgentAttempt, "threadId").anyOf,
+    ).toEqual(
       expect.arrayContaining([{ type: "null" }]),
     );
     expect(document.schemas.CreateSessionRequest.additionalProperties).toBe(false);
@@ -354,7 +476,7 @@ describe("EpochGuard frozen contract", () => {
     expect(document.schemas.RefreshPlanReasonCode.enum).toEqual(
       REFRESH_PLAN_REASON_CODES,
     );
-    expect(CONTRACT_SEMANTIC_INVARIANTS).toHaveLength(29);
+    expect(CONTRACT_SEMANTIC_INVARIANTS).toHaveLength(32);
     expect(document.semanticInvariants).toEqual(CONTRACT_SEMANTIC_INVARIANTS);
     expect(document.authoritativeSnapshotProjectionRules).toEqual(
       AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES,
@@ -376,7 +498,10 @@ describe("EpochGuard frozen contract", () => {
 
   it("changes digest for nested nullability, command DTO, enum/invariant, or fixture mutations", () => {
     const nestedNullability = mutableClone(CONTRACT_MANIFEST);
-    nestedNullability.schemas.AgentAttempt.properties.threadId.anyOf.pop();
+    localPropertySchema(
+      nestedNullability.schemas.AgentAttempt,
+      "threadId",
+    ).anyOf.pop();
     const commandDto = mutableClone(CONTRACT_MANIFEST);
     commandDto.schemas.CreateSessionRequest.$defs.__schema1.required.pop();
     const enumValue = mutableClone(CONTRACT_MANIFEST);
@@ -478,6 +603,205 @@ describe("EpochGuard frozen contract", () => {
       }).not.toThrow();
       expect(serverResult?.success, JSON.stringify(mutation)).toBe(false);
       expect(webResult?.success, JSON.stringify(mutation)).toBe(false);
+    }
+  });
+
+  it("binds persisted and dashboard Attempt status to exact Run timeline evidence", () => {
+    const started = "2026-08-29T12:00:01.000Z";
+    const completed = "2026-08-29T12:00:02.000Z";
+    const persistedPositives = [
+      makePersistedAttempt("ASSIGNMENT_CREATED"),
+      makePersistedAttempt("DISPATCHING"),
+      { ...makePersistedAttempt("QUEUED"), runId: "run_queued" },
+      {
+        ...makePersistedAttempt("RUNNING"),
+        runId: "run_running",
+        runStartedAt: started,
+      },
+      ...["COMPLETED", "OUTPUT_REJECTED", "ACCEPTED"].map((status) => ({
+        ...makePersistedAttempt(status),
+        runId: `run_${status.toLowerCase()}`,
+        runStartedAt: started,
+        runCompletedAt: completed,
+      })),
+      makePersistedAttempt("FAILED"),
+      {
+        ...makePersistedAttempt("FAILED"),
+        runId: "run_failed_queued",
+        runCompletedAt: completed,
+      },
+      {
+        ...makePersistedAttempt("FAILED"),
+        runId: "run_failed_running",
+        runStartedAt: started,
+        runCompletedAt: completed,
+      },
+      makePersistedAttempt("INTERRUPTED"),
+      {
+        ...makePersistedAttempt("INTERRUPTED"),
+        runId: "run_interrupted_restart",
+        runCompletedAt: completed,
+      },
+      {
+        ...makePersistedAttempt("INTERRUPTED"),
+        runId: "run_interrupted_running",
+        runStartedAt: started,
+        runCompletedAt: completed,
+      },
+    ];
+    for (const attempt of persistedPositives) {
+      expect(AgentAttemptSchema.safeParse(attempt).success, attempt.status).toBe(
+        true,
+      );
+    }
+
+    const persistedNegatives = [
+      { ...makePersistedAttempt("ASSIGNMENT_CREATED"), runId: "run_too_early" },
+      { ...makePersistedAttempt("DISPATCHING"), runStartedAt: started },
+      makePersistedAttempt("QUEUED"),
+      {
+        ...makePersistedAttempt("QUEUED"),
+        runId: "run_queued_completed",
+        runCompletedAt: completed,
+      },
+      { ...makePersistedAttempt("RUNNING"), runId: "run_no_start" },
+      {
+        ...makePersistedAttempt("RUNNING"),
+        runId: "run_running_completed",
+        runStartedAt: started,
+        runCompletedAt: completed,
+      },
+      {
+        ...makePersistedAttempt("COMPLETED"),
+        runId: "run_completed_no_start",
+        runCompletedAt: completed,
+      },
+      {
+        ...makePersistedAttempt("OUTPUT_REJECTED"),
+        runId: "run_rejected_no_completion",
+        runStartedAt: started,
+      },
+      { ...makePersistedAttempt("FAILED"), runCompletedAt: completed },
+      {
+        ...makePersistedAttempt("INTERRUPTED"),
+        runId: "run_interrupted_without_completion",
+        runStartedAt: started,
+      },
+      {
+        ...makePersistedAttempt("ACCEPTED"),
+        runId: "run_reversed",
+        runStartedAt: completed,
+        runCompletedAt: started,
+      },
+    ];
+    for (const attempt of persistedNegatives) {
+      expect(AgentAttemptSchema.safeParse(attempt).success, attempt.status).toBe(
+        false,
+      );
+    }
+
+    const activeTimelinePositives = [
+      {
+        status: "ASSIGNMENT_CREATED",
+        runId: null,
+        runStartedAt: null,
+        runCompletedAt: null,
+      },
+      {
+        status: "DISPATCHING",
+        runId: null,
+        runStartedAt: null,
+        runCompletedAt: null,
+      },
+      {
+        status: "QUEUED",
+        runId: "run_budget_2",
+        runStartedAt: null,
+        runCompletedAt: null,
+      },
+      {
+        status: "RUNNING",
+        runId: "run_budget_2",
+        runStartedAt: started,
+        runCompletedAt: null,
+      },
+    ];
+    for (const timeline of activeTimelinePositives) {
+      const snapshot = makeRefreshInProgressSnapshot();
+      Object.assign(snapshot.agents[1].inFlightAttempt, timeline);
+      expectSnapshotAccepted(snapshot);
+    }
+
+    const preBindTerminal = makeTerminalClaimedSnapshot();
+    Object.assign(preBindTerminal.agents[1].inFlightAttempt, {
+      runId: null,
+      runStartedAt: null,
+      runCompletedAt: null,
+    });
+    const queuedCancelInterrupted = makeTerminalClaimedSnapshot(
+      "INTERRUPTED",
+      "INTERRUPTED",
+    );
+    Object.assign(queuedCancelInterrupted.agents[1].inFlightAttempt, {
+      runId: "run_budget_2",
+      runStartedAt: null,
+      runCompletedAt: completed,
+    });
+    const runningTerminal = makeTerminalClaimedSnapshot();
+    const rejectedTerminal = makeTerminalClaimedSnapshot(
+      "FAILED",
+      "OUTPUT_REJECTED",
+    );
+    for (const snapshot of [
+      preBindTerminal,
+      queuedCancelInterrupted,
+      runningTerminal,
+      rejectedTerminal,
+    ]) {
+      expectSnapshotAccepted(snapshot);
+    }
+
+    const dashboardTimelineNegatives = [
+      {
+        status: "ASSIGNMENT_CREATED",
+        runId: "run_budget_2",
+        runStartedAt: null,
+        runCompletedAt: null,
+      },
+      {
+        status: "QUEUED",
+        runId: null,
+        runStartedAt: null,
+        runCompletedAt: null,
+      },
+      {
+        status: "RUNNING",
+        runId: "run_budget_2",
+        runStartedAt: null,
+        runCompletedAt: null,
+      },
+      {
+        status: "RUNNING",
+        runId: "run_budget_2",
+        runStartedAt: completed,
+        runCompletedAt: started,
+      },
+    ].map((timeline) => {
+      const snapshot = makeRefreshInProgressSnapshot();
+      Object.assign(snapshot.agents[1].inFlightAttempt, timeline);
+      return snapshot;
+    });
+    const invalidTerminalTimeline = makeTerminalClaimedSnapshot();
+    Object.assign(invalidTerminalTimeline.agents[1].inFlightAttempt, {
+      runId: null,
+      runStartedAt: null,
+      runCompletedAt: completed,
+    });
+    for (const snapshot of [
+      ...dashboardTimelineNegatives,
+      invalidTerminalTimeline,
+    ]) {
+      expectSnapshotRejected(snapshot);
     }
   });
 
@@ -837,9 +1161,10 @@ describe("EpochGuard frozen contract", () => {
     reversedReceiptInterval.jointValidity.noCutProof.upperBound = 19;
     reversedReceiptInterval.jointValidity.noCutProof.witness[0].until = 19;
 
-    const futureClosedReceipt = mutableClone(NORMAL_READY_GOLDEN_SNAPSHOT);
-    futureClosedReceipt.agents[0].activeDecision.receipt.validUntilSeq =
-      futureClosedReceipt.worldHead + 2;
+    const futureClosedReceipt = makeInitialImpossibleValidatingSnapshot();
+    futureClosedReceipt.agents[1].activeDecision.receipt.validUntilSeq =
+      futureClosedReceipt.worldHead + 1;
+    futureClosedReceipt.agents[1].activeDecision.evidenceState = "CURRENT";
 
     for (const candidate of [
       observedAfterHead,
@@ -851,6 +1176,12 @@ describe("EpochGuard frozen contract", () => {
       expectSnapshotRejected(candidate);
     }
     expectSnapshotAccepted(makeEqualBoundaryNoCutSnapshot());
+
+    const finiteExactlyAtHead = makeInitialImpossibleValidatingSnapshot();
+    finiteExactlyAtHead.agents[1].activeDecision.receipt.validUntilSeq =
+      finiteExactlyAtHead.worldHead;
+    expectSnapshotAccepted(finiteExactlyAtHead);
+    expectSnapshotAccepted(makeInitialValidatingSnapshot());
   });
 
   it("rejects reused Decision and in-flight IDs within each identity namespace", () => {
@@ -1051,39 +1382,70 @@ describe("EpochGuard frozen contract", () => {
     expectSnapshotAccepted(canonicalTie);
     expect(canonicalTie.jointValidity.noCutProof.witness).toMatchObject([
       { role: "budget", receiptId: "receipt_budget_1", until: 20 },
-      { role: "inventory", receiptId: "receipt_inventory_1", from: 20 },
+      { role: "policy", receiptId: "receipt_a_policy_tie", from: 20 },
     ]);
+    expect(
+      canonicalTie.agents.findIndex(
+        (agent: any) => agent.role === "policy",
+      ),
+    ).toBeGreaterThan(
+      canonicalTie.agents.findIndex(
+        (agent: any) => agent.role === "inventory",
+      ),
+    );
 
     const nonCanonicalTie = mutableClone(canonicalTie);
-    const policyReceipt = nonCanonicalTie.agents[2].activeDecision.receipt;
+    const inventoryReceipt = nonCanonicalTie.agents[0].activeDecision.receipt;
     nonCanonicalTie.jointValidity.noCutProof.witness[1] = {
-      role: "policy",
-      receiptId: policyReceipt.receiptId,
-      from: policyReceipt.validFromSeq,
-      until: policyReceipt.validUntilSeq,
+      role: "inventory",
+      receiptId: inventoryReceipt.receiptId,
+      from: inventoryReceipt.validFromSeq,
+      until: inventoryReceipt.validUntilSeq,
     };
     expectSnapshotRejected(nonCanonicalTie);
 
     const earliestEndTie = mutableClone(IMPOSSIBLE_GOLDEN_SNAPSHOT);
     earliestEndTie.agents[0].activeDecision.receipt.validUntilSeq = 20;
     earliestEndTie.agents[0].activeDecision.evidenceState = "INVALID_AT_HEAD";
+    earliestEndTie.agents[0].activeDecision.receipt.receiptId =
+      "receipt_z_inventory_end_tie";
+    earliestEndTie.agents[1].activeDecision.receipt.receiptId =
+      "receipt_a_budget_end_tie";
+    earliestEndTie.jointValidity.noCutProof.dependencySetHash = sha256Digest(
+      canonicalJson(
+        earliestEndTie.agents
+          .map((agent: any) => agent.activeDecision.receipt.receiptId)
+          .sort(),
+      ),
+    );
+    earliestEndTie.jointValidity.noCutProof.witness[0].receiptId =
+      "receipt_a_budget_end_tie";
     earliestEndTie.refreshPlan.agentIds = ["agent_inventory", "agent_budget"];
     earliestEndTie.metrics.rerunsAvoided = 1;
     expectSnapshotAccepted(earliestEndTie);
+    expect(
+      earliestEndTie.agents.findIndex(
+        (agent: any) => agent.role === "budget",
+      ),
+    ).toBeGreaterThan(
+      earliestEndTie.agents.findIndex(
+        (agent: any) => agent.role === "inventory",
+      ),
+    );
 
     const nonCanonicalEarliestEnd = mutableClone(earliestEndTie);
-    const inventoryReceipt =
+    const earliestInventoryReceipt =
       nonCanonicalEarliestEnd.agents[0].activeDecision.receipt;
     nonCanonicalEarliestEnd.jointValidity.noCutProof.witness[0] = {
       role: "inventory",
-      receiptId: inventoryReceipt.receiptId,
-      from: inventoryReceipt.validFromSeq,
-      until: inventoryReceipt.validUntilSeq,
+      receiptId: earliestInventoryReceipt.receiptId,
+      from: earliestInventoryReceipt.validFromSeq,
+      until: earliestInventoryReceipt.validUntilSeq,
     };
     expectSnapshotRejected(nonCanonicalEarliestEnd);
   });
 
-  it("accepts the v5 refresh lifecycle through partial collection, validation, and commit", () => {
+  it("accepts the v6 refresh lifecycle through partial collection, validation, and commit", () => {
     const reobserving = makeRefreshInProgressSnapshot();
     const twoOwnerReobserving = makeTwoOwnerRefreshInProgressSnapshot();
     const historicalReobserving = makeHistoricalRefreshInProgressSnapshot();
@@ -1091,8 +1453,28 @@ describe("EpochGuard frozen contract", () => {
     collecting.sessionState = "COLLECTING";
     collecting.gate.state = "WAITING";
     const partialCollecting = makePartialCollectingSnapshot();
+    const reversePartialCollecting = makeReversePartialCollectingSnapshot();
+    const threeOwnerCollecting = makeThreeOwnerRefreshInProgressSnapshot();
+    threeOwnerCollecting.sessionState = "COLLECTING";
+    threeOwnerCollecting.gate.state = "WAITING";
+    const threeOwnerOneCompleted = mutableClone(threeOwnerCollecting);
+    replaceActiveDecisionWithCurrent(threeOwnerOneCompleted, 1);
+    threeOwnerOneCompleted.gate.reasonCode = null;
+    threeOwnerOneCompleted.jointValidity = {
+      state: "PENDING",
+      lowerBound: null,
+      upperBound: null,
+      currentHeadCovered: null,
+      noCutProof: null,
+    };
+    const threeOwnerTwoCompleted = mutableClone(threeOwnerOneCompleted);
+    replaceActiveDecisionWithCurrent(threeOwnerTwoCompleted, 2);
     const validating = makeRefreshValidatingSnapshot();
     const initialValidating = makeInitialValidatingSnapshot();
+    const initialImpossibleValidating = makeInitialImpossibleValidatingSnapshot();
+    const initialCollecting = makeInitialImpossibleValidatingSnapshot();
+    initialCollecting.sessionState = "COLLECTING";
+    initialCollecting.gate.state = "WAITING";
 
     const ready = makeRefreshReadySnapshot();
     const committing = mutableClone(ready);
@@ -1140,8 +1522,14 @@ describe("EpochGuard frozen contract", () => {
       historicalReobserving,
       collecting,
       partialCollecting,
+      reversePartialCollecting,
+      threeOwnerCollecting,
+      threeOwnerOneCompleted,
+      threeOwnerTwoCompleted,
       validating,
       initialValidating,
+      initialImpossibleValidating,
+      initialCollecting,
       ready,
       committing,
       committed,
@@ -1189,8 +1577,213 @@ describe("EpochGuard frozen contract", () => {
       true,
     );
     expect(initialValidating.refreshPlan).toBeNull();
+    expect(initialImpossibleValidating).toMatchObject({
+      sessionState: "VALIDATING",
+      refreshPlan: null,
+      jointValidity: { state: "PENDING" },
+    });
     expect(committing.gate.effectsInSession).toBe(0);
     expect(committed.gate.effectsInSession).toBe(1);
+  });
+
+  it("rejects all audited VALIDATING and partial-COLLECTING fail-open projections", () => {
+    const validatingWrongGate = makeInitialValidatingSnapshot();
+    validatingWrongGate.gate.state = "WAITING";
+
+    const validatingValidCurrent = makeInitialValidatingSnapshot();
+    validatingValidCurrent.jointValidity = mutableClone(
+      NORMAL_READY_GOLDEN_SNAPSHOT.jointValidity,
+    );
+
+    const validatingWithAttempt = makeRefreshValidatingSnapshot();
+    validatingWithAttempt.agents[1].inFlightAttempt = {
+      attemptId: "attempt_budget_3",
+      assignmentId: "assignment_budget_3",
+      runId: "run_budget_3",
+      status: "RUNNING",
+      runStartedAt: "2026-08-29T12:00:03.000Z",
+      runCompletedAt: null,
+    };
+
+    const validatingWithTwoDecisions = makeInitialValidatingSnapshot();
+    validatingWithTwoDecisions.agents[2].activeDecision = null;
+    validatingWithTwoDecisions.metrics.activeDecisions = 2;
+    validatingWithTwoDecisions.metrics.allowDecisions = 2;
+
+    const reobservedInitialWithoutPlan = makeInitialValidatingSnapshot();
+    reobservedInitialWithoutPlan.agents[1].runCount = 2;
+    reobservedInitialWithoutPlan.metrics.reobservedAgents = 1;
+
+    const deletedCompletedPlan = makeRefreshValidatingSnapshot();
+    deletedCompletedPlan.refreshPlan = null;
+    deletedCompletedPlan.metrics.rerunsAvoided = 0;
+
+    const refreshedOwnerNotCurrent = makeRefreshValidatingSnapshot();
+    refreshedOwnerNotCurrent.agents[1].activeDecision.evidenceState = "RETAINED";
+
+    const collectingPlanDeleted = makePartialCollectingSnapshot();
+    collectingPlanDeleted.refreshPlan = null;
+    collectingPlanDeleted.metrics.rerunsAvoided = 0;
+
+    const collectingCompletedOwnerDropped = makePartialCollectingSnapshot();
+    collectingCompletedOwnerDropped.refreshPlan.agentIds = ["agent_policy"];
+    collectingCompletedOwnerDropped.metrics.rerunsAvoided = 2;
+
+    const collectingStaleProofAfterCompletion = makePartialCollectingSnapshot();
+    const partialReceiptIds = collectingStaleProofAfterCompletion.agents
+      .map((agent: any) => agent.activeDecision.receipt.receiptId)
+      .sort();
+    collectingStaleProofAfterCompletion.gate.reasonCode =
+      "NO_VALID_OBSERVED_WORLD_CUT";
+    collectingStaleProofAfterCompletion.jointValidity = {
+      state: "NO_CUT",
+      lowerBound: 21,
+      upperBound: 21,
+      currentHeadCovered: false,
+      noCutProof: {
+        proofId: "proof_partial_stale",
+        dependencySetHash: sha256Digest(canonicalJson(partialReceiptIds)),
+        lowerBound: 21,
+        upperBound: 21,
+        witness: [
+          {
+            role: "policy",
+            receiptId: "receipt_policy_1",
+            from: 20,
+            until: 21,
+          },
+          {
+            role: "budget",
+            receiptId: "receipt_budget_2",
+            from: 21,
+            until: null,
+          },
+        ],
+      },
+    };
+
+    const collectingCompletedPlan = makePartialCollectingSnapshot();
+    collectingCompletedPlan.refreshPlan.status = "COMPLETED";
+
+    for (const candidate of [
+      validatingWrongGate,
+      validatingValidCurrent,
+      validatingWithAttempt,
+      validatingWithTwoDecisions,
+      reobservedInitialWithoutPlan,
+      deletedCompletedPlan,
+      refreshedOwnerNotCurrent,
+      collectingPlanDeleted,
+      collectingCompletedOwnerDropped,
+      collectingStaleProofAfterCompletion,
+      collectingCompletedPlan,
+    ]) {
+      expectSnapshotRejected(candidate);
+    }
+  });
+
+  it("constrains CLAIMED terminal provenance while preserving partial failure projections", () => {
+    const failedRunning = makeTerminalClaimedSnapshot();
+    const interruptedQueued = makeTerminalClaimedSnapshot(
+      "INTERRUPTED",
+      "INTERRUPTED",
+    );
+    interruptedQueued.agents[1].inFlightAttempt.runStartedAt = null;
+    const partialTerminal = makePartialCollectingSnapshot();
+    partialTerminal.sessionState = "FAILED";
+    partialTerminal.gate.reasonCode = "RUN_FAILED";
+    partialTerminal.agents[2].inFlightAttempt.status = "INTERRUPTED";
+    partialTerminal.agents[2].inFlightAttempt.runCompletedAt =
+      "2026-08-29T12:00:02.000Z";
+
+    const interruptedAfterValidation = makeRefreshValidatingSnapshot();
+    interruptedAfterValidation.sessionState = "INTERRUPTED";
+    interruptedAfterValidation.gate = {
+      state: "LOCKED",
+      reasonCode: null,
+      effectsInSession: 0,
+      permitId: null,
+      effectId: null,
+    };
+
+    for (const snapshot of [
+      failedRunning,
+      interruptedQueued,
+      partialTerminal,
+      interruptedAfterValidation,
+    ]) {
+      expectSnapshotAccepted(snapshot);
+    }
+
+    const terminalRunning = makeTerminalClaimedSnapshot();
+    terminalRunning.agents[1].inFlightAttempt.status = "RUNNING";
+    terminalRunning.agents[1].inFlightAttempt.runCompletedAt = null;
+    const terminalQueued = makeTerminalClaimedSnapshot();
+    Object.assign(terminalQueued.agents[1].inFlightAttempt, {
+      status: "QUEUED",
+      runStartedAt: null,
+      runCompletedAt: null,
+    });
+    const terminalCompleted = makeTerminalClaimedSnapshot();
+    terminalCompleted.agents[1].inFlightAttempt.status = "COMPLETED";
+    const terminalNoAttempt = makeTerminalClaimedSnapshot();
+    terminalNoAttempt.agents[1].inFlightAttempt = null;
+    const terminalWrongOwner = makeTerminalClaimedSnapshot();
+    terminalWrongOwner.refreshPlan.agentIds = ["agent_policy"];
+    const terminalDeletedOldDecision = makeTerminalClaimedSnapshot();
+    terminalDeletedOldDecision.agents[1].activeDecision = null;
+    terminalDeletedOldDecision.metrics.activeDecisions = 2;
+    terminalDeletedOldDecision.metrics.allowDecisions = 2;
+    terminalDeletedOldDecision.jointValidity = {
+      state: "PENDING",
+      lowerBound: null,
+      upperBound: null,
+      currentHeadCovered: null,
+      noCutProof: null,
+    };
+    const terminalReusedAssignment = makeTerminalClaimedSnapshot();
+    terminalReusedAssignment.agents[1].inFlightAttempt.assignmentId =
+      terminalReusedAssignment.agents[1].activeDecision.runtimeProof.assignmentId;
+    const terminalReusedRun = makeTerminalClaimedSnapshot();
+    terminalReusedRun.agents[1].inFlightAttempt.runId =
+      terminalReusedRun.agents[1].activeDecision.runId;
+
+    for (const candidate of [
+      terminalRunning,
+      terminalQueued,
+      terminalCompleted,
+      terminalNoAttempt,
+      terminalWrongOwner,
+      terminalDeletedOldDecision,
+      terminalReusedAssignment,
+      terminalReusedRun,
+    ]) {
+      expectSnapshotRejected(candidate);
+    }
+  });
+
+  it("routes AVAILABLE, CLAIMED, and COMPLETED RefreshPlan states closed", () => {
+    const completedPreRefreshStates = [
+      "CREATED",
+      "DISPATCHING",
+      "REOBSERVING",
+      "COLLECTING",
+      "BLOCKED_NO_CUT",
+      "HISTORICAL_STALE",
+      "UNSTABLE_WORLD",
+    ];
+    for (const sessionState of completedPreRefreshStates) {
+      const candidate = makeRefreshValidatingSnapshot();
+      candidate.sessionState = sessionState;
+      expectSnapshotRejected(candidate);
+    }
+
+    const availableOutsideBlocked = makeRefreshValidatingSnapshot();
+    availableOutsideBlocked.refreshPlan.status = "AVAILABLE";
+    expectSnapshotRejected(availableOutsideBlocked);
+    const claimedDispatching = makeRefreshInProgressSnapshot();
+    claimedDispatching.sessionState = "DISPATCHING";
+    expectSnapshotRejected(claimedDispatching);
   });
 
   it("rejects every audited five-state and universal-safety counterexample on both decoders", () => {

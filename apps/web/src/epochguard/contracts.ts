@@ -1,9 +1,9 @@
 import { z } from "zod";
 
-export const CONTRACT_VERSION = "epochguard-contract-v5" as const;
+export const CONTRACT_VERSION = "epochguard-contract-v6" as const;
 export const CONTRACT_SCHEMA_VERSION = 1 as const;
 export const CONTRACT_DIGEST =
-  "sha256:da04cd74212dc564efd3349790d64f27691bd8a2b073d9663949e322da7b5ae8" as const;
+  "sha256:5bdce49d3daa3764bbc67dcafb26c231b328d92b184e59e56d01a90eddc59dbf" as const;
 
 export const ROLES = ["inventory", "budget", "policy"] as const;
 export const SCENARIO_IDS = ["normal-world-v1", "impossible-collage-v1"] as const;
@@ -193,6 +193,63 @@ const ActiveDecisionViewSchema = z
   })
   .strict();
 
+type AttemptTimelineCandidate = {
+  status: string;
+  runId: string | null;
+  runStartedAt: string | null;
+  runCompletedAt: string | null;
+};
+
+function attemptTimelineIsValid(attempt: AttemptTimelineCandidate): boolean {
+  const { status, runId, runStartedAt, runCompletedAt } = attempt;
+  const timestampsOrdered =
+    runStartedAt === null ||
+    runCompletedAt === null ||
+    Date.parse(runStartedAt) <= Date.parse(runCompletedAt);
+  if (!timestampsOrdered) return false;
+
+  if (status === "ASSIGNMENT_CREATED" || status === "DISPATCHING") {
+    return runId === null && runStartedAt === null && runCompletedAt === null;
+  }
+  if (status === "QUEUED") {
+    return runId !== null && runStartedAt === null && runCompletedAt === null;
+  }
+  if (status === "RUNNING") {
+    return runId !== null && runStartedAt !== null && runCompletedAt === null;
+  }
+  if (
+    status === "COMPLETED" ||
+    status === "OUTPUT_REJECTED" ||
+    status === "ACCEPTED"
+  ) {
+    return runId !== null && runStartedAt !== null && runCompletedAt !== null;
+  }
+  if (status === "FAILED" || status === "INTERRUPTED") {
+    const preBindTerminal =
+      runId === null && runStartedAt === null && runCompletedAt === null;
+    const queuedTerminal =
+      runId !== null && runStartedAt === null && runCompletedAt !== null;
+    const runningTerminal =
+      runId !== null && runStartedAt !== null && runCompletedAt !== null;
+    return preBindTerminal || queuedTerminal || runningTerminal;
+  }
+  return false;
+}
+
+function addAttemptTimelineIssue(
+  attempt: AttemptTimelineCandidate,
+  context: z.RefinementCtx,
+): void {
+  if (!attemptTimelineIsValid(attempt)) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "Attempt status must match Run binding/start/completion evidence and ordered timestamps",
+      path: ["status"],
+    });
+  }
+}
+
 const InFlightAttemptViewSchema = z
   .object({
     attemptId: OpaqueIdSchema,
@@ -211,7 +268,8 @@ const InFlightAttemptViewSchema = z
     runStartedAt: TimestampSchema.nullable(),
     runCompletedAt: TimestampSchema.nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine(addAttemptTimelineIssue);
 
 const AgentSnapshotViewSchema = z
   .object({
@@ -522,6 +580,15 @@ export const SNAPSHOT_UNIVERSAL_SAFETY_RULES = {
     ],
     attempt: ["inFlightAttempt.attemptId"],
   },
+  attemptTimeline: {
+    preBind: ["ASSIGNMENT_CREATED", "DISPATCHING"],
+    queued: "Run bound; start/completion null",
+    running: "Run and start bound; completion null",
+    acceptedTerminal:
+      "COMPLETED, OUTPUT_REJECTED, and persisted ACCEPTED bind Run/start/completion",
+    failedInterrupted:
+      "pre-bind all-null, queued terminal, or running terminal; start<=completion",
+  },
   refreshLifecycle: {
     reasonCodes: REFRESH_PLAN_REASON_CODES,
     claimedStates: ["REOBSERVING", "COLLECTING"],
@@ -529,9 +596,13 @@ export const SNAPSHOT_UNIVERSAL_SAFETY_RULES = {
     reobserving:
       "three retained old Decisions; plan owners = invalid Receipt owners = active in-flight owners",
     collecting:
-      "plan owners partition into current-valid completed owners and invalid remaining in-flight owners",
+      "initial Plan is null with no reobserved owner; CLAIMED Plan owners equal the full reobserved set and partition into current-valid completed owners and invalid remaining active owners; any completed owner makes joint validity PENDING",
     validating:
-      "null initial Plan or COMPLETED refresh Plan with three active current-valid Decisions and no in-flight Attempt",
+      "three Decisions, no Attempt, PENDING/CHECKING/no-side-effect/no-action; initial Plan is null with no reobserved owner, while refresh Plan is COMPLETED with exact reobserved owners, all Decisions current-valid, and owner evidence CURRENT",
+    terminalClaimed:
+      "FAILED/INTERRUPTED CLAIMED owners partition into completed current-valid owners and invalid owners carrying only fresh terminal Attempts",
+    completedPlan:
+      "COMPLETED is restricted to validation and current-valid post-refresh stable/terminal projections with exact reobserved owners",
     ownerAttempt:
       "active pre-acceptance Attempt with new Assignment and, when non-null, new Run ID",
   },
@@ -552,6 +623,21 @@ const ACTIVE_IN_FLIGHT_ATTEMPT_STATES = [
   "DISPATCHING",
   "QUEUED",
   "RUNNING",
+] as const;
+const TERMINAL_REFRESH_ATTEMPT_STATES = [
+  "FAILED",
+  "INTERRUPTED",
+  "OUTPUT_REJECTED",
+] as const;
+const COMPLETED_REFRESH_PLAN_STATES = [
+  "VALIDATING",
+  "CONSISTENT_DENY",
+  "READY_AT_CURRENT_HEAD",
+  "COMMITTING",
+  "COMMITTED",
+  "COMMIT_RACE",
+  "FAILED",
+  "INTERRUPTED",
 ] as const;
 
 type AuthoritativeSnapshotState =
@@ -661,6 +747,23 @@ function agentHasActiveNewRefreshAttempt(agent: SnapshotAgentCandidate): boolean
     decision !== null &&
     attempt !== null &&
     (ACTIVE_IN_FLIGHT_ATTEMPT_STATES as readonly string[]).includes(
+      attempt.status,
+    ) &&
+    agent.runCount > 1 &&
+    attempt.assignmentId !== decision.runtimeProof.assignmentId &&
+    (attempt.runId === null || attempt.runId !== decision.runId)
+  );
+}
+
+function agentHasTerminalNewRefreshAttempt(
+  agent: SnapshotAgentCandidate,
+): boolean {
+  const decision = agent.activeDecision;
+  const attempt = agent.inFlightAttempt;
+  return (
+    decision !== null &&
+    attempt !== null &&
+    (TERMINAL_REFRESH_ATTEMPT_STATES as readonly string[]).includes(
       attempt.status,
     ) &&
     agent.runCount > 1 &&
@@ -1197,6 +1300,19 @@ function addSnapshotInvariantIssues(
     );
   }
 
+  if (
+    plan?.status === "COMPLETED" &&
+    !(COMPLETED_REFRESH_PLAN_STATES as readonly string[]).includes(
+      snapshot.sessionState,
+    )
+  ) {
+    snapshotIssue(
+      context,
+      "COMPLETED RefreshPlan is restricted to post-refresh validation, stable, commit, or terminal projections",
+      ["refreshPlan", "status"],
+    );
+  }
+
   if (snapshot.sessionState === "REOBSERVING") {
     const ownerIds = new Set(plan?.agentIds ?? []);
     const ownersAndNonOwnersAreCoherent = snapshot.agents.every((agent) =>
@@ -1213,6 +1329,7 @@ function addSnapshotInvariantIssues(
       invalidAgentIds.length === 0 ||
       !sameIdSet(plan.agentIds, invalidAgentIds) ||
       !sameIdSet(plan.agentIds, inFlightAgentIds) ||
+      !sameIdSet(plan.agentIds, reobservedAgentIds) ||
       !ownersAndNonOwnersAreCoherent
     ) {
       snapshotIssue(
@@ -1223,49 +1340,62 @@ function addSnapshotInvariantIssues(
     }
   }
 
-  if (snapshot.sessionState === "COLLECTING" && plan !== null) {
-    const ownerIds = new Set(plan.agentIds);
-    const collectingJointValidityAllowed = [
-      "PENDING",
-      "NO_CUT",
-      "HISTORICAL_STALE",
-    ].includes(snapshot.jointValidity.state);
-    const ownersPartitionCorrectly = snapshot.agents.every((agent) => {
-      const isOwner = ownerIds.has(agent.agentId);
-      const isRemaining = agent.inFlightAttempt !== null;
-      if (!isOwner) {
-        return (
-          !isRemaining && agentDecisionIsCurrentValid(snapshot, agent)
+  if (snapshot.sessionState === "COLLECTING") {
+    if (plan === null) {
+      if (reobservedAgentIds.length !== 0) {
+        snapshotIssue(
+          context,
+          "Initial COLLECTING may omit a Plan only before any Agent is reobserved",
+          ["refreshPlan"],
         );
       }
-      return isRemaining
-        ? agentDecisionIsInvalidAtHead(snapshot, agent) &&
-            agentHasActiveNewRefreshAttempt(agent)
-        : agentDecisionIsCurrentValid(snapshot, agent) && agent.runCount > 1;
-    });
-    if (
-      plan.status !== "CLAIMED" ||
-      decisions.length !== 3 ||
-      inFlightAgents.length === 0 ||
-      !collectingJointValidityAllowed ||
-      !sameIdSet(invalidAgentIds, inFlightAgentIds) ||
-      !ownersPartitionCorrectly
-    ) {
-      snapshotIssue(
-        context,
-        "COLLECTING refresh owners must partition into completed current Decisions and remaining invalid active Attempts",
-        ["refreshPlan"],
-      );
+    } else {
+      const ownerIds = new Set(plan.agentIds);
+      const completedOwnerIds = snapshot.agents
+        .filter(
+          (agent) =>
+            ownerIds.has(agent.agentId) &&
+            agent.inFlightAttempt === null &&
+            agent.runCount > 1 &&
+            agentDecisionIsCurrentValid(snapshot, agent),
+        )
+        .map((agent) => agent.agentId);
+      const ownersPartitionCorrectly = snapshot.agents.every((agent) => {
+        const isOwner = ownerIds.has(agent.agentId);
+        const isRemaining = agent.inFlightAttempt !== null;
+        if (!isOwner) {
+          return !isRemaining && agentDecisionIsCurrentValid(snapshot, agent);
+        }
+        return isRemaining
+          ? agentDecisionIsInvalidAtHead(snapshot, agent) &&
+              agentHasActiveNewRefreshAttempt(agent)
+          : agentDecisionIsCurrentValid(snapshot, agent) && agent.runCount > 1;
+      });
+      const collectingJointValidityAllowed =
+        snapshot.jointValidity.state === "PENDING" ||
+        (completedOwnerIds.length === 0 && retainedRefreshReason !== null);
+      if (
+        plan.status !== "CLAIMED" ||
+        decisions.length !== 3 ||
+        inFlightAgents.length === 0 ||
+        !collectingJointValidityAllowed ||
+        !sameIdSet(plan.agentIds, reobservedAgentIds) ||
+        !sameIdSet(invalidAgentIds, inFlightAgentIds) ||
+        !ownersPartitionCorrectly
+      ) {
+        snapshotIssue(
+          context,
+          "COLLECTING refresh requires the full CLAIMED owner set partitioned into completed current Decisions and remaining invalid active Attempts; completed evidence makes validity PENDING",
+          ["refreshPlan"],
+        );
+      }
     }
   }
 
-  if (snapshot.sessionState === "VALIDATING" && plan !== null) {
-    const completedRefreshProjection =
-      plan.status === "COMPLETED" &&
+  if (snapshot.sessionState === "VALIDATING") {
+    const commonValidatingProjection =
       decisions.length === 3 &&
-      decisionsValidAtHead &&
       inFlightAgents.length === 0 &&
-      sameIdSet(plan.agentIds, reobservedAgentIds) &&
       snapshot.gate.state === "CHECKING" &&
       snapshot.gate.reasonCode === null &&
       snapshot.gate.effectsInSession === 0 &&
@@ -1273,10 +1403,78 @@ function addSnapshotInvariantIssues(
       snapshot.gate.effectId === null &&
       snapshot.jointValidity.state === "PENDING" &&
       snapshot.availableActions.length === 0;
-    if (!completedRefreshProjection) {
+    const initialValidatingProjection =
+      plan === null && reobservedAgentIds.length === 0;
+    const ownerIds = new Set(plan?.agentIds ?? []);
+    const refreshedOwnersProjectCurrent = snapshot.agents.every(
+      (agent) =>
+        !ownerIds.has(agent.agentId) ||
+        agent.activeDecision?.evidenceState === "CURRENT",
+    );
+    const refreshValidatingProjection =
+      plan?.status === "COMPLETED" &&
+      decisionsValidAtHead &&
+      sameIdSet(plan.agentIds, reobservedAgentIds) &&
+      refreshedOwnersProjectCurrent;
+    if (
+      !commonValidatingProjection ||
+      (!initialValidatingProjection && !refreshValidatingProjection)
+    ) {
       snapshotIssue(
         context,
-        "Refresh VALIDATING requires a COMPLETED Plan, three current-valid Decisions, PENDING validation, and no in-flight Attempt or side effect",
+        "VALIDATING requires three Decisions, no Attempt, PENDING/CHECKING with no side effect/action, and either an unreobserved initial flow or the exact COMPLETED refresh projection",
+        ["sessionState"],
+      );
+    }
+  }
+
+  if (
+    (snapshot.sessionState === "FAILED" ||
+      snapshot.sessionState === "INTERRUPTED") &&
+    plan?.status === "CLAIMED"
+  ) {
+    const ownerIds = new Set(plan.agentIds);
+    const terminalAttemptAgentIds = snapshot.agents
+      .filter((agent) => agent.inFlightAttempt !== null)
+      .map((agent) => agent.agentId);
+    const ownersPartitionCorrectly = snapshot.agents.every((agent) => {
+      const isOwner = ownerIds.has(agent.agentId);
+      if (!isOwner) {
+        return (
+          agent.inFlightAttempt === null &&
+          agentDecisionIsCurrentValid(snapshot, agent)
+        );
+      }
+      return agent.inFlightAttempt === null
+        ? agent.runCount > 1 && agentDecisionIsCurrentValid(snapshot, agent)
+        : agentDecisionIsInvalidAtHead(snapshot, agent) &&
+            agentHasTerminalNewRefreshAttempt(agent);
+    });
+    if (
+      decisions.length !== 3 ||
+      terminalAttemptAgentIds.length === 0 ||
+      !sameIdSet(plan.agentIds, reobservedAgentIds) ||
+      !sameIdSet(invalidAgentIds, terminalAttemptAgentIds) ||
+      !ownersPartitionCorrectly
+    ) {
+      snapshotIssue(
+        context,
+        "FAILED/INTERRUPTED CLAIMED Plan owners must partition into completed current Decisions and invalid owners with fresh terminal Attempts",
+        ["refreshPlan"],
+      );
+    }
+  }
+
+  if (plan?.status === "COMPLETED") {
+    const completedProjectionCoherent =
+      decisions.length === 3 &&
+      decisionsValidAtHead &&
+      inFlightAgents.length === 0 &&
+      sameIdSet(plan.agentIds, reobservedAgentIds);
+    if (!completedProjectionCoherent) {
+      snapshotIssue(
+        context,
+        "COMPLETED RefreshPlan requires exact reobserved owners, three current-valid Decisions, and no in-flight Attempt",
         ["refreshPlan"],
       );
     }
@@ -1538,6 +1736,7 @@ export const CONTRACT_SEMANTIC_INVARIANTS = [
   "Snapshot actionHash equals sha256(canonical Snapshot Action)",
   "Snapshot safe decoders validate the Action shape before hashing and never throw for malformed Action fields",
   "Every active Receipt has validUntilSeq=null or validFromSeq<validUntilSeq<=worldHead, validFromSeq<=observedAtSeq<(validUntilSeq??worldHead+1), and observedAtSeq<=worldHead",
+  "Attempt status exactly binds Run ID/start/completion evidence: pre-bind, queued, running, accepted terminal, and the three permitted FAILED/INTERRUPTED terminal timelines; start never follows completion",
   "Snapshot certificate, run, receipt, assignment, and attempt references are unique across Agents within each ID namespace",
   "Snapshot metrics equal active Decision verdicts, reobserved Agent runCounts, and refresh ownership",
   "Only BLOCKED_NO_CUT, HISTORICAL_STALE, CONSISTENT_DENY, READY_AT_CURRENT_HEAD, and COMMITTED have bidirectionally frozen projection products; other Session states retain only universal safety constraints",
@@ -1549,8 +1748,10 @@ export const CONTRACT_SEMANTIC_INVARIANTS = [
   "NO_CUT dependencySetHash equals sha256(canonicalJSON(sort(all three active receiptIds)))",
   "NO_CUT/HISTORICAL_STALE retained validation evidence requires a RefreshPlan whose reasonCode exactly matches the validation outcome",
   "CURRENT and RETAINED evidence exactly mean the half-open Receipt covers worldHead; INVALID_AT_HEAD exactly means it does not",
-  "Snapshot RefreshPlan.reasonCode is exactly NO_VALID_OBSERVED_WORLD_CUT or HISTORICAL_BUT_STALE_NOW; AVAILABLE exists only for matching blocked/historical invalid owners",
-  "REOBSERVING CLAIMED retains three invalid old-owner Decisions; COLLECTING CLAIMED partitions completed and remaining owners; refresh VALIDATING uses COMPLETED with no in-flight; CLAIMED terminal exceptions are FAILED/INTERRUPTED",
+  "Snapshot RefreshPlan.reasonCode is exactly NO_VALID_OBSERVED_WORLD_CUT or HISTORICAL_BUT_STALE_NOW; AVAILABLE exists only for matching blocked/historical invalid owners; CLAIMED and COMPLETED follow their closed state routes",
+  "REOBSERVING CLAIMED retains three old Decisions and exact invalid/in-flight/reobserved owners; COLLECTING preserves the full owner set across partial completion and makes stale validity PENDING after the first replacement",
+  "VALIDATING always has three Decisions, no Attempt, PENDING/CHECKING and no side effect/action; initial validation has no reobserved owner/Plan, while refresh validation has the exact COMPLETED owner set with current-valid evidence and CURRENT owner Decisions",
+  "FAILED/INTERRUPTED CLAIMED owners partition into completed current-valid Decisions and invalid owners with fresh terminal Attempts; a terminal Attempt is required",
   "READY_AT_CURRENT_HEAD accepts an absent initial Plan or the exact COMPLETED selective-refresh Plan and always exposes exactly COMMIT",
   "FAILED with WAITING and null reason is rejected; side-effect-free FAILED/INTERRUPTED Gate and reason products otherwise remain unfrozen",
   "availableActions is exactly REOBSERVE_INVALID for blocked/historical AVAILABLE Plans, COMMIT for READY_AT_CURRENT_HEAD, and empty otherwise",
