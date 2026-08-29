@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   AgentDecisionEnvelopeSchema,
   DependencyCertificateSchema,
+  RejectedOutputArtifactSchema,
   actionHash,
   buildRoleQuerySpec,
   canonicalJson,
@@ -13,6 +14,7 @@ import {
   type EpochSession,
   type FailureCode,
   type ObservationReceipt,
+  type RejectedOutputArtifact,
   type Role,
   type RunAssignment,
 } from "./types.js";
@@ -20,6 +22,10 @@ import {
 export const EPOCH_DECISION_OPEN_MARKER = "<EPOCH_DECISION>" as const;
 export const EPOCH_DECISION_CLOSE_MARKER = "</EPOCH_DECISION>" as const;
 export const MAX_DECISION_OUTPUT_BYTES = 16 * 1_024;
+export const EPOCH_REDACTION_VERSION = "epoch-redact-v1" as const;
+export const EPOCH_REDACTION_PLACEHOLDER = "[REDACTED]" as const;
+
+const EPOCH_PRIVATE_KEY_PLACEHOLDER = "[REDACTED_PRIVATE_KEY]" as const;
 
 export class DecisionNormalizationError extends Error {
   constructor(
@@ -33,8 +39,23 @@ export class DecisionNormalizationError extends Error {
 
 export type DecisionNormalizationOptions = {
   certificateId?: string;
+  rejectedOutputArtifactId?: string;
   createdAt?: string;
 };
+
+export type DecisionNormalizationResult =
+  | {
+      status: "ACCEPTED";
+      decision: DependencyCertificate;
+      rejectedOutputArtifact: null;
+      reasonCode: null;
+    }
+  | {
+      status: "OUTPUT_REJECTED";
+      decision: null;
+      rejectedOutputArtifact: RejectedOutputArtifact;
+      reasonCode: "OUTPUT_MALFORMED";
+    };
 
 export type BoundDecision = {
   decision: DependencyCertificate;
@@ -56,6 +77,54 @@ function countLiteral(value: string, literal: string): number {
     count += 1;
     cursor = found + literal.length;
   }
+}
+
+function redactionFor(secret: string): string {
+  return Buffer.byteLength(secret, "utf8") >=
+    Buffer.byteLength(EPOCH_REDACTION_PLACEHOLDER, "utf8")
+    ? EPOCH_REDACTION_PLACEHOLDER
+    : "";
+}
+
+/**
+ * Fixed, deterministic and non-expanding redaction for replayable rejected
+ * outputs. It intentionally handles both structured key/value text and common
+ * credential forms because rejected model output is not assumed to be JSON.
+ * Changing these rules requires a new redactionVersion.
+ */
+export function redactRejectedDecisionOutput(rawOutput: string): string {
+  const privateKeyBlock =
+    /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/gi;
+  const unterminatedPrivateKey =
+    /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*$/gi;
+  const bearerCredential = /(\bBearer[ \t]+)([^\s"'<>]+)/gi;
+  const labeledQuotedSecret =
+    /((?:["']?)\b(?:(?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|password|passwd|pwd|client[_-]?secret|secret|private[_-]?key))\b(?:["']?)\s*[:=]\s*)(["'])((?:\\.|[^\\\r\n])*?)\2/gi;
+  const labeledUnquotedSecret =
+    /((?:["']?)\b(?:(?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|password|passwd|pwd|client[_-]?secret|secret|private[_-]?key))\b(?:["']?)\s*[:=]\s*)(?!["'])([^\s,;}&"'<>]+)/gi;
+  const awsAccessKey = /\bAKIA[0-9A-Z]{16}\b/g;
+  const prefixedApiKey = /\bsk-(?:proj-)?[a-z0-9_-]{12,}\b/gi;
+
+  return rawOutput
+    .replace(privateKeyBlock, EPOCH_PRIVATE_KEY_PLACEHOLDER)
+    .replace(unterminatedPrivateKey, EPOCH_PRIVATE_KEY_PLACEHOLDER)
+    .replace(
+      bearerCredential,
+      (_match: string, prefix: string, secret: string) =>
+        `${prefix}${redactionFor(secret)}`,
+    )
+    .replace(
+      labeledQuotedSecret,
+      (_match: string, prefix: string, quote: string, secret: string) =>
+        `${prefix}${quote}${redactionFor(secret)}${quote}`,
+    )
+    .replace(
+      labeledUnquotedSecret,
+      (_match: string, prefix: string, secret: string) =>
+        `${prefix}${redactionFor(secret)}`,
+    )
+    .replace(awsAccessKey, (secret) => redactionFor(secret))
+    .replace(prefixedApiKey, (secret) => redactionFor(secret));
 }
 
 function requireUnique<T>(
@@ -272,6 +341,56 @@ export function parseDecisionEnvelope(rawOutput: string): AgentDecisionEnvelope 
   return parsed.data;
 }
 
+function buildRejectedOutputArtifact(
+  database: Readonly<EpochDatabase>,
+  sessionId: string,
+  attemptId: string,
+  rawOutput: string,
+  originalDigest: string,
+  originalByteLength: number,
+  options: DecisionNormalizationOptions,
+): RejectedOutputArtifact {
+  const artifactId = options.rejectedOutputArtifactId ?? randomUUID();
+  if (
+    database.rejectedOutputArtifacts.some(
+      (artifact) => artifact.artifactId === artifactId,
+    )
+  ) {
+    fail("DECISION_INVALID", "Rejected Output Artifact ID already exists");
+  }
+  const createdAt = options.createdAt ?? new Date().toISOString();
+  if (originalByteLength > MAX_DECISION_OUTPUT_BYTES) {
+    return RejectedOutputArtifactSchema.parse({
+      artifactId,
+      sessionId,
+      attemptId,
+      reason: "OUTPUT_TOO_LARGE",
+      originalDigest,
+      originalByteLength,
+      sanitizedContent: null,
+      sanitizedContentDigest: null,
+      truncated: true,
+      redactionVersion: EPOCH_REDACTION_VERSION,
+      createdAt,
+    });
+  }
+
+  const sanitizedContent = redactRejectedDecisionOutput(rawOutput);
+  return RejectedOutputArtifactSchema.parse({
+    artifactId,
+    sessionId,
+    attemptId,
+    reason: "PARSE_REJECTED",
+    originalDigest,
+    originalByteLength,
+    sanitizedContent,
+    sanitizedContentDigest: sha256Digest(sanitizedContent),
+    truncated: false,
+    redactionVersion: EPOCH_REDACTION_VERSION,
+    createdAt,
+  });
+}
+
 export function resolveBoundDecision(
   database: Readonly<EpochDatabase>,
   session: EpochSession,
@@ -337,16 +456,18 @@ export function resolveBoundDecision(
 
 /**
  * This synchronous check-and-mutate operation must be invoked inside the caller's
- * single-writer EpochStore mutation. It never awaits, so Assignment consumption,
- * Decision creation, supersession, and active-pointer replacement form one CAS.
+ * single-writer EpochStore mutation. Expected parser rejection is returned as a
+ * successful OUTPUT_REJECTED result so its safe audit artifact is committed; it
+ * is never appended and then thrown away by a transaction rollback.
  */
 export function normalizeAndConsumeDecision(
   database: EpochDatabase,
   attemptId: string,
   rawOutput: string,
   options: DecisionNormalizationOptions = {},
-): DependencyCertificate {
-  const envelope = parseDecisionEnvelope(rawOutput);
+): DecisionNormalizationResult {
+  const originalByteLength = Buffer.byteLength(rawOutput, "utf8");
+  const originalDigest = sha256Digest(rawOutput);
   const attempt = requireUnique(
     database.attempts,
     (candidate) => candidate.attemptId === attemptId,
@@ -388,7 +509,7 @@ export function normalizeAndConsumeDecision(
   }
   assertEqual(
     attempt.outputDigest,
-    sha256Digest(rawOutput),
+    originalDigest,
     "Run output digest",
   );
   assertAttemptAndAssignmentBinding(session, attempt, assignment);
@@ -400,6 +521,36 @@ export function normalizeAndConsumeDecision(
     attempt.attemptId,
     "Session active Attempt",
   );
+
+  let envelope: AgentDecisionEnvelope;
+  try {
+    envelope = parseDecisionEnvelope(rawOutput);
+  } catch (error) {
+    if (
+      !(error instanceof DecisionNormalizationError) ||
+      error.reasonCode !== "OUTPUT_MALFORMED"
+    ) {
+      throw error;
+    }
+    const rejectedOutputArtifact = buildRejectedOutputArtifact(
+      database,
+      session.sessionId,
+      attempt.attemptId,
+      rawOutput,
+      originalDigest,
+      originalByteLength,
+      options,
+    );
+    assignment.status = "REJECTED";
+    attempt.status = "OUTPUT_REJECTED";
+    database.rejectedOutputArtifacts.push(rejectedOutputArtifact);
+    return {
+      status: "OUTPUT_REJECTED",
+      decision: null,
+      rejectedOutputArtifact,
+      reasonCode: "OUTPUT_MALFORMED",
+    };
+  }
 
   assertEqual(envelope.sessionId, assignment.sessionId, "Envelope Session");
   assertEqual(
@@ -470,5 +621,10 @@ export function normalizeAndConsumeDecision(
   session.activeDecisionCertificateIds[assignment.role] = certificate.certificateId;
   session.activeAttemptIds[assignment.role] = null;
 
-  return certificate;
+  return {
+    status: "ACCEPTED",
+    decision: certificate,
+    rejectedOutputArtifact: null,
+    reasonCode: null,
+  };
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   GOLDEN_ACTION_HASH,
   GOLDEN_ACTION_INPUT,
+  EpochDatabaseSchema,
   buildRoleQuerySpec,
   canonicalJson,
   sha256Digest,
@@ -12,9 +13,12 @@ import {
   DecisionNormalizationError,
   EPOCH_DECISION_CLOSE_MARKER,
   EPOCH_DECISION_OPEN_MARKER,
+  EPOCH_REDACTION_PLACEHOLDER,
+  EPOCH_REDACTION_VERSION,
   MAX_DECISION_OUTPUT_BYTES,
   normalizeAndConsumeDecision,
   parseDecisionEnvelope,
+  redactRejectedDecisionOutput,
 } from "./decision-parser.js";
 
 const NOW = "2026-08-29T12:00:00.000Z";
@@ -186,6 +190,34 @@ function replaceEnvelope(
   fixture.database.attempts[0]!.outputDigest = sha256Digest(fixture.rawOutput);
 }
 
+function replaceRawOutput(
+  fixture: ReturnType<typeof makeFixture>,
+  rawOutput: string,
+): void {
+  fixture.rawOutput = rawOutput;
+  fixture.database.attempts[0]!.outputDigest = sha256Digest(rawOutput);
+}
+
+function parserFailure(rawOutput: string): DecisionNormalizationError {
+  let failure: unknown;
+  try {
+    parseDecisionEnvelope(rawOutput);
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(DecisionNormalizationError);
+  return failure as DecisionNormalizationError;
+}
+
+function commitMutation<T>(
+  database: EpochDatabase,
+  operation: (draft: EpochDatabase) => T,
+): { database: EpochDatabase; result: T } {
+  const draft = structuredClone(database);
+  const result = operation(draft);
+  return { database: draft, result };
+}
+
 function expectNormalizationFailure(
   fixture: ReturnType<typeof makeFixture>,
   reasonCode: string,
@@ -251,14 +283,341 @@ describe("Decision parser and normalizer", () => {
     }
   });
 
+  it("commits a deterministic redacted artifact for an authoritative parse rejection", () => {
+    const fixture = makeFixture();
+    const secrets = [
+      "token-secret-0123456789",
+      "password-secret-0123456789",
+      `sk-proj-${"fake".repeat(6)}`,
+      "bearer.secret.0123456789",
+      "private-key-body-secret-0123456789",
+      `AKIA${"1234567890ABCDEF"}`,
+    ];
+    const malformed = [
+      "model preface without the required Epoch marker",
+      `token=${secrets[0]}`,
+      `password: "${secrets[1]}"`,
+      `OPENAI_API_KEY='${secrets[2]}'`,
+      `Authorization: Bearer ${secrets[3]}`,
+      secrets[5],
+      "-----BEGIN OPENSSH PRIVATE KEY-----",
+      secrets[4],
+      "-----END OPENSSH PRIVATE KEY-----",
+      "tail remains visible",
+    ].join("\n");
+    const rawOutput = `${malformed}${" ".repeat(
+      MAX_DECISION_OUTPUT_BYTES - Buffer.byteLength(malformed, "utf8"),
+    )}`;
+    expect(Buffer.byteLength(rawOutput, "utf8")).toBe(
+      MAX_DECISION_OUTPUT_BYTES,
+    );
+    replaceRawOutput(fixture, rawOutput);
+    const boundSnapshot = structuredClone(fixture.database);
+
+    const committed = commitMutation(fixture.database, (draft) =>
+      normalizeAndConsumeDecision(draft, fixture.attemptId, rawOutput, {
+        certificateId: "decision_must_not_exist",
+        rejectedOutputArtifactId: "artifact_parse_rejected_1",
+        createdAt: COMPLETED,
+      }),
+    );
+
+    expect(fixture.database).toEqual(boundSnapshot);
+    expect(committed.result).toMatchObject({
+      status: "OUTPUT_REJECTED",
+      decision: null,
+      reasonCode: "OUTPUT_MALFORMED",
+    });
+    if (committed.result.status !== "OUTPUT_REJECTED") {
+      throw new Error("Expected rejected output");
+    }
+    const artifact = committed.result.rejectedOutputArtifact;
+    expect(artifact).toMatchObject({
+      artifactId: "artifact_parse_rejected_1",
+      sessionId: "session_decision_1",
+      attemptId: fixture.attemptId,
+      reason: "PARSE_REJECTED",
+      originalDigest: sha256Digest(rawOutput),
+      originalByteLength: MAX_DECISION_OUTPUT_BYTES,
+      truncated: false,
+      redactionVersion: EPOCH_REDACTION_VERSION,
+      createdAt: COMPLETED,
+    });
+    expect(artifact.sanitizedContent).not.toBeNull();
+    const sanitizedContent = artifact.sanitizedContent!;
+    expect(artifact.sanitizedContentDigest).toBe(
+      sha256Digest(sanitizedContent),
+    );
+    expect(Buffer.byteLength(sanitizedContent, "utf8")).toBeLessThanOrEqual(
+      MAX_DECISION_OUTPUT_BYTES,
+    );
+    expect(sanitizedContent).toContain(EPOCH_REDACTION_PLACEHOLDER);
+    expect(sanitizedContent).toContain("[REDACTED_PRIVATE_KEY]");
+    expect(sanitizedContent).toContain("tail remains visible");
+    for (const secret of secrets) {
+      expect(sanitizedContent).not.toContain(secret);
+    }
+    expect(redactRejectedDecisionOutput(rawOutput)).toBe(sanitizedContent);
+    expect(redactRejectedDecisionOutput(sanitizedContent)).toBe(
+      sanitizedContent,
+    );
+
+    const originalFailure = parserFailure(rawOutput);
+    const replayFailure = parserFailure(sanitizedContent);
+    expect({
+      reasonCode: replayFailure.reasonCode,
+      message: replayFailure.message,
+    }).toEqual({
+      reasonCode: originalFailure.reasonCode,
+      message: originalFailure.message,
+    });
+
+    expect(committed.database.rejectedOutputArtifacts).toEqual([artifact]);
+    expect(committed.database.runAssignments[0]).toMatchObject({
+      status: "REJECTED",
+      consumedByDecisionCertificateId: null,
+      consumedAt: null,
+    });
+    expect(committed.database.attempts[0]!.status).toBe("OUTPUT_REJECTED");
+    expect(committed.database.decisions).toEqual([]);
+    expect(
+      committed.database.sessions[0]!.activeDecisionCertificateIds,
+    ).toEqual(boundSnapshot.sessions[0]!.activeDecisionCertificateIds);
+    expect(committed.database.sessions[0]!.activeAttemptIds).toEqual(
+      boundSnapshot.sessions[0]!.activeAttemptIds,
+    );
+    expect(EpochDatabaseSchema.safeParse(committed.database).success).toBe(
+      true,
+    );
+
+    const afterRejection = structuredClone(committed.database);
+    expect(() =>
+      normalizeAndConsumeDecision(
+        committed.database,
+        fixture.attemptId,
+        rawOutput,
+        { rejectedOutputArtifactId: "artifact_parse_rejected_2" },
+      ),
+    ).toThrowError(DecisionNormalizationError);
+    expect(committed.database).toEqual(afterRejection);
+  });
+
+  it("persists PARSE_REJECTED for marker, JSON, and strict-schema failures", () => {
+    const source = makeFixture();
+    const cases = [
+      {
+        name: "marker",
+        rawOutput: JSON.stringify(source.envelope),
+      },
+      {
+        name: "JSON",
+        rawOutput:
+          `${EPOCH_DECISION_OPEN_MARKER}{bad json` +
+          EPOCH_DECISION_CLOSE_MARKER,
+      },
+      {
+        name: "strict schema",
+        rawOutput: renderEnvelope({
+          ...source.envelope,
+          unexpectedToolArgument: "publish-now",
+        }),
+      },
+    ];
+
+    for (const [index, testCase] of cases.entries()) {
+      const fixture = makeFixture();
+      replaceRawOutput(fixture, testCase.rawOutput);
+      const originalFailure = parserFailure(testCase.rawOutput);
+      const result = normalizeAndConsumeDecision(
+        fixture.database,
+        fixture.attemptId,
+        testCase.rawOutput,
+        {
+          rejectedOutputArtifactId: `artifact_parse_kind_${index}`,
+          createdAt: COMPLETED,
+        },
+      );
+      expect(result.status, testCase.name).toBe("OUTPUT_REJECTED");
+      if (result.status !== "OUTPUT_REJECTED") {
+        throw new Error(`Expected ${testCase.name} rejection`);
+      }
+      expect(result.rejectedOutputArtifact).toMatchObject({
+        reason: "PARSE_REJECTED",
+        originalDigest: sha256Digest(testCase.rawOutput),
+        originalByteLength: Buffer.byteLength(testCase.rawOutput, "utf8"),
+        sanitizedContent: testCase.rawOutput,
+        sanitizedContentDigest: sha256Digest(testCase.rawOutput),
+        truncated: false,
+      });
+      const replayFailure = parserFailure(
+        result.rejectedOutputArtifact.sanitizedContent!,
+      );
+      expect({
+        reasonCode: replayFailure.reasonCode,
+        message: replayFailure.message,
+      }).toEqual({
+        reasonCode: originalFailure.reasonCode,
+        message: originalFailure.message,
+      });
+      expect(fixture.database.runAssignments[0]!.status).toBe("REJECTED");
+      expect(fixture.database.attempts[0]!.status).toBe("OUTPUT_REJECTED");
+      expect(fixture.database.decisions).toEqual([]);
+    }
+  });
+
+  it("stores no rejected content or fragment when authoritative output exceeds 16 KiB", () => {
+    const fixture = makeFixture();
+    const secret = "oversized-token-secret-0123456789";
+    const rawOutput = `token=${secret}\n${"x".repeat(
+      MAX_DECISION_OUTPUT_BYTES + 1,
+    )}`;
+    replaceRawOutput(fixture, rawOutput);
+    const pointersBefore = structuredClone(
+      fixture.database.sessions[0]!.activeDecisionCertificateIds,
+    );
+    const attemptsBefore = structuredClone(
+      fixture.database.sessions[0]!.activeAttemptIds,
+    );
+
+    const result = normalizeAndConsumeDecision(
+      fixture.database,
+      fixture.attemptId,
+      rawOutput,
+      {
+        rejectedOutputArtifactId: "artifact_too_large_1",
+        createdAt: COMPLETED,
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: "OUTPUT_REJECTED",
+      decision: null,
+      reasonCode: "OUTPUT_MALFORMED",
+    });
+    if (result.status !== "OUTPUT_REJECTED") {
+      throw new Error("Expected rejected output");
+    }
+    expect(result.rejectedOutputArtifact).toEqual({
+      artifactId: "artifact_too_large_1",
+      sessionId: "session_decision_1",
+      attemptId: fixture.attemptId,
+      reason: "OUTPUT_TOO_LARGE",
+      originalDigest: sha256Digest(rawOutput),
+      originalByteLength: Buffer.byteLength(rawOutput, "utf8"),
+      sanitizedContent: null,
+      sanitizedContentDigest: null,
+      truncated: true,
+      redactionVersion: EPOCH_REDACTION_VERSION,
+      createdAt: COMPLETED,
+    });
+    expect(JSON.stringify(result.rejectedOutputArtifact)).not.toContain(secret);
+    expect(JSON.stringify(fixture.database)).not.toContain(secret);
+    expect(fixture.database.runAssignments[0]).toMatchObject({
+      status: "REJECTED",
+      consumedByDecisionCertificateId: null,
+      consumedAt: null,
+    });
+    expect(fixture.database.attempts[0]!.status).toBe("OUTPUT_REJECTED");
+    expect(fixture.database.decisions).toEqual([]);
+    expect(
+      fixture.database.sessions[0]!.activeDecisionCertificateIds,
+    ).toEqual(pointersBefore);
+    expect(fixture.database.sessions[0]!.activeAttemptIds).toEqual(
+      attemptsBefore,
+    );
+    expect(EpochDatabaseSchema.safeParse(fixture.database).success).toBe(true);
+  });
+
+  it("does not audit forged, digest-mismatched, or non-terminal output", () => {
+    const malformed = "token=not-authoritative-secret-0123456789";
+
+    const forgedAttempt = makeFixture();
+    const forgedBefore = structuredClone(forgedAttempt.database);
+    expect(() =>
+      normalizeAndConsumeDecision(
+        forgedAttempt.database,
+        "attempt_forged",
+        malformed,
+        { rejectedOutputArtifactId: "artifact_forged" },
+      ),
+    ).toThrowError(DecisionNormalizationError);
+    expect(forgedAttempt.database).toEqual(forgedBefore);
+
+    const digestMismatch = makeFixture();
+    digestMismatch.rawOutput = malformed;
+    expectNormalizationFailure(digestMismatch, "BINDING_MISMATCH");
+    expect(digestMismatch.database.rejectedOutputArtifacts).toEqual([]);
+
+    const nonTerminal = makeFixture();
+    replaceRawOutput(nonTerminal, malformed);
+    nonTerminal.database.attempts[0]!.status = "RUNNING";
+    expectNormalizationFailure(nonTerminal, "DECISION_INVALID");
+    expect(nonTerminal.database.rejectedOutputArtifacts).toEqual([]);
+
+    const crossSession = makeFixture();
+    replaceRawOutput(crossSession, malformed);
+    crossSession.database.attempts[0]!.sessionId = "session_other";
+    expectNormalizationFailure(crossSession, "BINDING_MISMATCH");
+    expect(crossSession.database.rejectedOutputArtifacts).toEqual([]);
+  });
+
+  it("fails closed on a duplicate rejected-output artifact ID without mutation", () => {
+    const fixture = makeFixture();
+    fixture.database.rejectedOutputArtifacts.push({
+      artifactId: "artifact_duplicate",
+      sessionId: "session_existing",
+      attemptId: "attempt_existing",
+      reason: "PARSE_REJECTED",
+      originalDigest: sha256Digest("existing raw output"),
+      originalByteLength: 19,
+      sanitizedContent: "existing sanitized output",
+      sanitizedContentDigest: sha256Digest("existing sanitized output"),
+      truncated: false,
+      redactionVersion: EPOCH_REDACTION_VERSION,
+      createdAt: NOW,
+    });
+    const malformed = "password=duplicate-artifact-secret-0123456789";
+    replaceRawOutput(fixture, malformed);
+    const before = structuredClone(fixture.database);
+
+    try {
+      normalizeAndConsumeDecision(
+        fixture.database,
+        fixture.attemptId,
+        malformed,
+        {
+          rejectedOutputArtifactId: "artifact_duplicate",
+          createdAt: COMPLETED,
+        },
+      );
+      throw new Error("Expected duplicate artifact ID to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(DecisionNormalizationError);
+      expect((error as DecisionNormalizationError).reasonCode).toBe(
+        "DECISION_INVALID",
+      );
+    }
+    expect(fixture.database).toEqual(before);
+  });
+
   it("constructs a server Decision and consumes its Assignment exactly once", () => {
     const fixture = makeFixture();
-    const decision = normalizeAndConsumeDecision(
+    const result = normalizeAndConsumeDecision(
       fixture.database,
       fixture.attemptId,
       fixture.rawOutput,
       { certificateId: "decision_budget_1", createdAt: COMPLETED },
     );
+
+    expect(result).toMatchObject({
+      status: "ACCEPTED",
+      rejectedOutputArtifact: null,
+      reasonCode: null,
+    });
+    if (result.status !== "ACCEPTED") {
+      throw new Error("Expected an accepted Decision");
+    }
+    const decision = result.decision;
 
     expect(decision).toMatchObject({
       certificateId: "decision_budget_1",
