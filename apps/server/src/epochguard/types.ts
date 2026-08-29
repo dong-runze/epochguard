@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-export const CONTRACT_VERSION = "epochguard-contract-v1" as const;
+export const CONTRACT_VERSION = "epochguard-contract-v2" as const;
 export const CONTRACT_SCHEMA_VERSION = 1 as const;
 export const CONTRACT_DIGEST =
-  "sha256:dcf8815b991f475514e6387c9e78251c36d751e072fca0cc584267f55bd2718e" as const;
+  "sha256:0f16a9cb9f41cc64014ca8cc508a4f98b270cecf83882f328cb99994f7910d95" as const;
 
 export const ROLES = ["inventory", "budget", "policy"] as const;
 export const SOURCES = ["inventory", "budget", "policy"] as const;
@@ -640,31 +640,71 @@ export const RefreshPlanSchema = z
   .strict();
 export type RefreshPlan = z.infer<typeof RefreshPlanSchema>;
 
-export const RejectedOutputArtifactSchema = z
+const RejectedOutputArtifactBaseSchema = z
   .object({
     artifactId: OpaqueIdSchema,
     sessionId: OpaqueIdSchema,
     attemptId: OpaqueIdSchema,
-    reason: z.enum(["PARSE_REJECTED", "OUTPUT_TOO_LARGE"]),
     originalDigest: Sha256DigestSchema,
-    originalByteLength: z.number().int().nonnegative(),
-    sanitizedContent: z.string().nullable(),
-    sanitizedContentDigest: Sha256DigestSchema.nullable(),
-    truncated: z.boolean(),
     redactionVersion: z.literal("epoch-redact-v1"),
     createdAt: TimestampSchema,
   })
   .strict();
+
+const ParseRejectedOutputArtifactSchema = RejectedOutputArtifactBaseSchema.extend({
+  reason: z.literal("PARSE_REJECTED"),
+  originalByteLength: z.number().int().nonnegative().max(16 * 1_024),
+  sanitizedContent: z.string().min(1),
+  sanitizedContentDigest: Sha256DigestSchema,
+  truncated: z.literal(false),
+})
+  .strict()
+  .superRefine((artifact, context) => {
+    if (sha256Digest(artifact.sanitizedContent) !== artifact.sanitizedContentDigest) {
+      context.addIssue({
+        code: "custom",
+        message: "sanitizedContentDigest must match sanitizedContent",
+        path: ["sanitizedContentDigest"],
+      });
+    }
+  });
+
+const OversizedRejectedOutputArtifactSchema = RejectedOutputArtifactBaseSchema.extend({
+  reason: z.literal("OUTPUT_TOO_LARGE"),
+  originalByteLength: z.number().int().min(16 * 1_024 + 1),
+  sanitizedContent: z.null(),
+  sanitizedContentDigest: z.null(),
+  truncated: z.literal(true),
+}).strict();
+
+export const RejectedOutputArtifactSchema = z.discriminatedUnion("reason", [
+  ParseRejectedOutputArtifactSchema,
+  OversizedRejectedOutputArtifactSchema,
+]);
 export type RejectedOutputArtifact = z.infer<
   typeof RejectedOutputArtifactSchema
 >;
 
-export const ArtifactRefSchema = z
-  .object({
-    kind: ArtifactRefKindSchema,
-    id: z.string().min(1).max(512),
-  })
-  .strict();
+const OpaqueArtifactRefKindSchema = z.enum(
+  ARTIFACT_REF_KINDS.filter((kind) => kind !== "ENVELOPE_DIGEST") as [
+    Exclude<(typeof ARTIFACT_REF_KINDS)[number], "ENVELOPE_DIGEST">,
+    ...Exclude<(typeof ARTIFACT_REF_KINDS)[number], "ENVELOPE_DIGEST">[],
+  ],
+);
+export const ArtifactRefSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("ENVELOPE_DIGEST"),
+      id: Sha256DigestSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: OpaqueArtifactRefKindSchema,
+      id: OpaqueIdSchema,
+    })
+    .strict(),
+]);
 export type ArtifactRef = z.infer<typeof ArtifactRefSchema>;
 
 export const SafetyDiagnosticSchema = z
@@ -853,7 +893,7 @@ const NoCutProofViewSchema = z
   })
   .strict();
 
-export const SessionDashboardSnapshotSchema = z
+const SessionDashboardSnapshotShapeSchema = z
   .object({
     schemaVersion: z.literal(1),
     contractVersion: z.literal(CONTRACT_VERSION),
@@ -913,24 +953,304 @@ export const SessionDashboardSnapshotSchema = z
     latestDiagnostics: z.array(SafetyDiagnosticViewSchema).max(3),
     events: z.array(RedactedDashboardEventSchema).max(6),
   })
-  .strict()
-  .superRefine((snapshot, context) => {
-    const roles = snapshot.agents.map((agent) => agent.role);
-    if (roles.join(",") !== ROLES.join(",")) {
-      context.addIssue({
-        code: "custom",
-        message: "agents must be ordered inventory, budget, policy",
-        path: ["agents"],
-      });
-    }
-    if (snapshot.metrics.allowDecisions + snapshot.metrics.denyDecisions !== snapshot.metrics.activeDecisions) {
-      context.addIssue({
-        code: "custom",
-        message: "decision metrics must reconcile",
-        path: ["metrics"],
-      });
+  .strict();
+
+type SessionDashboardSnapshotCandidate = z.infer<
+  typeof SessionDashboardSnapshotShapeSchema
+>;
+
+function snapshotIssue(
+  context: z.RefinementCtx,
+  message: string,
+  path: PropertyKey[],
+): void {
+  context.addIssue({ code: "custom", message, path });
+}
+
+function addSnapshotInvariantIssues(
+  snapshot: SessionDashboardSnapshotCandidate,
+  context: z.RefinementCtx,
+): void {
+  const roles = snapshot.agents.map((agent) => agent.role);
+  if (roles.join(",") !== ROLES.join(",")) {
+    snapshotIssue(context, "agents must be ordered inventory, budget, policy", [
+      "agents",
+    ]);
+  }
+  if (new Set(snapshot.agents.map((agent) => agent.agentId)).size !== 3) {
+    snapshotIssue(context, "agents must contain three distinct Agent identities", [
+      "agents",
+    ]);
+  }
+
+  const decisions = snapshot.agents.flatMap((agent) =>
+    agent.activeDecision === null ? [] : [agent.activeDecision],
+  );
+  const allowDecisions = decisions.filter(
+    (decision) => decision.verdict === "ALLOW",
+  ).length;
+  const denyDecisions = decisions.length - allowDecisions;
+  const reobservedAgents = snapshot.agents.filter(
+    (agent) => agent.runCount > 1,
+  ).length;
+  if (
+    snapshot.metrics.activeDecisions !== decisions.length ||
+    snapshot.metrics.allowDecisions !== allowDecisions ||
+    snapshot.metrics.denyDecisions !== denyDecisions ||
+    snapshot.metrics.reobservedAgents !== reobservedAgents
+  ) {
+    snapshotIssue(context, "decision and run metrics must match Agent projections", [
+      "metrics",
+    ]);
+  }
+  snapshot.agents.forEach((agent, index) => {
+    const representedRuns =
+      (agent.activeDecision === null ? 0 : 1) +
+      (agent.inFlightAttempt === null ? 0 : 1);
+    if (agent.runCount < representedRuns) {
+      snapshotIssue(context, "runCount cannot be lower than represented runs", [
+        "agents",
+        index,
+        "runCount",
+      ]);
     }
   });
+
+  const expectedActionHash = actionHash({
+    schemaVersion: 1,
+    ...snapshot.action,
+  });
+  if (snapshot.actionHash !== expectedActionHash) {
+    snapshotIssue(context, "actionHash does not match the Snapshot Action", [
+      "actionHash",
+    ]);
+  }
+
+  if (snapshot.gate.state === "RELEASED") {
+    if (
+      snapshot.gate.effectsInSession !== 1 ||
+      snapshot.gate.effectId === null ||
+      snapshot.gate.permitId === null ||
+      snapshot.sessionState !== "COMMITTED" ||
+      snapshot.jointValidity.state !== "VALID_CURRENT" ||
+      snapshot.availableActions.length !== 0
+    ) {
+      snapshotIssue(
+        context,
+        "RELEASED requires one Effect, Permit/Effect IDs, COMMITTED, and no actions",
+        ["gate"],
+      );
+    }
+  } else if (
+    snapshot.gate.effectsInSession !== 0 ||
+    snapshot.gate.effectId !== null
+  ) {
+    snapshotIssue(context, "non-RELEASED snapshots cannot project an Effect", [
+      "gate",
+    ]);
+  }
+  if (snapshot.sessionState === "COMMITTED" && snapshot.gate.state !== "RELEASED") {
+    snapshotIssue(context, "COMMITTED must project a RELEASED Gate", [
+      "sessionState",
+    ]);
+  }
+  if (
+    snapshot.gate.state === "READY" &&
+    (snapshot.sessionState !== "READY_AT_CURRENT_HEAD" ||
+      snapshot.gate.permitId === null ||
+      snapshot.jointValidity.state !== "VALID_CURRENT" ||
+      allowDecisions !== 3)
+  ) {
+    snapshotIssue(
+      context,
+      "READY requires READY_AT_CURRENT_HEAD, a Permit, and three ALLOW Decisions",
+      ["gate"],
+    );
+  }
+
+  const receiptByRole = new Map(
+    snapshot.agents.flatMap((agent) =>
+      agent.activeDecision === null
+        ? []
+        : ([[agent.role, agent.activeDecision.receipt]] as const),
+    ),
+  );
+  const receipts = [...receiptByRole.values()];
+  const expectedLower =
+    receipts.length === 3
+      ? Math.max(...receipts.map((receipt) => receipt.validFromSeq))
+      : null;
+  const expectedUpper =
+    receipts.length === 3
+      ? Math.min(
+          ...receipts.map(
+            (receipt) => receipt.validUntilSeq ?? snapshot.worldHead + 1,
+          ),
+        )
+      : null;
+
+  if (snapshot.jointValidity.state === "VALID_CURRENT") {
+    const validAtHead =
+      expectedLower !== null &&
+      expectedUpper !== null &&
+      expectedLower < expectedUpper &&
+      expectedLower <= snapshot.worldHead &&
+      snapshot.worldHead < expectedUpper;
+    if (
+      snapshot.jointValidity.noCutProof !== null ||
+      snapshot.jointValidity.currentHeadCovered !== true ||
+      snapshot.jointValidity.lowerBound !== expectedLower ||
+      snapshot.jointValidity.upperBound !== expectedUpper ||
+      !validAtHead
+    ) {
+      snapshotIssue(
+        context,
+        "VALID_CURRENT bounds, proof, and current-head coverage must reconcile",
+        ["jointValidity"],
+      );
+    }
+  } else if (snapshot.jointValidity.state === "NO_CUT") {
+    const proof = snapshot.jointValidity.noCutProof;
+    const boundsAgree =
+      proof !== null &&
+      snapshot.sessionState === "BLOCKED_NO_CUT" &&
+      snapshot.gate.state === "LOCKED" &&
+      snapshot.jointValidity.lowerBound === proof.lowerBound &&
+      snapshot.jointValidity.upperBound === proof.upperBound &&
+      proof.lowerBound === expectedLower &&
+      proof.upperBound === expectedUpper &&
+      proof.lowerBound > proof.upperBound &&
+      snapshot.jointValidity.currentHeadCovered === false;
+    let witnessAgrees = proof !== null;
+    if (proof !== null) {
+      const seenRoles = new Set<string>();
+      let hasLatestStart = false;
+      let hasEarliestEnd = false;
+      for (const witness of proof.witness) {
+        const receipt = receiptByRole.get(witness.role);
+        seenRoles.add(witness.role);
+        witnessAgrees &&=
+          receipt !== undefined &&
+          witness.receiptId === receipt.receiptId &&
+          witness.from === receipt.validFromSeq &&
+          witness.until === receipt.validUntilSeq;
+        hasLatestStart ||= witness.from === proof.lowerBound;
+        hasEarliestEnd ||= witness.until === proof.upperBound;
+      }
+      witnessAgrees &&=
+        seenRoles.size === proof.witness.length && hasLatestStart && hasEarliestEnd;
+    }
+    if (!boundsAgree || !witnessAgrees) {
+      snapshotIssue(
+        context,
+        "NO_CUT requires strict contradictory bounds and a matching receipt witness",
+        ["jointValidity"],
+      );
+    }
+  } else if (snapshot.jointValidity.state === "PENDING") {
+    if (
+      snapshot.jointValidity.lowerBound !== null ||
+      snapshot.jointValidity.upperBound !== null ||
+      snapshot.jointValidity.currentHeadCovered !== null ||
+      snapshot.jointValidity.noCutProof !== null
+    ) {
+      snapshotIssue(context, "PENDING cannot project validity evidence", [
+        "jointValidity",
+      ]);
+    }
+  } else if (
+    snapshot.jointValidity.noCutProof !== null ||
+    snapshot.jointValidity.currentHeadCovered !== false ||
+    snapshot.jointValidity.lowerBound !== expectedLower ||
+    snapshot.jointValidity.upperBound !== expectedUpper ||
+    expectedLower === null ||
+    expectedUpper === null ||
+    expectedLower >= expectedUpper ||
+    (expectedLower <= snapshot.worldHead && snapshot.worldHead < expectedUpper)
+  ) {
+    snapshotIssue(
+      context,
+      "HISTORICAL_STALE bounds must be coherent but exclude the current head",
+      ["jointValidity"],
+    );
+  }
+
+  const invalidAgentIds = snapshot.agents
+    .filter((agent) => {
+      const decision = agent.activeDecision;
+      if (decision === null) return false;
+      const receipt = decision.receipt;
+      return (
+        decision.evidenceState === "INVALID_AT_HEAD" ||
+        receipt.validFromSeq > snapshot.worldHead ||
+        (receipt.validUntilSeq !== null &&
+          snapshot.worldHead >= receipt.validUntilSeq)
+      );
+    })
+    .map((agent) => agent.agentId)
+    .sort();
+
+  if (snapshot.refreshPlan !== null) {
+    const owners = [...snapshot.refreshPlan.agentIds].sort();
+    if (
+      new Set(owners).size !== owners.length ||
+      owners.some(
+        (agentId) => !snapshot.agents.some((agent) => agent.agentId === agentId),
+      )
+    ) {
+      snapshotIssue(context, "refreshPlan owners must be distinct projected Agents", [
+        "refreshPlan",
+        "agentIds",
+      ]);
+    }
+    if (
+      snapshot.jointValidity.state === "NO_CUT" &&
+      (owners.join(",") !== invalidAgentIds.join(",") ||
+        snapshot.refreshPlan.reasonCode !== "NO_VALID_OBSERVED_WORLD_CUT")
+    ) {
+      snapshotIssue(
+        context,
+        "NO_CUT refresh owners must match invalid receipt owners and roles",
+        ["refreshPlan"],
+      );
+    }
+  }
+
+  const expectedRerunsAvoided =
+    snapshot.refreshPlan === null ? 0 : 3 - snapshot.refreshPlan.agentIds.length;
+  if (snapshot.metrics.rerunsAvoided !== expectedRerunsAvoided) {
+    snapshotIssue(context, "rerunsAvoided must match the selective refresh plan", [
+      "metrics",
+      "rerunsAvoided",
+    ]);
+  }
+
+  const expectedActions: (typeof AVAILABLE_ACTIONS)[number][] = [];
+  if (
+    snapshot.gate.state === "READY" &&
+    snapshot.sessionState === "READY_AT_CURRENT_HEAD" &&
+    snapshot.refreshPlan === null
+  ) {
+    expectedActions.push("COMMIT");
+  } else if (
+    snapshot.gate.state === "LOCKED" &&
+    (snapshot.sessionState === "BLOCKED_NO_CUT" ||
+      snapshot.sessionState === "HISTORICAL_STALE") &&
+    snapshot.refreshPlan?.status === "AVAILABLE"
+  ) {
+    expectedActions.push("REOBSERVE_INVALID");
+  }
+  if (snapshot.availableActions.join(",") !== expectedActions.join(",")) {
+    snapshotIssue(
+      context,
+      "availableActions must match Gate, Session, and refresh state",
+      ["availableActions"],
+    );
+  }
+}
+
+export const SessionDashboardSnapshotSchema =
+  SessionDashboardSnapshotShapeSchema.superRefine(addSnapshotInvariantIssues);
 export type SessionDashboardSnapshot = z.infer<
   typeof SessionDashboardSnapshotSchema
 >;
@@ -979,6 +1299,24 @@ export const ALREADY_REOBSERVING_MESSAGE =
   "Re-observation is already in progress." as const;
 export const AGENTS_BUSY_MESSAGE =
   "The assigned Role Agent triple is already in use by an active session." as const;
+export const MISSING_ACTION_FIELDS_MESSAGE =
+  "Action is missing fields required by the selected scenario." as const;
+export const SESSION_NOT_FOUND_MESSAGE =
+  "EpochGuard session was not found." as const;
+export const UNSUPPORTED_SCHEMA_MESSAGE =
+  "EpochGuard schema or contract version is unsupported." as const;
+export const PROJECTION_MISMATCH_MESSAGE =
+  "EpochGuard projection failed safety reconciliation." as const;
+
+export const API_ERROR_STATUS = {
+  STALE_VIEW: 409,
+  ALREADY_REOBSERVING: 409,
+  AGENTS_BUSY: 409,
+  MISSING_ACTION_FIELDS: 422,
+  SESSION_NOT_FOUND: 404,
+  UNSUPPORTED_SCHEMA: 422,
+  PROJECTION_MISMATCH: 500,
+} as const;
 
 export const StaleViewErrorBodySchema = z
   .object({
@@ -1020,12 +1358,83 @@ export const AgentsBusyErrorBodySchema = z
   .strict();
 export type AgentsBusyErrorBody = z.infer<typeof AgentsBusyErrorBodySchema>;
 
+export const MissingActionFieldsErrorBodySchema = z
+  .object({
+    error: z.literal("MISSING_ACTION_FIELDS"),
+    message: z.literal(MISSING_ACTION_FIELDS_MESSAGE),
+    missingFields: z
+      .array(
+        z.enum([
+          "schemaVersion",
+          "type",
+          "campaignId",
+          "requestedUnits",
+          "estimatedCostCents",
+          "market",
+        ]),
+      )
+      .min(1)
+      .max(6),
+  })
+  .strict();
+export type MissingActionFieldsErrorBody = z.infer<
+  typeof MissingActionFieldsErrorBodySchema
+>;
+
+export const SessionNotFoundErrorBodySchema = z
+  .object({
+    error: z.literal("SESSION_NOT_FOUND"),
+    message: z.literal(SESSION_NOT_FOUND_MESSAGE),
+    sessionId: OpaqueIdSchema,
+  })
+  .strict();
+export type SessionNotFoundErrorBody = z.infer<
+  typeof SessionNotFoundErrorBodySchema
+>;
+
+export const UnsupportedSchemaErrorBodySchema = z
+  .object({
+    error: z.literal("UNSUPPORTED_SCHEMA"),
+    message: z.literal(UNSUPPORTED_SCHEMA_MESSAGE),
+    expectedSchemaVersion: z.literal(CONTRACT_SCHEMA_VERSION),
+    expectedContractVersion: z.literal(CONTRACT_VERSION),
+    receivedSchemaVersion: z.number().int().nonnegative().nullable(),
+    receivedContractVersion: z.string().min(1).max(256).nullable(),
+  })
+  .strict();
+export type UnsupportedSchemaErrorBody = z.infer<
+  typeof UnsupportedSchemaErrorBodySchema
+>;
+
+export const ProjectionMismatchErrorBodySchema = z
+  .object({
+    error: z.literal("PROJECTION_MISMATCH"),
+    message: z.literal(PROJECTION_MISMATCH_MESSAGE),
+    sessionId: OpaqueIdSchema,
+    snapshotRevision: z.number().int().nonnegative(),
+  })
+  .strict();
+export type ProjectionMismatchErrorBody = z.infer<
+  typeof ProjectionMismatchErrorBodySchema
+>;
+
 export const ConflictErrorBodySchema = z.discriminatedUnion("error", [
   StaleViewErrorBodySchema,
   AlreadyReobservingErrorBodySchema,
   AgentsBusyErrorBodySchema,
 ]);
 export type ConflictErrorBody = z.infer<typeof ConflictErrorBodySchema>;
+
+export const ApiErrorBodySchema = z.discriminatedUnion("error", [
+  StaleViewErrorBodySchema,
+  AlreadyReobservingErrorBodySchema,
+  AgentsBusyErrorBodySchema,
+  MissingActionFieldsErrorBodySchema,
+  SessionNotFoundErrorBodySchema,
+  UnsupportedSchemaErrorBodySchema,
+  ProjectionMismatchErrorBodySchema,
+]);
+export type ApiErrorBody = z.infer<typeof ApiErrorBodySchema>;
 
 export const makeStaleViewError = (
   sessionId: string,
@@ -1062,6 +1471,48 @@ export const makeAgentsBusyError = (
     message: AGENTS_BUSY_MESSAGE,
     activeSessionId,
     assignments,
+  });
+
+export const makeMissingActionFieldsError = (
+  missingFields: MissingActionFieldsErrorBody["missingFields"],
+): MissingActionFieldsErrorBody =>
+  MissingActionFieldsErrorBodySchema.parse({
+    error: "MISSING_ACTION_FIELDS",
+    message: MISSING_ACTION_FIELDS_MESSAGE,
+    missingFields,
+  });
+
+export const makeSessionNotFoundError = (
+  sessionId: string,
+): SessionNotFoundErrorBody =>
+  SessionNotFoundErrorBodySchema.parse({
+    error: "SESSION_NOT_FOUND",
+    message: SESSION_NOT_FOUND_MESSAGE,
+    sessionId,
+  });
+
+export const makeUnsupportedSchemaError = (
+  receivedSchemaVersion: number | null,
+  receivedContractVersion: string | null,
+): UnsupportedSchemaErrorBody =>
+  UnsupportedSchemaErrorBodySchema.parse({
+    error: "UNSUPPORTED_SCHEMA",
+    message: UNSUPPORTED_SCHEMA_MESSAGE,
+    expectedSchemaVersion: CONTRACT_SCHEMA_VERSION,
+    expectedContractVersion: CONTRACT_VERSION,
+    receivedSchemaVersion,
+    receivedContractVersion,
+  });
+
+export const makeProjectionMismatchError = (
+  sessionId: string,
+  snapshotRevision: number,
+): ProjectionMismatchErrorBody =>
+  ProjectionMismatchErrorBodySchema.parse({
+    error: "PROJECTION_MISMATCH",
+    message: PROJECTION_MISMATCH_MESSAGE,
+    sessionId,
+    snapshotRevision,
   });
 
 export const ScenarioFixtureManifestEntrySchema = z
@@ -1264,7 +1715,7 @@ export const GOLDEN_FIXTURE_MANIFEST = [
       initialOutcome: "VALID_CURRENT_ALLOW",
       lowerBound: 10,
       upperBound: 11,
-      initialEffectsInSession: 1,
+      initialEffectsInSession: 0,
       refreshRoles: [],
       finalOutcome: "VALID_CURRENT_ALLOW",
       finalEffectsInSession: 1,
@@ -1303,6 +1754,7 @@ function goldenAgent(
     observedAt: number;
     verdict?: Verdict;
     evidenceState?: "CURRENT" | "RETAINED" | "INVALID_AT_HEAD";
+    runCount?: number;
   },
 ) {
   const title = role[0]?.toUpperCase() + role.slice(1);
@@ -1310,7 +1762,7 @@ function goldenAgent(
     role,
     agentId: `agent_${role}`,
     agentNameAtAssignment: `${title} Agent`,
-    runCount: 1,
+    runCount: options.runCount ?? 1,
     activeDecision: {
       certificateId: `decision_${role}_1`,
       runId: `run_${role}_1`,
@@ -1346,7 +1798,7 @@ function goldenAgent(
 const snapshotBase = {
   schemaVersion: 1 as const,
   contractVersion: CONTRACT_VERSION,
-  contractDigest: "sha256:dcf8815b991f475514e6387c9e78251c36d751e072fca0cc584267f55bd2718e",
+  contractDigest: CONTRACT_DIGEST,
   stateUpdatedAt: GOLDEN_TIMESTAMP,
   generatedAt: GOLDEN_TIMESTAMP,
   coordinationMode: "CONCURRENT" as const,
@@ -1360,20 +1812,20 @@ const snapshotBase = {
   actionHash: GOLDEN_ACTION_HASH,
 };
 
-export const NORMAL_GOLDEN_SNAPSHOT = {
+export const NORMAL_READY_GOLDEN_SNAPSHOT = {
   ...snapshotBase,
-  snapshotRevision: 12,
-  sessionRevision: 6,
+  snapshotRevision: 11,
+  sessionRevision: 5,
   sessionId: "session_normal_golden",
   scenarioId: "normal-world-v1",
-  sessionState: "COMMITTED",
+  sessionState: "READY_AT_CURRENT_HEAD",
   worldHead: 10,
   gate: {
-    state: "RELEASED",
+    state: "READY",
     reasonCode: null,
-    effectsInSession: 1,
+    effectsInSession: 0,
     permitId: "permit_normal_1",
-    effectId: "effect_normal_1",
+    effectId: null,
   },
   metrics: {
     activeDecisions: 3,
@@ -1398,10 +1850,28 @@ export const NORMAL_GOLDEN_SNAPSHOT = {
     noCutProof: null,
   },
   refreshPlan: null,
-  availableActions: [],
+  availableActions: ["COMMIT"],
   latestDiagnostics: [],
   events: [],
 } as const;
+
+export const NORMAL_RELEASED_GOLDEN_SNAPSHOT = {
+  ...NORMAL_READY_GOLDEN_SNAPSHOT,
+  snapshotRevision: 12,
+  sessionRevision: 6,
+  sessionState: "COMMITTED",
+  gate: {
+    state: "RELEASED",
+    reasonCode: null,
+    effectsInSession: 1,
+    permitId: "permit_normal_1",
+    effectId: "effect_normal_1",
+  },
+  availableActions: [],
+} as const;
+
+// Compatibility alias for consumers of the v1 Starter seam.
+export const NORMAL_GOLDEN_SNAPSHOT = NORMAL_RELEASED_GOLDEN_SNAPSHOT;
 
 export const IMPOSSIBLE_GOLDEN_SNAPSHOT = {
   ...snapshotBase,
@@ -1480,7 +1950,72 @@ export const IMPOSSIBLE_GOLDEN_SNAPSHOT = {
   events: [],
 } as const;
 
-export const CONTRACT_MANIFEST = {
+export const RECOVERED_GOLDEN_SNAPSHOT = {
+  ...snapshotBase,
+  snapshotRevision: 24,
+  sessionRevision: 8,
+  sessionId: "session_impossible_golden",
+  scenarioId: "impossible-collage-v1",
+  sessionState: "CONSISTENT_DENY",
+  worldHead: 22,
+  gate: {
+    state: "LOCKED",
+    reasonCode: "CONSISTENT_DENY",
+    effectsInSession: 0,
+    permitId: null,
+    effectId: null,
+  },
+  metrics: {
+    activeDecisions: 3,
+    requiredDecisions: 3,
+    allowDecisions: 2,
+    denyDecisions: 1,
+    reobservedAgents: 1,
+    totalAgents: 3,
+    rerunsAvoided: 2,
+    verificationLatencyMs: 2,
+  },
+  agents: [
+    goldenAgent("inventory", { from: 18, until: null, observedAt: 18 }),
+    goldenAgent("budget", {
+      from: 22,
+      until: null,
+      observedAt: 22,
+      verdict: "DENY",
+      runCount: 2,
+    }),
+    goldenAgent("policy", { from: 21, until: null, observedAt: 21 }),
+  ],
+  jointValidity: {
+    state: "VALID_CURRENT",
+    lowerBound: 22,
+    upperBound: 23,
+    currentHeadCovered: true,
+    noCutProof: null,
+  },
+  refreshPlan: {
+    refreshPlanId: "refresh_impossible_1",
+    status: "COMPLETED",
+    agentIds: ["agent_budget"],
+    reasonCode: "NO_VALID_OBSERVED_WORLD_CUT",
+  },
+  availableActions: [],
+  latestDiagnostics: [],
+  events: [],
+} as const;
+
+export const GOLDEN_SNAPSHOT_HASHES = {
+  normalReady:
+    "sha256:3e46ce4e98779ccce7d72f54ab52b198311978b8a49040aa76bbb02b19a1a692",
+  normalReleased:
+    "sha256:460fc96a3ab3bbd4f690d11237c79c2cc4793271630d95c277fa9a1c7bb60f31",
+  impossible:
+    "sha256:c4375af308fdd43092eb34a0efc36bea23640584f1897ed60ac92977ace76cd9",
+  recovered:
+    "sha256:e8984acc7f3b0cbfb00a2f7bff0896e52ef43b9891d58bc3eb606b9dc36db8b2",
+} as const;
+
+const CONTRACT_FIELD_MANIFEST = {
   contractVersion: CONTRACT_VERSION,
   schemaVersion: CONTRACT_SCHEMA_VERSION,
   p0Semantics: {
@@ -1820,8 +2355,260 @@ export const CONTRACT_MANIFEST = {
   snapshotSchema: "SessionDashboardSnapshot@1-strict",
 } as const;
 
-export function computeContractDigest(manifest: JsonValue = CONTRACT_MANIFEST): string {
-  return sha256Digest(canonicalJson(manifest));
+export const CONTRACT_SCHEMA_REGISTRY = {
+  JsonValue: JsonValueSchema,
+  Timestamp: TimestampSchema,
+  OpaqueId: OpaqueIdSchema,
+  Sha256Digest: Sha256DigestSchema,
+  EvidencePackRelativePath: EvidencePackRelativePathSchema,
+  Role: RoleSchema,
+  Source: SourceSchema,
+  Verdict: VerdictSchema,
+  ScenarioId: ScenarioIdSchema,
+  SessionState: SessionStateSchema,
+  AttemptState: AttemptStateSchema,
+  AssignmentState: AssignmentStateSchema,
+  DecisionState: DecisionStateSchema,
+  ValidationOutcome: ValidationOutcomeSchema,
+  PermitState: PermitStateSchema,
+  RefreshPlanState: RefreshPlanStateSchema,
+  CoordinationMode: CoordinationModeSchema,
+  GateState: GateStateSchema,
+  JointValidityState: JointValidityStateSchema,
+  FailureCode: FailureCodeSchema,
+  DiagnosticKind: DiagnosticKindSchema,
+  DiagnosticStage: DiagnosticStageSchema,
+  RecommendedAction: RecommendedActionSchema,
+  AvailableAction: AvailableActionSchema,
+  ArtifactRefKind: ArtifactRefKindSchema,
+  ActionCanonicalFields: ActionCanonicalFieldsSchema,
+  ActionIntent: ActionIntentSchema,
+  RoleQuerySpec: RoleQuerySpecSchema,
+  RoleAgentRegistration: RoleAgentRegistrationSchema,
+  WorldCommit: WorldCommitSchema,
+  ResourceVersion: ResourceVersionSchema,
+  RunUsage: RunUsageSchema,
+  RunAssignment: RunAssignmentSchema,
+  AgentAttempt: AgentAttemptSchema,
+  ObservationReceipt: ObservationReceiptSchema,
+  AgentDecisionEnvelope: AgentDecisionEnvelopeSchema,
+  DependencyCertificate: DependencyCertificateSchema,
+  ActiveDecisionCertificateIds: ActiveDecisionCertificateIdsSchema,
+  EpochSession: EpochSessionSchema,
+  ValidationRecord: ValidationRecordSchema,
+  JointValidityCertificate: JointValidityCertificateSchema,
+  EffectPermit: EffectPermitSchema,
+  NoCutProof: NoCutProofSchema,
+  EffectRecord: EffectRecordSchema,
+  RefreshPlan: RefreshPlanSchema,
+  RejectedOutputArtifact: RejectedOutputArtifactSchema,
+  ArtifactRef: ArtifactRefSchema,
+  SafetyDiagnostic: SafetyDiagnosticSchema,
+  SafetyDiagnosticView: SafetyDiagnosticViewSchema,
+  AuditEvent: AuditEventSchema,
+  EpochDatabase: EpochDatabaseSchema,
+  RedactedDashboardEvent: RedactedDashboardEventSchema,
+  SessionDashboardSnapshot: SessionDashboardSnapshotSchema,
+  CreateSessionRequest: CreateSessionRequestSchema,
+  RefreshSessionRequest: RefreshSessionRequestSchema,
+  CommitSessionRequest: CommitSessionRequestSchema,
+  StaleViewErrorBody: StaleViewErrorBodySchema,
+  AlreadyReobservingErrorBody: AlreadyReobservingErrorBodySchema,
+  AgentsBusyErrorBody: AgentsBusyErrorBodySchema,
+  MissingActionFieldsErrorBody: MissingActionFieldsErrorBodySchema,
+  SessionNotFoundErrorBody: SessionNotFoundErrorBodySchema,
+  UnsupportedSchemaErrorBody: UnsupportedSchemaErrorBodySchema,
+  ProjectionMismatchErrorBody: ProjectionMismatchErrorBodySchema,
+  ConflictErrorBody: ConflictErrorBodySchema,
+  ApiErrorBody: ApiErrorBodySchema,
+  ScenarioFixtureManifestEntry: ScenarioFixtureManifestEntrySchema,
+} as const satisfies Record<string, z.ZodType>;
+
+export const SHARED_CONTRACT_SCHEMA_NAMES = [
+  "OpaqueId",
+  "Sha256Digest",
+  "Role",
+  "ScenarioId",
+  "SessionState",
+  "FailureCode",
+  "ArtifactRefKind",
+  "ArtifactRef",
+  "SessionDashboardSnapshot",
+  "CreateSessionRequest",
+  "RefreshSessionRequest",
+  "CommitSessionRequest",
+  "StaleViewErrorBody",
+  "AlreadyReobservingErrorBody",
+  "AgentsBusyErrorBody",
+  "MissingActionFieldsErrorBody",
+  "SessionNotFoundErrorBody",
+  "UnsupportedSchemaErrorBody",
+  "ProjectionMismatchErrorBody",
+  "ConflictErrorBody",
+  "ApiErrorBody",
+] as const;
+
+export const CONTRACT_SEMANTIC_INVARIANTS = [
+  "ActionIntent.actionHash equals sha256(canonical ActionCanonicalFields)",
+  "ActionIntent.idempotencyKey equals <sessionId>:<actionHash>; exactly-once scope is Session + Action",
+  "RoleQuerySpec is reconstructed by role and queryHash excludes only queryHash itself",
+  "CreateSessionRequest assignments contain three distinct Agents",
+  "same Role-Agent triple conflicts with 409 AGENTS_BUSY before dispatch",
+  "ResourceVersion.validUntilSeq is null or strictly greater than validFromSeq",
+  "PARSE_REJECTED byte length is <=16384, content/digest are non-null and equal, truncated=false",
+  "OUTPUT_TOO_LARGE byte length is >16384, content/digest are null, truncated=true",
+  "ENVELOPE_DIGEST ArtifactRef.id is Sha256Digest; every other ArtifactRef.id is OpaqueId",
+  "Snapshot Agents are ordered inventory,budget,policy and have distinct Agent identities",
+  "Snapshot actionHash equals sha256(canonical Snapshot Action)",
+  "Snapshot metrics equal active Decision verdicts, reobserved Agent runCounts, and refresh ownership",
+  "RELEASED iff one Effect is projected with Permit/Effect IDs, COMMITTED state, and no mutation action",
+  "non-RELEASED Snapshot has zero Effects and no Effect ID",
+  "VALID_CURRENT has no No-Cut proof and exact interval bounds covering worldHead",
+  "NO_CUT has exact receipt-derived L/U with L>U and a two-receipt endpoint witness",
+  "No-Cut refresh owners equal Agents whose active receipts are invalid at worldHead",
+  "availableActions is exactly derived from Gate, Session, Permit, and refresh-plan state",
+] as const;
+
+export const CONTRACT_DIGEST_PLACEHOLDER =
+  "sha256:0000000000000000000000000000000000000000000000000000000000000000" as const;
+export const CONTRACT_DIGEST_ALGORITHM = {
+  version: "epochguard-contract-digest-v2",
+  canonicalization: "epochguard-canonical-json-v1:recursive-lexicographic-keys",
+  jsonSchema: "Zod v4 draft-2020-12 JSON Schema with reused=ref",
+  selfReference:
+    "Before hashing, replace every string equal to the active CONTRACT_DIGEST, direct contractDigest values, and JSON Schema properties.contractDigest.const with CONTRACT_DIGEST_PLACEHOLDER; this also covers reused $defs.",
+  goldenSnapshotHash:
+    "sha256(canonicalJSON(snapshot normalized by the same contractDigest placeholder rule))",
+} as const;
+
+export function normalizeContractDigestReferences(
+  value: JsonValue,
+  pathSegments: readonly string[] = [],
+): JsonValue {
+  const last = pathSegments.at(-1);
+  const isDirectDigest = last === "contractDigest";
+  const isSchemaDigestConst =
+    last === "const" &&
+    pathSegments.at(-2) === "contractDigest" &&
+    pathSegments.at(-3) === "properties";
+  if (
+    typeof value === "string" &&
+    (value === CONTRACT_DIGEST || isDirectDigest || isSchemaDigestConst)
+  ) {
+    return CONTRACT_DIGEST_PLACEHOLDER;
+  }
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item, index) =>
+      normalizeContractDigestReferences(item, [...pathSegments, String(index)]),
+    );
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key,
+      normalizeContractDigestReferences(item, [...pathSegments, key]),
+    ]),
+  );
+}
+
+function contractJsonSchema(schema: z.ZodType): JsonValue {
+  return z.toJSONSchema(schema, {
+    target: "draft-2020-12",
+    reused: "ref",
+  }) as JsonValue;
+}
+
+export function buildContractJsonSchemas(): Record<string, JsonValue> {
+  return Object.fromEntries(
+    Object.entries(CONTRACT_SCHEMA_REGISTRY).map(([name, schema]) => [
+      name,
+      normalizeContractDigestReferences(contractJsonSchema(schema), [
+        "schemas",
+        name,
+      ]),
+    ]),
+  );
+}
+
+export function buildContractDigestDocument(): JsonValue {
+  const roleQueryGoldenVectors = Object.fromEntries(
+    ROLES.map((role) => {
+      const spec = buildRoleQuerySpec(GOLDEN_ACTION_INPUT, role);
+      return [
+        role,
+        {
+          spec,
+          canonical: canonicalizeRoleQuery(spec),
+          hash: queryHash(spec),
+        },
+      ];
+    }),
+  );
+  const snapshots = normalizeContractDigestReferences({
+    normalReady: NORMAL_READY_GOLDEN_SNAPSHOT,
+    normalReleased: NORMAL_RELEASED_GOLDEN_SNAPSHOT,
+    impossible: IMPOSSIBLE_GOLDEN_SNAPSHOT,
+    recovered: RECOVERED_GOLDEN_SNAPSHOT,
+  });
+  if (snapshots === null || Array.isArray(snapshots) || typeof snapshots !== "object") {
+    throw new Error("Golden Snapshot normalization produced an invalid document");
+  }
+  const goldenSnapshotHashes = Object.fromEntries(
+    Object.entries(snapshots).map(([name, snapshot]) => [
+      name,
+      sha256Digest(canonicalJson(snapshot)),
+    ]),
+  );
+
+  return {
+    algorithm: CONTRACT_DIGEST_ALGORITHM,
+    contractVersion: CONTRACT_VERSION,
+    schemaVersion: CONTRACT_SCHEMA_VERSION,
+    p0Semantics: CONTRACT_FIELD_MANIFEST.p0Semantics,
+    schemas: buildContractJsonSchemas(),
+    semanticInvariants: CONTRACT_SEMANTIC_INVARIANTS,
+    canonicalization: {
+      actionInput: GOLDEN_ACTION_INPUT,
+      actionCanonical: GOLDEN_ACTION_CANONICAL,
+      actionHash: GOLDEN_ACTION_HASH,
+      roleQueries: roleQueryGoldenVectors,
+    },
+    artifactRefTargets: ARTIFACT_REF_TARGETS,
+    errorStatuses: API_ERROR_STATUS,
+    exactErrorBodies: {
+      staleView: makeStaleViewError("session_example", 4, 5),
+      alreadyReobserving: makeAlreadyReobservingError(
+        "session_example",
+        "refresh_example",
+        "attempt_example",
+      ),
+      agentsBusy: makeAgentsBusyError("session_active", {
+        inventory: "agent_inventory",
+        budget: "agent_budget",
+        policy: "agent_policy",
+      }),
+      missingActionFields: makeMissingActionFieldsError(["campaignId"]),
+      sessionNotFound: makeSessionNotFoundError("session_missing"),
+      unsupportedSchema: makeUnsupportedSchemaError(2, "epochguard-contract-v1"),
+      projectionMismatch: makeProjectionMismatchError("session_example", 7),
+    },
+    fixtures: GOLDEN_FIXTURE_MANIFEST,
+    goldenSnapshots: snapshots,
+    goldenSnapshotHashes,
+    schemaFieldIndex: CONTRACT_FIELD_MANIFEST.schemaFields,
+  } as JsonValue;
+}
+
+export const CONTRACT_MANIFEST = buildContractDigestDocument();
+
+export function computeContractDigest(
+  manifest: JsonValue = buildContractDigestDocument(),
+): string {
+  return sha256Digest(
+    canonicalJson(normalizeContractDigestReferences(manifest)),
+  );
 }
 
 export function decodeSessionDashboardSnapshot(input: unknown): SessionDashboardSnapshot {

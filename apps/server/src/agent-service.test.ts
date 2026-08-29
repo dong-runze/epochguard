@@ -122,7 +122,7 @@ describe("Agent lifecycle", () => {
           messages: [],
           runs: [
             {
-              id: "legacy_run",
+              id: "legacy_completed_run",
               agentId: "deleted_agent",
               status: "completed",
               prompt: "legacy",
@@ -132,6 +132,30 @@ describe("Agent lifecycle", () => {
               startedAt: "2026-08-29T12:00:00.000Z",
               completedAt: "2026-08-29T12:00:01.000Z",
               createdAt: "2026-08-29T12:00:00.000Z",
+            },
+            {
+              id: "legacy_queued_run",
+              agentId: "deleted_agent",
+              status: "queued",
+              prompt: "queued before restart",
+              output: null,
+              error: null,
+              usage: null,
+              startedAt: null,
+              completedAt: null,
+              createdAt: "2026-08-29T12:00:02.000Z",
+            },
+            {
+              id: "legacy_running_run",
+              agentId: "deleted_agent",
+              status: "running",
+              prompt: "running before restart",
+              output: null,
+              error: null,
+              usage: null,
+              startedAt: "2026-08-29T12:00:03.000Z",
+              completedAt: null,
+              createdAt: "2026-08-29T12:00:03.000Z",
             },
           ],
         },
@@ -157,11 +181,132 @@ describe("Agent lifecycle", () => {
     );
     await service.initialize();
 
-    expect(service.getRun("legacy_run").threadId).toBeNull();
+    expect(service.getRun("legacy_completed_run").threadId).toBeNull();
+    expect(service.getRun("legacy_queued_run")).toMatchObject({
+      status: "cancelled",
+      threadId: null,
+      error: "Server restarted while this run was active",
+    });
+    expect(service.getRun("legacy_running_run")).toMatchObject({
+      status: "cancelled",
+      threadId: null,
+      error: "Server restarted while this run was active",
+    });
     const persisted = JSON.parse(await readFile(databasePath, "utf8")) as {
       runs: Array<{ threadId?: string | null }>;
     };
-    expect(persisted.runs[0]).toHaveProperty("threadId", null);
+    expect(persisted.runs).toHaveLength(3);
+    for (const run of persisted.runs) {
+      expect(run).toHaveProperty("threadId", null);
+    }
+  });
+
+  it("records a successful Runner result with nullable thread evidence", async () => {
+    const service = await makeService({
+      run: async () => ({ output: "completed without thread", threadId: null, usage: null }),
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Nullable Thread" });
+    const { run } = await service.sendMessage(agent.id, "complete without thread");
+
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+    expect(service.getRun(run.id).threadId).toBeNull();
+    expect(service.getAgent(agent.id).codexThreadId).toBeNull();
+  });
+
+  it("keeps two Agents isolated when their Runs complete in reverse order", async () => {
+    const completions = new Map<string, (result: RunnerResult) => void>();
+    const service = await makeService({
+      run: (request) =>
+        new Promise<RunnerResult>((resolve) => {
+          completions.set(request.agentId, resolve);
+        }),
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const firstAgent = await service.createAgent({ name: "First Agent" });
+    const secondAgent = await service.createAgent({ name: "Second Agent" });
+    const first = await service.sendMessage(firstAgent.id, "first pending");
+    const second = await service.sendMessage(secondAgent.id, "second pending");
+    await expect.poll(() => completions.size).toBe(2);
+
+    completions.get(secondAgent.id)?.({
+      output: "second completed first",
+      threadId: "thread_second",
+      usage: null,
+    });
+    await expect.poll(() => service.getRun(second.run.id).status).toBe("completed");
+    completions.get(firstAgent.id)?.({
+      output: "first completed second",
+      threadId: "thread_first",
+      usage: null,
+    });
+    await expect.poll(() => service.getRun(first.run.id).status).toBe("completed");
+
+    expect(service.getRun(first.run.id).threadId).toBe("thread_first");
+    expect(service.getRun(second.run.id).threadId).toBe("thread_second");
+    expect(service.getAgent(firstAgent.id).codexThreadId).toBe("thread_first");
+    expect(service.getAgent(secondAgent.id).codexThreadId).toBe("thread_second");
+  });
+
+  it("does not copy an old Agent thread onto a failed Run", async () => {
+    let callCount = 0;
+    const service = await makeService({
+      run: async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          return { output: "seed", threadId: "thread_old", usage: null };
+        }
+        throw new Error("runner failed");
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Failure Isolation" });
+    const seed = await service.sendMessage(agent.id, "seed thread");
+    await expect.poll(() => service.getRun(seed.run.id).status).toBe("completed");
+    const failed = await service.sendMessage(agent.id, "fail now");
+    await expect.poll(() => service.getRun(failed.run.id).status).toBe("failed");
+
+    expect(service.getRun(failed.run.id).threadId).toBeNull();
+    expect(service.getAgent(agent.id).codexThreadId).toBe("thread_old");
+  });
+
+  it("does not accept a Runner thread after cancellation", async () => {
+    let callCount = 0;
+    let rejectPending!: (reason: Error) => void;
+    const service = await makeService({
+      run: async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          return { output: "seed", threadId: "thread_old", usage: null };
+        }
+        return new Promise<RunnerResult>((_resolve, reject) => {
+          rejectPending = reject;
+        });
+      },
+      cancel: async () => {
+        rejectPending(new Error("cancelled by test"));
+        return true;
+      },
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Cancellation Isolation" });
+    const seed = await service.sendMessage(agent.id, "seed thread");
+    await expect.poll(() => service.getRun(seed.run.id).status).toBe("completed");
+    const cancelled = await service.sendMessage(agent.id, "cancel now");
+    await expect.poll(() => callCount).toBe(2);
+    await service.stopAgent(agent.id);
+
+    expect(service.getRun(cancelled.run.id)).toMatchObject({
+      status: "cancelled",
+      threadId: null,
+    });
+    expect(service.getAgent(agent.id)).toMatchObject({
+      status: "stopped",
+      codexThreadId: "thread_old",
+    });
   });
 
   it("atomically accepts only one concurrent run per Agent", async () => {

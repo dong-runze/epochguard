@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   link,
+  lstat,
   mkdir,
   readFile,
   realpath,
@@ -93,19 +94,27 @@ export class WorkspaceManager {
     }
 
     const workspace = await this.canonicalWorkspace(agentId);
-    const destinationDirectory = path.join(
-      workspace,
-      ".epochguard",
-      "sessions",
-      sessionId,
-      role,
-    );
-    await mkdir(destinationDirectory, { recursive: true });
+    const managedSegments = [".epochguard", "sessions", sessionId, role];
+    let canonicalDestinationDirectory = workspace;
+    for (const segment of managedSegments) {
+      canonicalDestinationDirectory = await this.ensureExactDirectory(
+        canonicalDestinationDirectory,
+        segment,
+        true,
+      );
+    }
 
-    // Resolve after mkdir so a pre-existing symlink/junction in any path
-    // component cannot redirect the write outside the Agent workspace.
-    const canonicalDestinationDirectory = await realpath(destinationDirectory);
-    this.assertInside(workspace, canonicalDestinationDirectory);
+    // Revalidate the entire chain immediately before publishing. Portable Node
+    // APIs do not expose openat(2)+O_NOFOLLOW for a whole path, so an
+    // administrator or a same-user malicious process can still swap a
+    // component between the final check and the write/link. Creating one level
+    // at a time and resolving every component before each filesystem effect
+    // closes the static junction/symlink boundary and materially narrows that
+    // unavoidable local-filesystem TOCTOU window.
+    canonicalDestinationDirectory = await this.verifyManagedDirectoryChain(
+      agentId,
+      managedSegments,
+    );
 
     const destination = path.join(
       canonicalDestinationDirectory,
@@ -118,6 +127,14 @@ export class WorkspaceManager {
 
     try {
       await writeFile(temporary, canonicalPack, { flag: "wx", mode: 0o600 });
+      await this.assertExactRegularFile(temporary);
+      const revalidatedDestination = await this.verifyManagedDirectoryChain(
+        agentId,
+        managedSegments,
+      );
+      if (!this.pathsEqual(canonicalDestinationDirectory, revalidatedDestination)) {
+        throw new Error("Evidence Pack directory identity changed during write");
+      }
       await link(temporary, destination);
     } finally {
       await rm(temporary, { force: true });
@@ -136,9 +153,10 @@ export class WorkspaceManager {
   async readAgentsMdDigest(agentId: string): Promise<string> {
     this.assertSafeSegment("agentId", agentId);
     const workspace = await this.canonicalWorkspace(agentId);
-    const agentsMdPath = await realpath(path.join(workspace, "AGENTS.md"));
-    this.assertInside(workspace, agentsMdPath);
+    const agentsMdPath = path.join(workspace, "AGENTS.md");
+    await this.assertExactRegularFile(agentsMdPath);
     const bytes = await readFile(agentsMdPath);
+    await this.assertExactRegularFile(agentsMdPath);
     return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
   }
 
@@ -163,21 +181,77 @@ export class WorkspaceManager {
     }
   }
 
-  private assertInside(parent: string, candidate: string): void {
-    const relative = path.relative(parent, candidate);
-    if (
-      relative === ".." ||
-      relative.startsWith(`..${path.sep}`) ||
-      path.isAbsolute(relative)
-    ) {
-      throw new Error("Workspace path escapes the Agent workspace");
+  private pathsEqual(left: string, right: string): boolean {
+    return path.relative(left, right) === "";
+  }
+
+  private async assertExactRegularFile(expectedPath: string): Promise<void> {
+    const information = await lstat(expectedPath);
+    if (!information.isFile() || information.isSymbolicLink()) {
+      throw new Error("Managed file is not an exact regular file");
     }
+    const resolved = await realpath(expectedPath);
+    if (!this.pathsEqual(expectedPath, resolved)) {
+      throw new Error("Managed file resolves outside its exact path");
+    }
+  }
+
+  private async ensureExactDirectory(
+    canonicalParent: string,
+    segment: string,
+    createIfMissing: boolean,
+  ): Promise<string> {
+    const expected = path.join(canonicalParent, segment);
+    let information;
+    try {
+      information = await lstat(expected);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!createIfMissing || code !== "ENOENT") {
+        throw error;
+      }
+      try {
+        await mkdir(expected, { recursive: false });
+      } catch (mkdirError) {
+        if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") {
+          throw mkdirError;
+        }
+      }
+      information = await lstat(expected);
+    }
+
+    if (!information.isDirectory() || information.isSymbolicLink()) {
+      throw new Error("Managed directory is not an exact directory");
+    }
+    const resolved = await realpath(expected);
+    if (!this.pathsEqual(expected, resolved)) {
+      throw new Error("Managed directory resolves outside its exact path");
+    }
+    return resolved;
+  }
+
+  private async verifyManagedDirectoryChain(
+    agentId: string,
+    segments: readonly string[],
+  ): Promise<string> {
+    let current = await this.canonicalWorkspace(agentId);
+    for (const segment of segments) {
+      current = await this.ensureExactDirectory(current, segment, false);
+    }
+    return current;
   }
 
   private async canonicalWorkspace(agentId: string): Promise<string> {
     const canonicalRoot = await realpath(this.root);
-    const canonicalWorkspace = await realpath(this.workspacePath(agentId));
-    this.assertInside(canonicalRoot, canonicalWorkspace);
+    const expectedWorkspace = path.join(canonicalRoot, agentId);
+    const information = await lstat(expectedWorkspace);
+    if (!information.isDirectory() || information.isSymbolicLink()) {
+      throw new Error("Agent workspace is not an exact directory");
+    }
+    const canonicalWorkspace = await realpath(expectedWorkspace);
+    if (!this.pathsEqual(expectedWorkspace, canonicalWorkspace)) {
+      throw new Error("Agent workspace does not match its canonical Agent identity");
+    }
     return canonicalWorkspace;
   }
 }

@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
 import {
+  access,
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -32,21 +35,45 @@ async function makeWorkspace(): Promise<{
   const workspaceRoot = path.join(root, "workspaces");
   const manager = new WorkspaceManager(workspaceRoot);
   await manager.initialize();
+  const agent = makeAgent(manager, "agent_inventory", "Inventory Agent");
+  await manager.create(agent);
+  return { root, manager, agent };
+}
+
+function makeAgent(
+  manager: WorkspaceManager,
+  id: string,
+  name: string,
+): Agent {
   const timestamp = new Date().toISOString();
-  const agent: Agent = {
-    id: "agent_inventory",
-    name: "Inventory Agent",
-    description: "Reads inventory evidence",
-    instructions: "Return only the inventory decision.",
+  return {
+    id,
+    name,
+    description: `Evidence workspace for ${name}`,
+    instructions: `Return only the ${name} decision.`,
     status: "ready",
-    workspacePath: manager.workspacePath("agent_inventory"),
+    workspacePath: manager.workspacePath(id),
     codexThreadId: null,
     lastError: null,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
-  await manager.create(agent);
-  return { root, manager, agent };
+}
+
+async function makeDirectoryJunction(target: string, junction: string): Promise<void> {
+  await symlink(target, junction, process.platform === "win32" ? "junction" : "dir");
+}
+
+async function exists(target: string): Promise<boolean> {
+  try {
+    await access(target);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 describe("WorkspaceManager EpochGuard seams", () => {
@@ -183,5 +210,100 @@ describe("WorkspaceManager EpochGuard seams", () => {
     await expect(manager.readAgentsMdDigest("../agent_inventory")).rejects.toThrow(
       /safe workspace path segment/,
     );
+  });
+
+  it("rejects an Agent workspace junction to an external directory without side effects", async () => {
+    const { root, manager, agent } = await makeWorkspace();
+    const externalWorkspace = path.join(root, "external-workspace");
+    await mkdir(externalWorkspace);
+    await writeFile(path.join(externalWorkspace, "AGENTS.md"), "external", "utf8");
+    await rm(agent.workspacePath, { recursive: true });
+    await makeDirectoryJunction(externalWorkspace, agent.workspacePath);
+
+    await expect(manager.readAgentsMdDigest(agent.id)).rejects.toThrow(
+      /exact directory|canonical Agent identity/,
+    );
+    await expect(
+      manager.writeEvidencePackAtomic(
+        agent.id,
+        "session_1",
+        "inventory",
+        "assignment_1",
+        "{}",
+      ),
+    ).rejects.toThrow(/exact directory|canonical Agent identity/);
+    expect(await exists(path.join(externalWorkspace, ".epochguard"))).toBe(false);
+  });
+
+  it("rejects a workspace junction to a sibling Agent and cannot read its AGENTS.md", async () => {
+    const { manager, agent } = await makeWorkspace();
+    const sibling = makeAgent(manager, "agent_budget", "Budget Agent");
+    await manager.create(sibling);
+    const siblingInstructions = await readFile(
+      path.join(sibling.workspacePath, "AGENTS.md"),
+      "utf8",
+    );
+    await rm(agent.workspacePath, { recursive: true });
+    await makeDirectoryJunction(sibling.workspacePath, agent.workspacePath);
+
+    await expect(manager.readAgentsMdDigest(agent.id)).rejects.toThrow(
+      /exact directory|canonical Agent identity/,
+    );
+    await expect(
+      manager.writeEvidencePackAtomic(
+        agent.id,
+        "session_1",
+        "inventory",
+        "assignment_1",
+        "{}",
+      ),
+    ).rejects.toThrow(/exact directory|canonical Agent identity/);
+    expect(await readFile(path.join(sibling.workspacePath, "AGENTS.md"), "utf8")).toBe(
+      siblingInstructions,
+    );
+    expect(await exists(path.join(sibling.workspacePath, ".epochguard"))).toBe(false);
+  });
+
+  it("rejects an external .epochguard junction before creating external directories", async () => {
+    const { root, manager, agent } = await makeWorkspace();
+    const externalEpochGuard = path.join(root, "external-epochguard");
+    await mkdir(externalEpochGuard);
+    await makeDirectoryJunction(
+      externalEpochGuard,
+      path.join(agent.workspacePath, ".epochguard"),
+    );
+
+    await expect(
+      manager.writeEvidencePackAtomic(
+        agent.id,
+        "session_1",
+        "inventory",
+        "assignment_1",
+        "{}",
+      ),
+    ).rejects.toThrow(/exact directory/);
+    expect(await exists(path.join(externalEpochGuard, "sessions"))).toBe(false);
+  });
+
+  it("rejects an external intermediate sessions junction without creating a session", async () => {
+    const { root, manager, agent } = await makeWorkspace();
+    const externalSessions = path.join(root, "external-sessions");
+    await mkdir(externalSessions);
+    await mkdir(path.join(agent.workspacePath, ".epochguard"));
+    await makeDirectoryJunction(
+      externalSessions,
+      path.join(agent.workspacePath, ".epochguard", "sessions"),
+    );
+
+    await expect(
+      manager.writeEvidencePackAtomic(
+        agent.id,
+        "session_1",
+        "inventory",
+        "assignment_1",
+        "{}",
+      ),
+    ).rejects.toThrow(/exact directory/);
+    expect(await exists(path.join(externalSessions, "session_1"))).toBe(false);
   });
 });
