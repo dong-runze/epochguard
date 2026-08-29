@@ -26,6 +26,7 @@ import {
   ROLES,
   RoleAgentRegistrationSchema,
   RunAssignmentSchema,
+  TimestampSchema,
   sha256Digest,
   type AgentAttempt,
   type Role,
@@ -756,6 +757,41 @@ describe("EpochGuard Run Observer", () => {
     expect(store.state.runAssignments[0]?.status).toBe("REJECTED");
   });
 
+  it.each([
+    ["RFC1123", "Sat, 29 Aug 2026 12:00:02 GMT"],
+    ["RFC3339 without an offset", "2026-08-29T12:00:02"],
+  ])(
+    "rejects a Date.parse-compatible but contract-invalid %s timestamp",
+    async (_label, invalidCompletedAt) => {
+      expect(Number.isFinite(Date.parse(invalidCompletedAt))).toBe(true);
+      expect(TimestampSchema.safeParse(invalidCompletedAt).success).toBe(false);
+      const { assignment, store, harness, ports, clock } = makeHarness();
+      harness.runSequence = [
+        makeRun("budget", "running"),
+        makeRun("budget", "failed", {
+          completedAt: invalidCompletedAt,
+        }),
+      ];
+
+      await expect(
+        dispatchBindPoll(
+          { assignmentId: assignment.assignmentId, attemptId: "attempt_budget" },
+          ports,
+          { clock },
+        ),
+      ).rejects.toBeInstanceOf(RunAdapterError);
+      expect(store.state.runAssignments[0]?.status).toBe("REJECTED");
+      expect(store.state.attempts[0]).toMatchObject({
+        status: "RUNNING",
+        runStartedAt: "2026-08-29T12:00:01.000Z",
+        runCompletedAt: null,
+      });
+      expect(AgentAttemptSchema.safeParse(store.state.attempts[0]).success).toBe(
+        true,
+      );
+    },
+  );
+
   it("rejects missing or reversed terminal time without corrupting known evidence", async () => {
     for (const malformedTerminal of [
       makeRun("budget", "failed", { completedAt: null }),
@@ -774,6 +810,7 @@ describe("EpochGuard Run Observer", () => {
           { clock },
         ),
       ).rejects.toMatchObject({
+        name: "RunAdapterError",
         attempt: {
           status: "RUNNING",
           runStartedAt: "2026-08-29T12:00:01.000Z",

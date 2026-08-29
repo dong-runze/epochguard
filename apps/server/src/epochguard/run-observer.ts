@@ -5,6 +5,7 @@ import {
   ROLES,
   RunAssignmentSchema,
   RunUsageSchema,
+  TimestampSchema,
   sha256Digest,
   type AgentAttempt,
   type FailureCode,
@@ -154,7 +155,7 @@ function validateRunIdentity(
 }
 
 function validTimestamp(value: string | null): boolean {
-  return value === null || Number.isFinite(Date.parse(value));
+  return value === null || TimestampSchema.safeParse(value).success;
 }
 
 function validateTimestampOrder(startedAt: string | null, completedAt: string | null): void {
