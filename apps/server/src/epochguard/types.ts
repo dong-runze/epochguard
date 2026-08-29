@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-export const CONTRACT_VERSION = "epochguard-contract-v2" as const;
+export const CONTRACT_VERSION = "epochguard-contract-v3" as const;
 export const CONTRACT_SCHEMA_VERSION = 1 as const;
 export const CONTRACT_DIGEST =
-  "sha256:0f16a9cb9f41cc64014ca8cc508a4f98b270cecf83882f328cb99994f7910d95" as const;
+  "sha256:bb486a46d580589e2eef71618bbe337a59bd349f7e5cb28b9191f34a0f775b07" as const;
 
 export const ROLES = ["inventory", "budget", "policy"] as const;
 export const SOURCES = ["inventory", "budget", "policy"] as const;
@@ -654,7 +654,7 @@ const RejectedOutputArtifactBaseSchema = z
 const ParseRejectedOutputArtifactSchema = RejectedOutputArtifactBaseSchema.extend({
   reason: z.literal("PARSE_REJECTED"),
   originalByteLength: z.number().int().nonnegative().max(16 * 1_024),
-  sanitizedContent: z.string().min(1),
+  sanitizedContent: z.string(),
   sanitizedContentDigest: Sha256DigestSchema,
   truncated: z.literal(false),
 })
@@ -959,6 +959,119 @@ type SessionDashboardSnapshotCandidate = z.infer<
   typeof SessionDashboardSnapshotShapeSchema
 >;
 
+type AuthoritativeSnapshotProjectionRule = {
+  gateState: (typeof GATE_STATES)[number];
+  reasonCode: FailureCode | null;
+  jointValidityState: (typeof JOINT_VALIDITY_STATES)[number];
+  permit: "REQUIRED" | "FORBIDDEN";
+  effect: "REQUIRED" | "FORBIDDEN";
+  refreshPlan: "AVAILABLE" | "ABSENT_OR_COMPLETED";
+  decisions:
+    | "THREE"
+    | "THREE_CURRENT_VALID_ALLOW"
+    | "THREE_CURRENT_VALID_WITH_DENY";
+  availableActions: readonly (typeof AVAILABLE_ACTIONS)[number][];
+  inFlightAttempts: "FORBIDDEN";
+};
+
+export const AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES = {
+  BLOCKED_NO_CUT: {
+    gateState: "LOCKED",
+    reasonCode: "NO_VALID_OBSERVED_WORLD_CUT",
+    jointValidityState: "NO_CUT",
+    permit: "FORBIDDEN",
+    effect: "FORBIDDEN",
+    refreshPlan: "AVAILABLE",
+    decisions: "THREE",
+    availableActions: ["REOBSERVE_INVALID"],
+    inFlightAttempts: "FORBIDDEN",
+  },
+  HISTORICAL_STALE: {
+    gateState: "LOCKED",
+    reasonCode: "HISTORICAL_BUT_STALE_NOW",
+    jointValidityState: "HISTORICAL_STALE",
+    permit: "FORBIDDEN",
+    effect: "FORBIDDEN",
+    refreshPlan: "AVAILABLE",
+    decisions: "THREE",
+    availableActions: ["REOBSERVE_INVALID"],
+    inFlightAttempts: "FORBIDDEN",
+  },
+  CONSISTENT_DENY: {
+    gateState: "LOCKED",
+    reasonCode: "CONSISTENT_DENY",
+    jointValidityState: "VALID_CURRENT",
+    permit: "FORBIDDEN",
+    effect: "FORBIDDEN",
+    refreshPlan: "ABSENT_OR_COMPLETED",
+    decisions: "THREE_CURRENT_VALID_WITH_DENY",
+    availableActions: [],
+    inFlightAttempts: "FORBIDDEN",
+  },
+  READY_AT_CURRENT_HEAD: {
+    gateState: "READY",
+    reasonCode: null,
+    jointValidityState: "VALID_CURRENT",
+    permit: "REQUIRED",
+    effect: "FORBIDDEN",
+    refreshPlan: "ABSENT_OR_COMPLETED",
+    decisions: "THREE_CURRENT_VALID_ALLOW",
+    availableActions: ["COMMIT"],
+    inFlightAttempts: "FORBIDDEN",
+  },
+  COMMITTED: {
+    gateState: "RELEASED",
+    reasonCode: null,
+    jointValidityState: "VALID_CURRENT",
+    permit: "REQUIRED",
+    effect: "REQUIRED",
+    refreshPlan: "ABSENT_OR_COMPLETED",
+    decisions: "THREE_CURRENT_VALID_ALLOW",
+    availableActions: [],
+    inFlightAttempts: "FORBIDDEN",
+  },
+} as const satisfies Record<string, AuthoritativeSnapshotProjectionRule>;
+
+type AuthoritativeSnapshotState =
+  keyof typeof AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES;
+
+function authoritativeProjectionRule(
+  state: SessionState,
+): AuthoritativeSnapshotProjectionRule | null {
+  return Object.prototype.hasOwnProperty.call(
+    AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES,
+    state,
+  )
+    ? AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES[
+        state as AuthoritativeSnapshotState
+      ]
+    : null;
+}
+
+function sameIdSet(left: readonly string[], right: readonly string[]): boolean {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  return (
+    left.length === right.length &&
+    leftSet.size === left.length &&
+    rightSet.size === right.length &&
+    [...leftSet].every((id) => rightSet.has(id))
+  );
+}
+
+function receiptCoversWorldHead(
+  snapshot: SessionDashboardSnapshotCandidate,
+  decision: NonNullable<
+    SessionDashboardSnapshotCandidate["agents"][number]["activeDecision"]
+  >,
+): boolean {
+  return (
+    decision.receipt.validFromSeq <= snapshot.worldHead &&
+    (decision.receipt.validUntilSeq === null ||
+      snapshot.worldHead < decision.receipt.validUntilSeq)
+  );
+}
+
 function snapshotIssue(
   context: z.RefinementCtx,
   message: string,
@@ -990,9 +1103,18 @@ function addSnapshotInvariantIssues(
     (decision) => decision.verdict === "ALLOW",
   ).length;
   const denyDecisions = decisions.length - allowDecisions;
-  const reobservedAgents = snapshot.agents.filter(
-    (agent) => agent.runCount > 1,
-  ).length;
+  const reobservedAgentIds = snapshot.agents
+    .filter((agent) => agent.runCount > 1)
+    .map((agent) => agent.agentId);
+  const reobservedAgents = reobservedAgentIds.length;
+  const projectionRule = authoritativeProjectionRule(snapshot.sessionState);
+  const decisionsValidAtHead =
+    decisions.length === 3 &&
+    decisions.every(
+      (decision) =>
+        decision.evidenceState !== "INVALID_AT_HEAD" &&
+        receiptCoversWorldHead(snapshot, decision),
+    );
   if (
     snapshot.metrics.activeDecisions !== decisions.length ||
     snapshot.metrics.allowDecisions !== allowDecisions ||
@@ -1014,6 +1136,21 @@ function addSnapshotInvariantIssues(
         "runCount",
       ]);
     }
+    if (agent.activeDecision !== null) {
+      const coversHead = receiptCoversWorldHead(
+        snapshot,
+        agent.activeDecision,
+      );
+      const evidenceClaimsHeadValidity =
+        agent.activeDecision.evidenceState !== "INVALID_AT_HEAD";
+      if (evidenceClaimsHeadValidity !== coversHead) {
+        snapshotIssue(
+          context,
+          "Decision evidenceState must agree with half-open Receipt coverage at worldHead",
+          ["agents", index, "activeDecision", "evidenceState"],
+        );
+      }
+    }
   });
 
   const expectedActionHash = actionHash({
@@ -1026,6 +1163,108 @@ function addSnapshotInvariantIssues(
     ]);
   }
 
+  if (projectionRule !== null) {
+    if (
+      snapshot.gate.state !== projectionRule.gateState ||
+      snapshot.gate.reasonCode !== projectionRule.reasonCode ||
+      snapshot.jointValidity.state !== projectionRule.jointValidityState
+    ) {
+      snapshotIssue(
+        context,
+        "Authoritative Session state requires its exact Gate, reason, and joint-validity projection",
+        ["sessionState"],
+      );
+    }
+    const permitPresent = snapshot.gate.permitId !== null;
+    if ((projectionRule.permit === "REQUIRED") !== permitPresent) {
+      snapshotIssue(context, "Permit presence must match authoritative Session state", [
+        "gate",
+        "permitId",
+      ]);
+    }
+    const effectPresent = snapshot.gate.effectId !== null;
+    if (
+      (projectionRule.effect === "REQUIRED") !== effectPresent ||
+      snapshot.gate.effectsInSession !==
+        (projectionRule.effect === "REQUIRED" ? 1 : 0)
+    ) {
+      snapshotIssue(context, "Effect presence/count must match authoritative Session state", [
+        "gate",
+      ]);
+    }
+    if (snapshot.agents.some((agent) => agent.inFlightAttempt !== null)) {
+      snapshotIssue(
+        context,
+        "Authoritative stable Session states cannot retain an in-flight Attempt",
+        ["agents"],
+      );
+    }
+    const decisionsMatch =
+      projectionRule.decisions === "THREE"
+        ? decisions.length === 3
+        : projectionRule.decisions === "THREE_CURRENT_VALID_ALLOW"
+          ? decisionsValidAtHead && allowDecisions === 3
+          : decisionsValidAtHead && denyDecisions > 0;
+    if (!decisionsMatch) {
+      snapshotIssue(
+        context,
+        "Active Decisions must match the authoritative Session outcome",
+        ["agents"],
+      );
+    }
+  }
+
+  if (
+    snapshot.gate.state === "READY" &&
+    snapshot.sessionState !== "READY_AT_CURRENT_HEAD"
+  ) {
+    snapshotIssue(context, "READY Gate is reserved for READY_AT_CURRENT_HEAD", [
+      "gate",
+      "state",
+    ]);
+  }
+  if (
+    snapshot.gate.reasonCode === "CONSISTENT_DENY" &&
+    snapshot.sessionState !== "CONSISTENT_DENY"
+  ) {
+    snapshotIssue(
+      context,
+      "CONSISTENT_DENY reason is reserved for the CONSISTENT_DENY outcome",
+      ["gate", "reasonCode"],
+    );
+  }
+  if (
+    snapshot.gate.state === "LOCKED" &&
+    snapshot.gate.permitId !== null
+  ) {
+    snapshotIssue(context, "LOCKED Gate cannot carry a Permit", [
+      "gate",
+      "permitId",
+    ]);
+  }
+  if (
+    snapshot.gate.permitId !== null &&
+    !["READY_AT_CURRENT_HEAD", "COMMITTING", "COMMITTED"].includes(
+      snapshot.sessionState,
+    )
+  ) {
+    snapshotIssue(context, "Permit is restricted to ready/commit projections", [
+      "gate",
+      "permitId",
+    ]);
+  }
+  if (
+    snapshot.sessionState === "FAILED" &&
+    snapshot.gate.state === "WAITING" &&
+    snapshot.gate.reasonCode === null
+  ) {
+    snapshotIssue(
+      context,
+      "FAILED cannot masquerade as an unreasoned WAITING projection",
+      ["gate"],
+    );
+  }
+
   if (snapshot.gate.state === "RELEASED") {
     if (
       snapshot.gate.effectsInSession !== 1 ||
@@ -1033,11 +1272,14 @@ function addSnapshotInvariantIssues(
       snapshot.gate.permitId === null ||
       snapshot.sessionState !== "COMMITTED" ||
       snapshot.jointValidity.state !== "VALID_CURRENT" ||
+      decisions.length !== 3 ||
+      allowDecisions !== 3 ||
+      !decisionsValidAtHead ||
       snapshot.availableActions.length !== 0
     ) {
       snapshotIssue(
         context,
-        "RELEASED requires one Effect, Permit/Effect IDs, COMMITTED, and no actions",
+        "RELEASED requires COMMITTED, one Permit-bound Effect, three current-valid ALLOW Decisions, and no action",
         ["gate"],
       );
     }
@@ -1050,9 +1292,7 @@ function addSnapshotInvariantIssues(
     ]);
   }
   if (snapshot.sessionState === "COMMITTED" && snapshot.gate.state !== "RELEASED") {
-    snapshotIssue(context, "COMMITTED must project a RELEASED Gate", [
-      "sessionState",
-    ]);
+    snapshotIssue(context, "COMMITTED must project a RELEASED Gate", ["sessionState"]);
   }
   if (
     snapshot.gate.state === "READY" &&
@@ -1113,13 +1353,11 @@ function addSnapshotInvariantIssues(
     const proof = snapshot.jointValidity.noCutProof;
     const boundsAgree =
       proof !== null &&
-      snapshot.sessionState === "BLOCKED_NO_CUT" &&
-      snapshot.gate.state === "LOCKED" &&
       snapshot.jointValidity.lowerBound === proof.lowerBound &&
       snapshot.jointValidity.upperBound === proof.upperBound &&
       proof.lowerBound === expectedLower &&
       proof.upperBound === expectedUpper &&
-      proof.lowerBound > proof.upperBound &&
+      proof.lowerBound >= proof.upperBound &&
       snapshot.jointValidity.currentHeadCovered === false;
     let witnessAgrees = proof !== null;
     if (proof !== null) {
@@ -1143,7 +1381,7 @@ function addSnapshotInvariantIssues(
     if (!boundsAgree || !witnessAgrees) {
       snapshotIssue(
         context,
-        "NO_CUT requires strict contradictory bounds and a matching receipt witness",
+        "NO_CUT requires non-overlapping half-open bounds L>=U and a matching Receipt witness",
         ["jointValidity"],
       );
     }
@@ -1179,19 +1417,13 @@ function addSnapshotInvariantIssues(
     .filter((agent) => {
       const decision = agent.activeDecision;
       if (decision === null) return false;
-      const receipt = decision.receipt;
-      return (
-        decision.evidenceState === "INVALID_AT_HEAD" ||
-        receipt.validFromSeq > snapshot.worldHead ||
-        (receipt.validUntilSeq !== null &&
-          snapshot.worldHead >= receipt.validUntilSeq)
-      );
+      return !receiptCoversWorldHead(snapshot, decision);
     })
     .map((agent) => agent.agentId)
     .sort();
 
   if (snapshot.refreshPlan !== null) {
-    const owners = [...snapshot.refreshPlan.agentIds].sort();
+    const owners = snapshot.refreshPlan.agentIds;
     if (
       new Set(owners).size !== owners.length ||
       owners.some(
@@ -1204,15 +1436,51 @@ function addSnapshotInvariantIssues(
       ]);
     }
     if (
-      snapshot.jointValidity.state === "NO_CUT" &&
-      (owners.join(",") !== invalidAgentIds.join(",") ||
-        snapshot.refreshPlan.reasonCode !== "NO_VALID_OBSERVED_WORLD_CUT")
+      snapshot.refreshPlan.status === "AVAILABLE" &&
+      snapshot.sessionState !== "BLOCKED_NO_CUT" &&
+      snapshot.sessionState !== "HISTORICAL_STALE"
     ) {
       snapshotIssue(
         context,
-        "NO_CUT refresh owners must match invalid receipt owners and roles",
+        "AVAILABLE RefreshPlan is reserved for blocked/historical refresh projections",
         ["refreshPlan"],
       );
+    }
+  }
+
+  if (snapshot.jointValidity.state === "NO_CUT" && snapshot.refreshPlan === null) {
+    snapshotIssue(context, "NO_CUT must retain a RefreshPlan", ["refreshPlan"]);
+  }
+
+  if (projectionRule !== null) {
+    if (projectionRule.refreshPlan === "AVAILABLE") {
+      if (
+        snapshot.refreshPlan?.status !== "AVAILABLE" ||
+        !sameIdSet(snapshot.refreshPlan.agentIds, invalidAgentIds) ||
+        snapshot.refreshPlan.reasonCode !== projectionRule.reasonCode
+      ) {
+        snapshotIssue(
+          context,
+          "Blocked/historical RefreshPlan must be AVAILABLE with the exact invalid-Receipt owner set",
+          ["refreshPlan"],
+        );
+      }
+    } else {
+      const completedPlanValid =
+        reobservedAgentIds.length === 0
+          ? snapshot.refreshPlan === null
+          : snapshot.refreshPlan?.status === "COMPLETED" &&
+            sameIdSet(snapshot.refreshPlan.agentIds, reobservedAgentIds) &&
+            (snapshot.refreshPlan.reasonCode ===
+              "NO_VALID_OBSERVED_WORLD_CUT" ||
+              snapshot.refreshPlan.reasonCode === "HISTORICAL_BUT_STALE_NOW");
+      if (!completedPlanValid) {
+        snapshotIssue(
+          context,
+          "Current-valid terminal/ready outcomes require no initial Plan or the exact COMPLETED refresh Plan",
+          ["refreshPlan"],
+        );
+      }
     }
   }
 
@@ -1225,25 +1493,11 @@ function addSnapshotInvariantIssues(
     ]);
   }
 
-  const expectedActions: (typeof AVAILABLE_ACTIONS)[number][] = [];
-  if (
-    snapshot.gate.state === "READY" &&
-    snapshot.sessionState === "READY_AT_CURRENT_HEAD" &&
-    snapshot.refreshPlan === null
-  ) {
-    expectedActions.push("COMMIT");
-  } else if (
-    snapshot.gate.state === "LOCKED" &&
-    (snapshot.sessionState === "BLOCKED_NO_CUT" ||
-      snapshot.sessionState === "HISTORICAL_STALE") &&
-    snapshot.refreshPlan?.status === "AVAILABLE"
-  ) {
-    expectedActions.push("REOBSERVE_INVALID");
-  }
-  if (snapshot.availableActions.join(",") !== expectedActions.join(",")) {
+  const expectedActions = projectionRule?.availableActions ?? [];
+  if (!sameIdSet(snapshot.availableActions, expectedActions)) {
     snapshotIssue(
       context,
-      "availableActions must match Gate, Session, and refresh state",
+      "availableActions must match the authoritative state; non-authoritative and CLAIMED projections expose no mutation action",
       ["availableActions"],
     );
   }
@@ -1976,7 +2230,12 @@ export const RECOVERED_GOLDEN_SNAPSHOT = {
     verificationLatencyMs: 2,
   },
   agents: [
-    goldenAgent("inventory", { from: 18, until: null, observedAt: 18 }),
+    goldenAgent("inventory", {
+      from: 18,
+      until: null,
+      observedAt: 18,
+      evidenceState: "RETAINED",
+    }),
     goldenAgent("budget", {
       from: 22,
       until: null,
@@ -1984,7 +2243,12 @@ export const RECOVERED_GOLDEN_SNAPSHOT = {
       verdict: "DENY",
       runCount: 2,
     }),
-    goldenAgent("policy", { from: 21, until: null, observedAt: 21 }),
+    goldenAgent("policy", {
+      from: 21,
+      until: null,
+      observedAt: 21,
+      evidenceState: "RETAINED",
+    }),
   ],
   jointValidity: {
     state: "VALID_CURRENT",
@@ -2006,13 +2270,13 @@ export const RECOVERED_GOLDEN_SNAPSHOT = {
 
 export const GOLDEN_SNAPSHOT_HASHES = {
   normalReady:
-    "sha256:3e46ce4e98779ccce7d72f54ab52b198311978b8a49040aa76bbb02b19a1a692",
+    "sha256:1615fade9479779d6a3b5da8c4a5cc6da9056466021e27827ec4de3706889652",
   normalReleased:
-    "sha256:460fc96a3ab3bbd4f690d11237c79c2cc4793271630d95c277fa9a1c7bb60f31",
+    "sha256:255bc673277c86b77fd654ddbe238fe024384481f72584a53d51a11f4a35256f",
   impossible:
-    "sha256:c4375af308fdd43092eb34a0efc36bea23640584f1897ed60ac92977ace76cd9",
+    "sha256:d453c345275a0ca71d97153d40d75fd5d1194c62b0ad59f64bfff754e5ab6b66",
   recovered:
-    "sha256:e8984acc7f3b0cbfb00a2f7bff0896e52ef43b9891d58bc3eb606b9dc36db8b2",
+    "sha256:a7d5b775a485e7de3c6c32b3369bd52ae9bae5eccd8f9fa3729fabf0bab02cb3",
 } as const;
 
 const CONTRACT_FIELD_MANIFEST = {
@@ -2455,18 +2719,24 @@ export const CONTRACT_SEMANTIC_INVARIANTS = [
   "CreateSessionRequest assignments contain three distinct Agents",
   "same Role-Agent triple conflicts with 409 AGENTS_BUSY before dispatch",
   "ResourceVersion.validUntilSeq is null or strictly greater than validFromSeq",
-  "PARSE_REJECTED byte length is <=16384, content/digest are non-null and equal, truncated=false",
+  "PARSE_REJECTED byte length is <=16384, sanitizedContent may be empty, its non-null digest equals sha256(content), and truncated=false",
   "OUTPUT_TOO_LARGE byte length is >16384, content/digest are null, truncated=true",
   "ENVELOPE_DIGEST ArtifactRef.id is Sha256Digest; every other ArtifactRef.id is OpaqueId",
   "Snapshot Agents are ordered inventory,budget,policy and have distinct Agent identities",
   "Snapshot actionHash equals sha256(canonical Snapshot Action)",
   "Snapshot metrics equal active Decision verdicts, reobserved Agent runCounts, and refresh ownership",
-  "RELEASED iff one Effect is projected with Permit/Effect IDs, COMMITTED state, and no mutation action",
+  "Only BLOCKED_NO_CUT, HISTORICAL_STALE, CONSISTENT_DENY, READY_AT_CURRENT_HEAD, and COMMITTED have bidirectionally frozen projection products; other Session states retain only universal safety constraints",
+  "RELEASED iff COMMITTED projects one Permit-bound Effect, effectsInSession=1, three current-valid ALLOW Decisions, and no mutation action or in-flight Attempt",
   "non-RELEASED Snapshot has zero Effects and no Effect ID",
+  "LOCKED carries no Permit; Permit IDs are restricted to READY_AT_CURRENT_HEAD, COMMITTING, or COMMITTED",
   "VALID_CURRENT has no No-Cut proof and exact interval bounds covering worldHead",
-  "NO_CUT has exact receipt-derived L/U with L>U and a two-receipt endpoint witness",
-  "No-Cut refresh owners equal Agents whose active receipts are invalid at worldHead",
-  "availableActions is exactly derived from Gate, Session, Permit, and refresh-plan state",
+  "NO_CUT has exact receipt-derived L/U with L>=U and a two-Receipt endpoint witness",
+  "NO_CUT retains a RefreshPlan while its old proof may remain visible through non-authoritative refresh projections",
+  "CURRENT and RETAINED evidence exactly mean the half-open Receipt covers worldHead; INVALID_AT_HEAD exactly means it does not",
+  "AVAILABLE RefreshPlan exists only for BLOCKED_NO_CUT/HISTORICAL_STALE and owns exactly the current invalid-Receipt Agents; CLAIMED exposes no action",
+  "READY_AT_CURRENT_HEAD accepts an absent initial Plan or the exact COMPLETED selective-refresh Plan and always exposes exactly COMMIT",
+  "FAILED with WAITING and null reason is rejected; side-effect-free FAILED/INTERRUPTED Gate and reason products otherwise remain unfrozen",
+  "availableActions is exactly REOBSERVE_INVALID for blocked/historical AVAILABLE Plans, COMMIT for READY_AT_CURRENT_HEAD, and empty otherwise",
 ] as const;
 
 export const CONTRACT_DIGEST_PLACEHOLDER =
@@ -2569,6 +2839,8 @@ export function buildContractDigestDocument(): JsonValue {
     p0Semantics: CONTRACT_FIELD_MANIFEST.p0Semantics,
     schemas: buildContractJsonSchemas(),
     semanticInvariants: CONTRACT_SEMANTIC_INVARIANTS,
+    authoritativeSnapshotProjectionRules:
+      AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES,
     canonicalization: {
       actionInput: GOLDEN_ACTION_INPUT,
       actionCanonical: GOLDEN_ACTION_CANONICAL,

@@ -6,6 +6,7 @@ import {
   ALREADY_REOBSERVING_MESSAGE,
   API_ERROR_STATUS,
   AgentDecisionEnvelopeSchema,
+  AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES,
   ARTIFACT_REF_KINDS,
   ARTIFACT_REF_TARGETS,
   ActionIntentSchema,
@@ -74,11 +75,115 @@ function expectSnapshotRejected(candidate: unknown): void {
   );
 }
 
+function expectSnapshotAccepted(candidate: unknown): void {
+  expect(SessionDashboardSnapshotSchema.safeParse(candidate).success).toBe(true);
+  expect(webContracts.safeDecodeSessionDashboardSnapshot(candidate).success).toBe(
+    true,
+  );
+}
+
+function makeEqualBoundaryNoCutSnapshot(): any {
+  const snapshot = mutableClone(IMPOSSIBLE_GOLDEN_SNAPSHOT);
+  const policyReceipt = snapshot.agents[2].activeDecision.receipt;
+  policyReceipt.sourceRevision = 20;
+  policyReceipt.observedAtSeq = 20;
+  policyReceipt.validFromSeq = 20;
+  snapshot.jointValidity.lowerBound = 20;
+  snapshot.jointValidity.upperBound = 20;
+  snapshot.jointValidity.noCutProof.lowerBound = 20;
+  snapshot.jointValidity.noCutProof.upperBound = 20;
+  snapshot.jointValidity.noCutProof.witness[1].from = 20;
+  return snapshot;
+}
+
+function makeHistoricalStaleSnapshot(): any {
+  const snapshot = mutableClone(NORMAL_READY_GOLDEN_SNAPSHOT);
+  snapshot.sessionState = "HISTORICAL_STALE";
+  snapshot.worldHead = 12;
+  snapshot.gate = {
+    state: "LOCKED",
+    reasonCode: "HISTORICAL_BUT_STALE_NOW",
+    effectsInSession: 0,
+    permitId: null,
+    effectId: null,
+  };
+  snapshot.agents[1].activeDecision.receipt.validUntilSeq = 11;
+  snapshot.agents[1].activeDecision.evidenceState = "INVALID_AT_HEAD";
+  snapshot.jointValidity = {
+    state: "HISTORICAL_STALE",
+    lowerBound: 10,
+    upperBound: 11,
+    currentHeadCovered: false,
+    noCutProof: null,
+  };
+  snapshot.refreshPlan = {
+    refreshPlanId: "refresh_historical_1",
+    status: "AVAILABLE",
+    agentIds: ["agent_budget"],
+    reasonCode: "HISTORICAL_BUT_STALE_NOW",
+  };
+  snapshot.metrics.rerunsAvoided = 2;
+  snapshot.availableActions = ["REOBSERVE_INVALID"];
+  return snapshot;
+}
+
+function makeInitialConsistentDenySnapshot(): any {
+  const snapshot = mutableClone(NORMAL_READY_GOLDEN_SNAPSHOT);
+  snapshot.sessionState = "CONSISTENT_DENY";
+  snapshot.gate = {
+    state: "LOCKED",
+    reasonCode: "CONSISTENT_DENY",
+    effectsInSession: 0,
+    permitId: null,
+    effectId: null,
+  };
+  snapshot.agents[1].activeDecision.verdict = "DENY";
+  snapshot.metrics.allowDecisions = 2;
+  snapshot.metrics.denyDecisions = 1;
+  snapshot.availableActions = [];
+  return snapshot;
+}
+
+function makeRefreshReadySnapshot(): any {
+  const snapshot = mutableClone(RECOVERED_GOLDEN_SNAPSHOT);
+  snapshot.sessionState = "READY_AT_CURRENT_HEAD";
+  snapshot.gate = {
+    state: "READY",
+    reasonCode: null,
+    effectsInSession: 0,
+    permitId: "permit_refresh_1",
+    effectId: null,
+  };
+  snapshot.agents[1].activeDecision.verdict = "ALLOW";
+  snapshot.metrics.allowDecisions = 3;
+  snapshot.metrics.denyDecisions = 0;
+  snapshot.availableActions = ["COMMIT"];
+  return snapshot;
+}
+
+function makeRefreshInProgressSnapshot(): any {
+  const snapshot = makeEqualBoundaryNoCutSnapshot();
+  snapshot.sessionState = "REOBSERVING";
+  snapshot.refreshPlan.status = "CLAIMED";
+  snapshot.availableActions = [];
+  snapshot.agents[1].runCount = 2;
+  snapshot.agents[1].inFlightAttempt = {
+    attemptId: "attempt_budget_2",
+    assignmentId: "assignment_budget_2",
+    runId: "run_budget_2",
+    status: "RUNNING",
+    runStartedAt: "2026-08-29T12:00:01.000Z",
+    runCompletedAt: null,
+  };
+  snapshot.metrics.reobservedAgents = 1;
+  return snapshot;
+}
+
 describe("EpochGuard frozen contract", () => {
-  it("freezes v2 over complete JSON Schemas, invariants, fixtures, and Snapshots", () => {
-    expect(CONTRACT_VERSION).toBe("epochguard-contract-v2");
+  it("freezes v3 over complete JSON Schemas, invariants, fixtures, and Snapshots", () => {
+    expect(CONTRACT_VERSION).toBe("epochguard-contract-v3");
     expect(CONTRACT_DIGEST).toBe(
-      "sha256:0f16a9cb9f41cc64014ca8cc508a4f98b270cecf83882f328cb99994f7910d95",
+      "sha256:bb486a46d580589e2eef71618bbe337a59bd349f7e5cb28b9191f34a0f775b07",
     );
     expect(computeContractDigest()).toBe(CONTRACT_DIGEST);
     expect(computeContractDigest(CONTRACT_MANIFEST)).toBe(CONTRACT_DIGEST);
@@ -91,6 +196,9 @@ describe("EpochGuard frozen contract", () => {
     expect(document.schemas.CreateSessionRequest.additionalProperties).toBe(false);
     expect(document.schemas.RejectedOutputArtifact).toBeDefined();
     expect(document.semanticInvariants).toEqual(CONTRACT_SEMANTIC_INVARIANTS);
+    expect(document.authoritativeSnapshotProjectionRules).toEqual(
+      AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES,
+    );
     expect(document.fixtures).toEqual(GOLDEN_FIXTURE_MANIFEST);
     expect(document.goldenSnapshots.normalReady.contractDigest).toBe(
       CONTRACT_DIGEST_PLACEHOLDER,
@@ -112,6 +220,9 @@ describe("EpochGuard frozen contract", () => {
     enumValue.schemas.FailureCode.enum[0] = "UNFROZEN_CODE";
     const invariant = mutableClone(CONTRACT_MANIFEST);
     invariant.semanticInvariants[0] = "Action hash is not checked";
+    const projectionRule = mutableClone(CONTRACT_MANIFEST);
+    projectionRule.authoritativeSnapshotProjectionRules.COMMITTED.effect =
+      "FORBIDDEN";
     const fixture = mutableClone(CONTRACT_MANIFEST);
     fixture.fixtures[0].expected.initialEffectsInSession = 1;
 
@@ -120,6 +231,7 @@ describe("EpochGuard frozen contract", () => {
       commandDto,
       enumValue,
       invariant,
+      projectionRule,
       fixture,
     ]) {
       expect(computeContractDigest(tampered)).not.toBe(CONTRACT_DIGEST);
@@ -144,6 +256,9 @@ describe("EpochGuard frozen contract", () => {
     }
     expect(webContracts.CONTRACT_SEMANTIC_INVARIANTS).toEqual(
       CONTRACT_SEMANTIC_INVARIANTS,
+    );
+    expect(webContracts.AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES).toEqual(
+      AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES,
     );
   });
 
@@ -342,6 +457,20 @@ describe("EpochGuard frozen contract", () => {
     } as const;
     expect(RejectedOutputArtifactSchema.parse(parseRejected)).toEqual(parseRejected);
     expect(RejectedOutputArtifactSchema.parse(tooLarge)).toEqual(tooLarge);
+    const emptyOutput = {
+      ...parseRejected,
+      originalByteLength: 0,
+      sanitizedContent: "",
+      sanitizedContentDigest: sha256Digest(""),
+    } as const;
+    const fullyRedactedOutput = {
+      ...emptyOutput,
+      originalByteLength: 128,
+    } as const;
+    expect(RejectedOutputArtifactSchema.parse(emptyOutput)).toEqual(emptyOutput);
+    expect(RejectedOutputArtifactSchema.parse(fullyRedactedOutput)).toEqual(
+      fullyRedactedOutput,
+    );
 
     for (const artifact of [
       { ...parseRejected, originalByteLength: 16 * 1_024 + 1 },
@@ -451,6 +580,231 @@ describe("EpochGuard frozen contract", () => {
     expect(decodeSessionDashboardSnapshot(NORMAL_READY_GOLDEN_SNAPSHOT)).toEqual(
       NORMAL_READY_GOLDEN_SNAPSHOT,
     );
+  });
+
+  it("accepts the frozen five-state positive projections and L==U No-Cut", () => {
+    const equalBoundaryNoCut = makeEqualBoundaryNoCutSnapshot();
+    const historical = makeHistoricalStaleSnapshot();
+    const initialDeny = makeInitialConsistentDenySnapshot();
+
+    for (const snapshot of [
+      equalBoundaryNoCut,
+      historical,
+      initialDeny,
+      NORMAL_READY_GOLDEN_SNAPSHOT,
+      NORMAL_RELEASED_GOLDEN_SNAPSHOT,
+    ]) {
+      expectSnapshotAccepted(snapshot);
+    }
+    expect(equalBoundaryNoCut.jointValidity).toMatchObject({
+      state: "NO_CUT",
+      lowerBound: 20,
+      upperBound: 20,
+    });
+    expect(initialDeny.refreshPlan).toBeNull();
+    expect(historical.refreshPlan).toMatchObject({
+      status: "AVAILABLE",
+      agentIds: ["agent_budget"],
+    });
+  });
+
+  it("accepts selective refresh with retained evidence through READY -> COMMITTING -> COMMITTED", () => {
+    const reobserving = makeRefreshInProgressSnapshot();
+    const collecting = mutableClone(reobserving);
+    collecting.sessionState = "COLLECTING";
+    collecting.gate.state = "WAITING";
+    const validating = mutableClone(reobserving);
+    validating.sessionState = "VALIDATING";
+    validating.gate.state = "CHECKING";
+
+    const ready = makeRefreshReadySnapshot();
+    const committing = mutableClone(ready);
+    committing.sessionState = "COMMITTING";
+    committing.gate.state = "CHECKING";
+    committing.availableActions = [];
+    const committed = mutableClone(ready);
+    committed.sessionState = "COMMITTED";
+    committed.gate = {
+      state: "RELEASED",
+      reasonCode: null,
+      effectsInSession: 1,
+      permitId: "permit_refresh_1",
+      effectId: "effect_refresh_1",
+    };
+    committed.availableActions = [];
+
+    const commitRacePending = mutableClone(NORMAL_READY_GOLDEN_SNAPSHOT);
+    commitRacePending.sessionState = "COMMIT_RACE";
+    commitRacePending.gate = {
+      state: "LOCKED",
+      reasonCode: "COMMIT_RACE",
+      effectsInSession: 0,
+      permitId: null,
+      effectId: null,
+    };
+    commitRacePending.jointValidity = {
+      state: "PENDING",
+      lowerBound: null,
+      upperBound: null,
+      currentHeadCovered: null,
+      noCutProof: null,
+    };
+    commitRacePending.availableActions = [];
+    const failedLockedWithoutInventedReason = mutableClone(commitRacePending);
+    failedLockedWithoutInventedReason.sessionState = "FAILED";
+    failedLockedWithoutInventedReason.gate.reasonCode = null;
+    const interruptedWithoutDedicatedReason = mutableClone(commitRacePending);
+    interruptedWithoutDedicatedReason.sessionState = "INTERRUPTED";
+    interruptedWithoutDedicatedReason.gate.reasonCode = null;
+
+    for (const snapshot of [
+      reobserving,
+      collecting,
+      validating,
+      ready,
+      committing,
+      committed,
+      commitRacePending,
+      failedLockedWithoutInventedReason,
+      interruptedWithoutDedicatedReason,
+    ]) {
+      expectSnapshotAccepted(snapshot);
+    }
+    expect(
+      ready.agents.map((agent: any) => agent.activeDecision.evidenceState),
+    ).toEqual(["RETAINED", "CURRENT", "RETAINED"]);
+    expect(ready.refreshPlan).toMatchObject({
+      status: "COMPLETED",
+      agentIds: ["agent_budget"],
+    });
+    expect(ready.availableActions).toEqual(["COMMIT"]);
+    expect(committing.gate.effectsInSession).toBe(0);
+    expect(committed.gate.effectsInSession).toBe(1);
+  });
+
+  it("rejects every audited five-state and universal-safety counterexample on both decoders", () => {
+    const coherentButNotNoCut = makeEqualBoundaryNoCutSnapshot();
+    const policyReceipt = coherentButNotNoCut.agents[2].activeDecision.receipt;
+    policyReceipt.sourceRevision = 19;
+    policyReceipt.observedAtSeq = 19;
+    policyReceipt.validFromSeq = 19;
+    coherentButNotNoCut.jointValidity.lowerBound = 19;
+    coherentButNotNoCut.jointValidity.noCutProof.lowerBound = 19;
+    coherentButNotNoCut.jointValidity.noCutProof.witness[1].from = 19;
+
+    const releasedWithDeny = mutableClone(NORMAL_RELEASED_GOLDEN_SNAPSHOT);
+    releasedWithDeny.agents[1].activeDecision.verdict = "DENY";
+    releasedWithDeny.metrics.allowDecisions = 2;
+    releasedWithDeny.metrics.denyDecisions = 1;
+    const readyInvalidEvidence = makeRefreshReadySnapshot();
+    readyInvalidEvidence.agents[0].activeDecision.evidenceState =
+      "INVALID_AT_HEAD";
+    const releasedInvalidEvidence = mutableClone(NORMAL_RELEASED_GOLDEN_SNAPSHOT);
+    releasedInvalidEvidence.agents[0].activeDecision.evidenceState =
+      "INVALID_AT_HEAD";
+    const lockedWithPermit = mutableClone(IMPOSSIBLE_GOLDEN_SNAPSHOT);
+    lockedWithPermit.gate.permitId = "permit_illegal";
+    const noCutWithoutPlan = makeEqualBoundaryNoCutSnapshot();
+    noCutWithoutPlan.refreshPlan = null;
+    noCutWithoutPlan.metrics.rerunsAvoided = 0;
+    noCutWithoutPlan.availableActions = [];
+    const readyWithReason = mutableClone(NORMAL_READY_GOLDEN_SNAPSHOT);
+    readyWithReason.gate.reasonCode = "CONSISTENT_DENY";
+    const releasedWithReason = mutableClone(NORMAL_RELEASED_GOLDEN_SNAPSHOT);
+    releasedWithReason.gate.reasonCode = "CONSISTENT_DENY";
+    const readyWithWaitingGate = mutableClone(NORMAL_READY_GOLDEN_SNAPSHOT);
+    readyWithWaitingGate.gate.state = "WAITING";
+    readyWithWaitingGate.gate.permitId = null;
+
+    const consistentAllAllow = makeInitialConsistentDenySnapshot();
+    consistentAllAllow.agents[1].activeDecision.verdict = "ALLOW";
+    consistentAllAllow.metrics.allowDecisions = 3;
+    consistentAllAllow.metrics.denyDecisions = 0;
+    const consistentNullReason = makeInitialConsistentDenySnapshot();
+    consistentNullReason.gate.reasonCode = null;
+    const consistentWrongReason = makeInitialConsistentDenySnapshot();
+    consistentWrongReason.gate.reasonCode = "RUN_FAILED";
+    const consistentProjectionWrongState = makeInitialConsistentDenySnapshot();
+    consistentProjectionWrongState.sessionState = "FAILED";
+    const blockedNullReason = makeEqualBoundaryNoCutSnapshot();
+    blockedNullReason.gate.reasonCode = null;
+    const blockedWrongReason = makeEqualBoundaryNoCutSnapshot();
+    blockedWrongReason.gate.reasonCode = "HISTORICAL_BUT_STALE_NOW";
+
+    const failedWaiting = mutableClone(NORMAL_READY_GOLDEN_SNAPSHOT);
+    failedWaiting.sessionState = "FAILED";
+    failedWaiting.gate = {
+      state: "WAITING",
+      reasonCode: null,
+      effectsInSession: 0,
+      permitId: null,
+      effectId: null,
+    };
+    failedWaiting.jointValidity = {
+      state: "PENDING",
+      lowerBound: null,
+      upperBound: null,
+      currentHeadCovered: null,
+      noCutProof: null,
+    };
+    failedWaiting.availableActions = [];
+
+    const claimedStillBlocked = makeEqualBoundaryNoCutSnapshot();
+    claimedStillBlocked.refreshPlan.status = "CLAIMED";
+    claimedStillBlocked.availableActions = [];
+    const historicalWrongOwner = makeHistoricalStaleSnapshot();
+    historicalWrongOwner.refreshPlan.agentIds = ["agent_policy"];
+    const refreshedReadyAsAvailable = makeRefreshReadySnapshot();
+    refreshedReadyAsAvailable.refreshPlan.status = "AVAILABLE";
+    const refreshedReadyAsClaimed = makeRefreshReadySnapshot();
+    refreshedReadyAsClaimed.refreshPlan.status = "CLAIMED";
+    refreshedReadyAsClaimed.availableActions = [];
+    const refreshedReadyWrongOwner = makeRefreshReadySnapshot();
+    refreshedReadyWrongOwner.refreshPlan.agentIds = ["agent_policy"];
+
+    const inFlightAttempt = makeRefreshInProgressSnapshot().agents[1]
+      .inFlightAttempt;
+    const readyWithInFlight = makeRefreshReadySnapshot();
+    readyWithInFlight.agents[1].inFlightAttempt = mutableClone(inFlightAttempt);
+    const releasedWithInFlight = makeRefreshReadySnapshot();
+    releasedWithInFlight.sessionState = "COMMITTED";
+    releasedWithInFlight.gate = {
+      state: "RELEASED",
+      reasonCode: null,
+      effectsInSession: 1,
+      permitId: "permit_refresh_1",
+      effectId: "effect_refresh_1",
+    };
+    releasedWithInFlight.availableActions = [];
+    releasedWithInFlight.agents[1].inFlightAttempt = mutableClone(inFlightAttempt);
+
+    for (const candidate of [
+      coherentButNotNoCut,
+      releasedWithDeny,
+      readyInvalidEvidence,
+      releasedInvalidEvidence,
+      lockedWithPermit,
+      noCutWithoutPlan,
+      readyWithReason,
+      releasedWithReason,
+      readyWithWaitingGate,
+      consistentAllAllow,
+      consistentNullReason,
+      consistentWrongReason,
+      consistentProjectionWrongState,
+      blockedNullReason,
+      blockedWrongReason,
+      failedWaiting,
+      claimedStillBlocked,
+      historicalWrongOwner,
+      refreshedReadyAsAvailable,
+      refreshedReadyAsClaimed,
+      refreshedReadyWrongOwner,
+      readyWithInFlight,
+      releasedWithInFlight,
+    ]) {
+      expectSnapshotRejected(candidate);
+    }
   });
 
   it("freezes READY -> COMMIT -> RELEASED as Normal's only 0 -> 1 transition", () => {
