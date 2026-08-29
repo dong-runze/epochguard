@@ -804,10 +804,10 @@ npm run check
 
 | ID | 名称 | 状态 | Base SHA | Commit SHA | 中央门 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
-| CONTROL | 规划/审核/测试 | ACTIVE | `c6e07b8` | `e5f0b3a` | — | 本 Session，位于 `epochguard/staging`；负责 worktree 初始化与故障恢复 |
+| CONTROL | 规划/审核/测试 | ACTIVE | `c6e07b8` | `b5576dc` | — | 本 Session，位于 `epochguard/staging`；负责 worktree 初始化与故障恢复 |
 | EG-CANARY | 可视化 Session 只读灰度 | ACCEPTED | `475cb93` | — | Visibility / Read-only | 可视化机制通过；worktree 隔离未通过 |
 | EG-00 | Contracts & Starter Seams | MERGED | `c6e07b8` | `d0f7861` | Gate A **PASS** | 已合入 `epochguard/staging@e5f0b3a` |
-| EG-01 | EpochStore | RUNNING | `e5f0b3a` | — | Gate B | 已激活独立实现 |
+| EG-01 | EpochStore | MERGED | `e5f0b3a` | `a7ba259` | Gate B Store **PASS** | 已合入 `epochguard/staging@b5576dc` |
 | EG-02 | World / Receipt / Evidence | RUNNING | `e5f0b3a` | — | Gate B | 已激活独立实现 |
 | EG-03 | Decision / Joint Validity | RUNNING | `e5f0b3a` | — | Gate B | 已激活独立实现 |
 | EG-04 | Refresh / Effect Gate | RUNNING | `e5f0b3a` | — | Gate B/C | 已激活，mock-first |
@@ -862,7 +862,7 @@ BLOCKED
 | ID | Thread ID | Branch | Worktree | 当前阶段 |
 | --- | --- | --- | --- | --- |
 | EG-00 | `01a04d0c-953a-78e3-a118-0822248058b4` | `epochguard/eg-00-contracts` | `.epochguard-worktrees/eg-00` | MERGED / GATE A PASS |
-| EG-01 | `01a04d0c-9c28-7ec3-83d1-29404eec12dc` | `epochguard/eg-01-store` | `.epochguard-worktrees/eg-01` | ACTIVE IMPLEMENTATION |
+| EG-01 | `01a04d0c-9c28-7ec3-83d1-29404eec12dc` | `epochguard/eg-01-store` | `.epochguard-worktrees/eg-01` | MERGED / GATE B STORE PASS |
 | EG-02 | `01a04d0c-a19c-7a61-a104-dfde763c48de` | `epochguard/eg-02-evidence` | `.epochguard-worktrees/eg-02` | ACTIVE IMPLEMENTATION |
 | EG-03 | `01a04d0c-a7a7-7742-80f2-7d8414726909` | `epochguard/eg-03-validity` | `.epochguard-worktrees/eg-03` | ACTIVE IMPLEMENTATION |
 | EG-04 | `01a04d0c-ad8e-7e10-a74e-e3b97f8414f6` | `epochguard/eg-04-gate` | `.epochguard-worktrees/eg-04` | ACTIVE IMPLEMENTATION |
@@ -888,6 +888,21 @@ BLOCKED
 | Gate A | **PASS** |
 
 已知非 Gate A 阻断项：Windows 上单个测试硬编码 POSIX `/tmp` 路径；`npm audit` 报告 1 个 moderate 与 5 个 high 的既有依赖风险，需在发布门前单独跟踪，不得与合同语义正确性混为一项。
+
+### 15.4 EG-01 / EpochStore 验收记录
+
+| 字段 | 结果 |
+| --- | --- |
+| 模块提交 | `a7ba2596319da6636270a90ae59d7728f1f5e7f1` |
+| staging 合并提交 | `b5576dc21fe65ec63dbc8a9b65218b93e476d3e8` |
+| 变更边界 | 1 个线性提交；只新增 `epoch-store.ts` 与 `epoch-store.test.ts` |
+| 中央聚焦测试 | Contracts + EpochStore **33/33 PASS** |
+| 构建门 | Server typecheck / build **PASS** |
+| 独立边界审核 | 合同文件与 v6 digest 不变；allowlist、提交拓扑、公开 API、初始化闭合均 **PASS** |
+| 独立故障矩阵 | 64 路并发、10 次失败队列、callback/write/rename/serialization 故障、alias 隔离、损坏文件与重启恢复均 **PASS** |
+| Gate B Store 子项 | **PASS** |
+
+验收边界：EpochStore 只承诺单 Node 进程内的单 writer JSON 持久化，不宣称支持多进程或多服务副本共享同一文件。全量 Windows Server 的既知 POSIX `/tmp/codex-home` 断言仍单独跟踪，不归因于 EG-01。
 
 ---
 
