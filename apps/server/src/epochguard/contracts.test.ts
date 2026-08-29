@@ -44,6 +44,7 @@ import {
   SafetyDiagnosticSchema,
   ScenarioFixtureManifestEntrySchema,
   SessionDashboardSnapshotSchema,
+  SNAPSHOT_UNIVERSAL_SAFETY_RULES,
   UNSUPPORTED_SCHEMA_MESSAGE,
   actionHash,
   buildContractDigestDocument,
@@ -179,11 +180,31 @@ function makeRefreshInProgressSnapshot(): any {
   return snapshot;
 }
 
+function makeTwoOwnerRefreshInProgressSnapshot(): any {
+  const snapshot = makeRefreshInProgressSnapshot();
+  snapshot.refreshPlan.agentIds = ["agent_budget", "agent_policy"];
+  snapshot.metrics.rerunsAvoided = 1;
+  snapshot.agents[2].runCount = 2;
+  snapshot.agents[2].activeDecision.evidenceState = "INVALID_AT_HEAD";
+  snapshot.agents[2].activeDecision.receipt.validUntilSeq = 21;
+  snapshot.jointValidity.noCutProof.witness[1].until = 21;
+  snapshot.agents[2].inFlightAttempt = {
+    attemptId: "attempt_policy_2",
+    assignmentId: "assignment_policy_2",
+    runId: "run_policy_2",
+    status: "RUNNING",
+    runStartedAt: "2026-08-29T12:00:01.000Z",
+    runCompletedAt: null,
+  };
+  snapshot.metrics.reobservedAgents = 2;
+  return snapshot;
+}
+
 describe("EpochGuard frozen contract", () => {
-  it("freezes v3 over complete JSON Schemas, invariants, fixtures, and Snapshots", () => {
-    expect(CONTRACT_VERSION).toBe("epochguard-contract-v3");
+  it("freezes v4 over complete JSON Schemas, invariants, fixtures, and Snapshots", () => {
+    expect(CONTRACT_VERSION).toBe("epochguard-contract-v4");
     expect(CONTRACT_DIGEST).toBe(
-      "sha256:bb486a46d580589e2eef71618bbe337a59bd349f7e5cb28b9191f34a0f775b07",
+      "sha256:a3360afb53ed8d77742eb4e61e4d916b5f44f2d16c939bef14f853c6ab9f6823",
     );
     expect(computeContractDigest()).toBe(CONTRACT_DIGEST);
     expect(computeContractDigest(CONTRACT_MANIFEST)).toBe(CONTRACT_DIGEST);
@@ -198,6 +219,9 @@ describe("EpochGuard frozen contract", () => {
     expect(document.semanticInvariants).toEqual(CONTRACT_SEMANTIC_INVARIANTS);
     expect(document.authoritativeSnapshotProjectionRules).toEqual(
       AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES,
+    );
+    expect(document.snapshotUniversalSafetyRules).toEqual(
+      SNAPSHOT_UNIVERSAL_SAFETY_RULES,
     );
     expect(document.fixtures).toEqual(GOLDEN_FIXTURE_MANIFEST);
     expect(document.goldenSnapshots.normalReady.contractDigest).toBe(
@@ -223,6 +247,8 @@ describe("EpochGuard frozen contract", () => {
     const projectionRule = mutableClone(CONTRACT_MANIFEST);
     projectionRule.authoritativeSnapshotProjectionRules.COMMITTED.effect =
       "FORBIDDEN";
+    const safetyRule = mutableClone(CONTRACT_MANIFEST);
+    safetyRule.snapshotUniversalSafetyRules.receiptTemporal.pop();
     const fixture = mutableClone(CONTRACT_MANIFEST);
     fixture.fixtures[0].expected.initialEffectsInSession = 1;
 
@@ -232,6 +258,7 @@ describe("EpochGuard frozen contract", () => {
       enumValue,
       invariant,
       projectionRule,
+      safetyRule,
       fixture,
     ]) {
       expect(computeContractDigest(tampered)).not.toBe(CONTRACT_DIGEST);
@@ -260,6 +287,9 @@ describe("EpochGuard frozen contract", () => {
     expect(webContracts.AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES).toEqual(
       AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES,
     );
+    expect(webContracts.SNAPSHOT_UNIVERSAL_SAFETY_RULES).toEqual(
+      SNAPSHOT_UNIVERSAL_SAFETY_RULES,
+    );
   });
 
   it("matches the Action and Role Query canonical golden vectors", () => {
@@ -282,6 +312,34 @@ describe("EpochGuard frozen contract", () => {
         "inventory",
       ).queryHash,
     ).not.toBe(GOLDEN_QUERY_HASHES.inventory);
+  });
+
+  it("returns success=false without throwing for every malformed Snapshot Action", () => {
+    const malformedActions = [
+      { campaignId: "" },
+      { requestedUnits: 0 },
+      { requestedUnits: -1 },
+      { estimatedCostCents: -1 },
+    ];
+
+    for (const mutation of malformedActions) {
+      const candidate = mutableClone(NORMAL_READY_GOLDEN_SNAPSHOT);
+      Object.assign(candidate.action, mutation);
+      let serverResult: ReturnType<
+        typeof SessionDashboardSnapshotSchema.safeParse
+      > | null = null;
+      let webResult: ReturnType<
+        typeof webContracts.safeDecodeSessionDashboardSnapshot
+      > | null = null;
+      expect(() => {
+        serverResult = SessionDashboardSnapshotSchema.safeParse(candidate);
+      }).not.toThrow();
+      expect(() => {
+        webResult = webContracts.safeDecodeSessionDashboardSnapshot(candidate);
+      }).not.toThrow();
+      expect(serverResult?.success, JSON.stringify(mutation)).toBe(false);
+      expect(webResult?.success, JSON.stringify(mutation)).toBe(false);
+    }
   });
 
   it("keeps ActionIntent strict and exactly-once scoped to Session + Action", () => {
@@ -568,14 +626,23 @@ describe("EpochGuard frozen contract", () => {
       impossible: IMPOSSIBLE_GOLDEN_SNAPSHOT,
       recovered: RECOVERED_GOLDEN_SNAPSHOT,
     } as const;
+    const manifestHashes = (CONTRACT_MANIFEST as any).goldenSnapshotHashes;
+    const rebuiltHashes = (buildContractDigestDocument() as any)
+      .goldenSnapshotHashes;
     for (const [name, snapshot] of Object.entries(snapshots)) {
       expect(SessionDashboardSnapshotSchema.parse(snapshot), name).toEqual(snapshot);
       expect(webContracts.decodeSessionDashboardSnapshot(snapshot), name).toEqual(
         snapshot,
       );
-      expect(sha256Digest(canonicalJson(snapshot)), name).toBe(
-        GOLDEN_SNAPSHOT_HASHES[name as keyof typeof GOLDEN_SNAPSHOT_HASHES],
+      const normalizedSnapshot = normalizeContractDigestReferences(snapshot);
+      const independentlyComputedHash = sha256Digest(
+        canonicalJson(normalizedSnapshot),
       );
+      const frozenHash =
+        GOLDEN_SNAPSHOT_HASHES[name as keyof typeof GOLDEN_SNAPSHOT_HASHES];
+      expect(frozenHash, name).toBe(independentlyComputedHash);
+      expect(manifestHashes[name], name).toBe(frozenHash);
+      expect(rebuiltHashes[name], name).toBe(frozenHash);
     }
     expect(decodeSessionDashboardSnapshot(NORMAL_READY_GOLDEN_SNAPSHOT)).toEqual(
       NORMAL_READY_GOLDEN_SNAPSHOT,
@@ -606,6 +673,159 @@ describe("EpochGuard frozen contract", () => {
       status: "AVAILABLE",
       agentIds: ["agent_budget"],
     });
+  });
+
+  it("rejects impossible Receipt observation times and invalid half-open intervals", () => {
+    const observedAfterHead = mutableClone(NORMAL_READY_GOLDEN_SNAPSHOT);
+    observedAfterHead.agents[0].activeDecision.receipt.sourceRevision = 11;
+    observedAfterHead.agents[0].activeDecision.receipt.observedAtSeq = 11;
+
+    const observedBeforeValidity = mutableClone(NORMAL_READY_GOLDEN_SNAPSHOT);
+    observedBeforeValidity.agents[0].activeDecision.receipt.sourceRevision = 9;
+    observedBeforeValidity.agents[0].activeDecision.receipt.observedAtSeq = 9;
+
+    const emptyReceiptInterval = makeEqualBoundaryNoCutSnapshot();
+    const emptyReceipt = emptyReceiptInterval.agents[1].activeDecision.receipt;
+    emptyReceipt.sourceRevision = 20;
+    emptyReceipt.observedAtSeq = 20;
+    emptyReceipt.validFromSeq = 20;
+    emptyReceipt.validUntilSeq = 20;
+    emptyReceiptInterval.jointValidity.noCutProof.witness[0].from = 20;
+
+    const reversedReceiptInterval = mutableClone(emptyReceiptInterval);
+    reversedReceiptInterval.agents[1].activeDecision.receipt.validUntilSeq = 19;
+    reversedReceiptInterval.jointValidity.upperBound = 19;
+    reversedReceiptInterval.jointValidity.noCutProof.upperBound = 19;
+    reversedReceiptInterval.jointValidity.noCutProof.witness[0].until = 19;
+
+    for (const candidate of [
+      observedAfterHead,
+      observedBeforeValidity,
+      emptyReceiptInterval,
+      reversedReceiptInterval,
+    ]) {
+      expectSnapshotRejected(candidate);
+    }
+    expectSnapshotAccepted(makeEqualBoundaryNoCutSnapshot());
+  });
+
+  it("rejects reused Decision and in-flight IDs within each identity namespace", () => {
+    const duplicateCertificate = mutableClone(NORMAL_READY_GOLDEN_SNAPSHOT);
+    duplicateCertificate.agents[1].activeDecision.certificateId =
+      duplicateCertificate.agents[0].activeDecision.certificateId;
+    const duplicateActiveRun = mutableClone(NORMAL_READY_GOLDEN_SNAPSHOT);
+    duplicateActiveRun.agents[1].activeDecision.runId =
+      duplicateActiveRun.agents[0].activeDecision.runId;
+    const duplicateReceipt = mutableClone(NORMAL_READY_GOLDEN_SNAPSHOT);
+    duplicateReceipt.agents[1].activeDecision.receipt.receiptId =
+      duplicateReceipt.agents[0].activeDecision.receipt.receiptId;
+    const duplicateActiveAssignment = mutableClone(
+      NORMAL_READY_GOLDEN_SNAPSHOT,
+    );
+    duplicateActiveAssignment.agents[1].activeDecision.runtimeProof.assignmentId =
+      duplicateActiveAssignment.agents[0].activeDecision.runtimeProof.assignmentId;
+
+    const twoOwnerRefresh = makeTwoOwnerRefreshInProgressSnapshot();
+    expectSnapshotAccepted(twoOwnerRefresh);
+    const duplicateAttempt = mutableClone(twoOwnerRefresh);
+    duplicateAttempt.agents[2].inFlightAttempt.attemptId =
+      duplicateAttempt.agents[1].inFlightAttempt.attemptId;
+    const duplicateInFlightAssignment = mutableClone(twoOwnerRefresh);
+    duplicateInFlightAssignment.agents[2].inFlightAttempt.assignmentId =
+      duplicateInFlightAssignment.agents[1].inFlightAttempt.assignmentId;
+    const duplicateInFlightRun = mutableClone(twoOwnerRefresh);
+    duplicateInFlightRun.agents[2].inFlightAttempt.runId =
+      duplicateInFlightRun.agents[1].inFlightAttempt.runId;
+    const assignmentReusedFromAnotherActiveAgent = mutableClone(twoOwnerRefresh);
+    assignmentReusedFromAnotherActiveAgent.agents[2].inFlightAttempt.assignmentId =
+      assignmentReusedFromAnotherActiveAgent.agents[0].activeDecision.runtimeProof.assignmentId;
+    const runReusedFromAnotherActiveAgent = mutableClone(twoOwnerRefresh);
+    runReusedFromAnotherActiveAgent.agents[2].inFlightAttempt.runId =
+      runReusedFromAnotherActiveAgent.agents[0].activeDecision.runId;
+
+    for (const candidate of [
+      duplicateCertificate,
+      duplicateActiveRun,
+      duplicateReceipt,
+      duplicateActiveAssignment,
+      duplicateAttempt,
+      duplicateInFlightAssignment,
+      duplicateInFlightRun,
+      assignmentReusedFromAnotherActiveAgent,
+      runReusedFromAnotherActiveAgent,
+    ]) {
+      expectSnapshotRejected(candidate);
+    }
+  });
+
+  it("binds CLAIMED refresh Plans only to active owner Attempts in refresh states", () => {
+    const validRefresh = makeRefreshInProgressSnapshot();
+    expectSnapshotAccepted(validRefresh);
+
+    const noInFlightOwner = makeRefreshInProgressSnapshot();
+    noInFlightOwner.agents[1].inFlightAttempt = null;
+    noInFlightOwner.agents[1].runCount = 1;
+    noInFlightOwner.metrics.reobservedAgents = 0;
+
+    const wrongPlanOwner = makeRefreshInProgressSnapshot();
+    wrongPlanOwner.refreshPlan.agentIds = ["agent_policy"];
+
+    const nonOwnerInFlight = makeTwoOwnerRefreshInProgressSnapshot();
+    nonOwnerInFlight.refreshPlan.agentIds = ["agent_budget"];
+    nonOwnerInFlight.metrics.rerunsAvoided = 2;
+
+    const reusedOwnerAssignment = makeRefreshInProgressSnapshot();
+    reusedOwnerAssignment.agents[1].inFlightAttempt.assignmentId =
+      reusedOwnerAssignment.agents[1].activeDecision.runtimeProof.assignmentId;
+
+    const understatedRunCount = makeRefreshInProgressSnapshot();
+    understatedRunCount.agents[1].runCount = 1;
+    understatedRunCount.metrics.reobservedAgents = 0;
+
+    const terminalClaimedAttempt = makeRefreshInProgressSnapshot();
+    terminalClaimedAttempt.agents[1].inFlightAttempt.status = "COMPLETED";
+    terminalClaimedAttempt.agents[1].inFlightAttempt.runCompletedAt =
+      "2026-08-29T12:00:02.000Z";
+
+    for (const candidate of [
+      noInFlightOwner,
+      wrongPlanOwner,
+      nonOwnerInFlight,
+      reusedOwnerAssignment,
+      understatedRunCount,
+      terminalClaimedAttempt,
+    ]) {
+      expectSnapshotRejected(candidate);
+    }
+
+    const failedTerminalProjection = makeRefreshInProgressSnapshot();
+    failedTerminalProjection.sessionState = "FAILED";
+    failedTerminalProjection.gate.reasonCode = "RUN_FAILED";
+    failedTerminalProjection.agents[1].inFlightAttempt.status = "FAILED";
+    failedTerminalProjection.agents[1].inFlightAttempt.runCompletedAt =
+      "2026-08-29T12:00:02.000Z";
+    expectSnapshotAccepted(failedTerminalProjection);
+  });
+
+  it("binds every No-Cut proof to the exact sorted active Receipt set", () => {
+    const receiptIds = IMPOSSIBLE_GOLDEN_SNAPSHOT.agents
+      .map((agent) => agent.activeDecision.receipt.receiptId)
+      .sort();
+    const independentlyComputedDependencySetHash = sha256Digest(
+      canonicalJson(receiptIds),
+    );
+    expect(
+      IMPOSSIBLE_GOLDEN_SNAPSHOT.jointValidity.noCutProof.dependencySetHash,
+    ).toBe(independentlyComputedDependencySetHash);
+    expect(
+      makeEqualBoundaryNoCutSnapshot().jointValidity.noCutProof
+        .dependencySetHash,
+    ).toBe(independentlyComputedDependencySetHash);
+
+    const wrongDependencySetHash = mutableClone(IMPOSSIBLE_GOLDEN_SNAPSHOT);
+    wrongDependencySetHash.jointValidity.noCutProof.dependencySetHash =
+      `sha256:${"f".repeat(64)}`;
+    expectSnapshotRejected(wrongDependencySetHash);
   });
 
   it("accepts selective refresh with retained evidence through READY -> COMMITTING -> COMMITTED", () => {

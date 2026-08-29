@@ -1,9 +1,9 @@
 import { z } from "zod";
 
-export const CONTRACT_VERSION = "epochguard-contract-v3" as const;
+export const CONTRACT_VERSION = "epochguard-contract-v4" as const;
 export const CONTRACT_SCHEMA_VERSION = 1 as const;
 export const CONTRACT_DIGEST =
-  "sha256:bb486a46d580589e2eef71618bbe337a59bd349f7e5cb28b9191f34a0f775b07" as const;
+  "sha256:a3360afb53ed8d77742eb4e61e4d916b5f44f2d16c939bef14f853c6ab9f6823" as const;
 
 export const ROLES = ["inventory", "budget", "policy"] as const;
 export const SCENARIO_IDS = ["normal-world-v1", "impossible-collage-v1"] as const;
@@ -237,6 +237,16 @@ const NoCutProofViewSchema = z
   })
   .strict();
 
+const SnapshotActionViewSchema = z
+  .object({
+    type: z.literal("PUBLISH_CAMPAIGN"),
+    campaignId: OpaqueIdSchema,
+    requestedUnits: z.number().int().positive(),
+    estimatedCostCents: z.number().int().nonnegative(),
+    market: z.literal("SG"),
+  })
+  .strict();
+
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") {
     return JSON.stringify(value) as string;
@@ -359,15 +369,7 @@ const SessionDashboardSnapshotShapeSchema = z
     scenarioId: ScenarioIdSchema,
     coordinationMode: z.enum(["PENDING", "CONCURRENT", "SEQUENTIAL_FALLBACK"]),
     sessionState: SessionStateSchema,
-    action: z
-      .object({
-        type: z.literal("PUBLISH_CAMPAIGN"),
-        campaignId: OpaqueIdSchema,
-        requestedUnits: z.number().int().positive(),
-        estimatedCostCents: z.number().int().nonnegative(),
-        market: z.literal("SG"),
-      })
-      .strict(),
+    action: SnapshotActionViewSchema,
     actionHash: Sha256DigestSchema,
     worldHead: z.number().int().nonnegative(),
     gate: z
@@ -493,6 +495,43 @@ export const AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES = {
   },
 } as const satisfies Record<string, AuthoritativeSnapshotProjectionRule>;
 
+export const SNAPSHOT_UNIVERSAL_SAFETY_RULES = {
+  actionHash: "validate Snapshot Action shape before canonical hashing; safeParse never throws",
+  receiptTemporal: [
+    "validUntilSeq=null or validUntilSeq>validFromSeq",
+    "validFromSeq<=observedAtSeq",
+    "observedAtSeq<(validUntilSeq??worldHead+1)",
+    "observedAtSeq<=worldHead",
+  ],
+  uniqueIdentityNamespaces: {
+    certificate: ["activeDecision.certificateId"],
+    run: ["activeDecision.runId", "inFlightAttempt.runId(non-null)"],
+    receipt: ["activeDecision.receipt.receiptId"],
+    assignment: [
+      "activeDecision.runtimeProof.assignmentId",
+      "inFlightAttempt.assignmentId",
+    ],
+    attempt: ["inFlightAttempt.attemptId"],
+  },
+  claimedRefresh: {
+    sessionStates: ["REOBSERVING", "COLLECTING", "VALIDATING"],
+    planStatus: "CLAIMED",
+    ownerSet: "exact Agent set with an active inFlightAttempt",
+    assignment: "new relative to the owner's active Decision assignment",
+  },
+  noCutDependencySetHash:
+    "sha256(canonicalJSON(sort(all three active receiptIds)))",
+} as const;
+
+const CLAIMED_REFRESH_BINDING_STATES =
+  SNAPSHOT_UNIVERSAL_SAFETY_RULES.claimedRefresh.sessionStates;
+const ACTIVE_IN_FLIGHT_ATTEMPT_STATES = [
+  "ASSIGNMENT_CREATED",
+  "DISPATCHING",
+  "QUEUED",
+  "RUNNING",
+] as const;
+
 type AuthoritativeSnapshotState =
   keyof typeof AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES;
 
@@ -533,6 +572,102 @@ function receiptCoversWorldHead(
   );
 }
 
+function receiptHasValidTemporalSemantics(
+  snapshot: SessionDashboardSnapshotCandidate,
+  receipt: NonNullable<
+    SessionDashboardSnapshotCandidate["agents"][number]["activeDecision"]
+  >["receipt"],
+): boolean {
+  const effectiveUntil = receipt.validUntilSeq ?? snapshot.worldHead + 1;
+  return (
+    (receipt.validUntilSeq === null ||
+      receipt.validUntilSeq > receipt.validFromSeq) &&
+    receipt.validFromSeq <= receipt.observedAtSeq &&
+    receipt.observedAtSeq < effectiveUntil &&
+    receipt.observedAtSeq <= snapshot.worldHead
+  );
+}
+
+export function snapshotReceiptDependencySetHash(
+  receiptIds: readonly string[],
+): string {
+  return sha256Text(canonicalJson([...receiptIds].sort()));
+}
+
+function validateUniqueSnapshotIdentityReferences(
+  snapshot: SessionDashboardSnapshotCandidate,
+  context: z.RefinementCtx,
+): void {
+  type IdentityReference = { id: string | null; agentIndex: number };
+  const namespaces: Array<{
+    name: string;
+    references: IdentityReference[];
+  }> = [
+    {
+      name: "certificateId",
+      references: snapshot.agents.map((agent, agentIndex) => ({
+        id: agent.activeDecision?.certificateId ?? null,
+        agentIndex,
+      })),
+    },
+    {
+      name: "receiptId",
+      references: snapshot.agents.map((agent, agentIndex) => ({
+        id: agent.activeDecision?.receipt.receiptId ?? null,
+        agentIndex,
+      })),
+    },
+    {
+      name: "attemptId",
+      references: snapshot.agents.map((agent, agentIndex) => ({
+        id: agent.inFlightAttempt?.attemptId ?? null,
+        agentIndex,
+      })),
+    },
+    {
+      name: "assignmentId",
+      references: snapshot.agents.flatMap((agent, agentIndex) => [
+        {
+          id: agent.activeDecision?.runtimeProof.assignmentId ?? null,
+          agentIndex,
+        },
+        { id: agent.inFlightAttempt?.assignmentId ?? null, agentIndex },
+      ]),
+    },
+    {
+      name: "runId",
+      references: snapshot.agents.flatMap((agent, agentIndex) => [
+        { id: agent.activeDecision?.runId ?? null, agentIndex },
+        { id: agent.inFlightAttempt?.runId ?? null, agentIndex },
+      ]),
+    },
+  ];
+
+  for (const namespace of namespaces) {
+    const ownerById = new Map<string, number>();
+    let duplicatedAcrossAgents = false;
+    for (const reference of namespace.references) {
+      if (reference.id === null) continue;
+      const existingOwner = ownerById.get(reference.id);
+      if (
+        existingOwner !== undefined &&
+        existingOwner !== reference.agentIndex
+      ) {
+        duplicatedAcrossAgents = true;
+      } else {
+        ownerById.set(reference.id, reference.agentIndex);
+      }
+    }
+    if (duplicatedAcrossAgents) {
+      snapshotIssue(
+        context,
+        `${namespace.name} values must be unique across Agent projections within their ID namespace`,
+        ["agents"],
+      );
+    }
+  }
+}
+
 function snapshotIssue(
   context: z.RefinementCtx,
   message: string,
@@ -555,6 +690,7 @@ function addSnapshotInvariantIssues(
       "agents",
     ]);
   }
+  validateUniqueSnapshotIdentityReferences(snapshot, context);
 
   const decisions = snapshot.agents.flatMap((agent) =>
     agent.activeDecision === null ? [] : [agent.activeDecision],
@@ -597,6 +733,18 @@ function addSnapshotInvariantIssues(
       ]);
     }
     if (agent.activeDecision !== null) {
+      if (
+        !receiptHasValidTemporalSemantics(
+          snapshot,
+          agent.activeDecision.receipt,
+        )
+      ) {
+        snapshotIssue(
+          context,
+          "Receipt observation and half-open validity interval must be temporally coherent at worldHead",
+          ["agents", index, "activeDecision", "receipt"],
+        );
+      }
       const coversHead = receiptCoversWorldHead(
         snapshot,
         agent.activeDecision,
@@ -613,7 +761,13 @@ function addSnapshotInvariantIssues(
     }
   });
 
-  if (snapshot.actionHash !== snapshotActionHash(snapshot.action)) {
+  const parsedSnapshotAction = SnapshotActionViewSchema.safeParse(
+    snapshot.action,
+  );
+  if (
+    parsedSnapshotAction.success &&
+    snapshot.actionHash !== snapshotActionHash(parsedSnapshotAction.data)
+  ) {
     snapshotIssue(context, "actionHash does not match the Snapshot Action", [
       "actionHash",
     ]);
@@ -772,6 +926,12 @@ function addSnapshotInvariantIssues(
     ),
   );
   const receipts = [...receiptByRole.values()];
+  const expectedDependencySetHash =
+    receipts.length === 3
+      ? snapshotReceiptDependencySetHash(
+          receipts.map((receipt) => receipt.receiptId),
+        )
+      : null;
   const expectedLower =
     receipts.length === 3
       ? Math.max(...receipts.map((receipt) => receipt.validFromSeq))
@@ -814,6 +974,7 @@ function addSnapshotInvariantIssues(
       proof.lowerBound === expectedLower &&
       proof.upperBound === expectedUpper &&
       proof.lowerBound >= proof.upperBound &&
+      proof.dependencySetHash === expectedDependencySetHash &&
       snapshot.jointValidity.currentHeadCovered === false;
     let witnessAgrees = proof !== null;
     if (proof !== null) {
@@ -899,6 +1060,44 @@ function addSnapshotInvariantIssues(
       snapshotIssue(
         context,
         "AVAILABLE RefreshPlan is reserved for blocked/historical refresh projections",
+        ["refreshPlan"],
+      );
+    }
+  }
+
+  if (
+    snapshot.refreshPlan?.status === "CLAIMED" &&
+    (CLAIMED_REFRESH_BINDING_STATES as readonly string[]).includes(
+      snapshot.sessionState,
+    )
+  ) {
+    const inFlightOwners = snapshot.agents.filter(
+      (agent) => agent.inFlightAttempt !== null,
+    );
+    const inFlightOwnerIds = inFlightOwners.map((agent) => agent.agentId);
+    const ownerAttemptsAreActiveAndNew = inFlightOwners.every((agent) => {
+      const attempt = agent.inFlightAttempt;
+      if (attempt === null) return false;
+      const representedRuns =
+        (agent.activeDecision === null ? 0 : 1) + 1;
+      return (
+        (ACTIVE_IN_FLIGHT_ATTEMPT_STATES as readonly string[]).includes(
+          attempt.status,
+        ) &&
+        agent.runCount >= representedRuns &&
+        (agent.activeDecision === null ||
+          attempt.assignmentId !==
+            agent.activeDecision.runtimeProof.assignmentId)
+      );
+    });
+    if (
+      inFlightOwners.length === 0 ||
+      !sameIdSet(snapshot.refreshPlan.agentIds, inFlightOwnerIds) ||
+      !ownerAttemptsAreActiveAndNew
+    ) {
+      snapshotIssue(
+        context,
+        "CLAIMED refresh must bind exactly its active owner Attempts and new Assignments",
         ["refreshPlan"],
       );
     }
@@ -1150,6 +1349,9 @@ export const CONTRACT_SEMANTIC_INVARIANTS = [
   "ENVELOPE_DIGEST ArtifactRef.id is Sha256Digest; every other ArtifactRef.id is OpaqueId",
   "Snapshot Agents are ordered inventory,budget,policy and have distinct Agent identities",
   "Snapshot actionHash equals sha256(canonical Snapshot Action)",
+  "Snapshot safe decoders validate the Action shape before hashing and never throw for malformed Action fields",
+  "Every active Receipt has validUntilSeq=null or >validFromSeq, validFromSeq<=observedAtSeq<(validUntilSeq??worldHead+1), and observedAtSeq<=worldHead",
+  "Snapshot certificate, run, receipt, assignment, and attempt references are unique across Agents within each ID namespace",
   "Snapshot metrics equal active Decision verdicts, reobserved Agent runCounts, and refresh ownership",
   "Only BLOCKED_NO_CUT, HISTORICAL_STALE, CONSISTENT_DENY, READY_AT_CURRENT_HEAD, and COMMITTED have bidirectionally frozen projection products; other Session states retain only universal safety constraints",
   "RELEASED iff COMMITTED projects one Permit-bound Effect, effectsInSession=1, three current-valid ALLOW Decisions, and no mutation action or in-flight Attempt",
@@ -1157,9 +1359,11 @@ export const CONTRACT_SEMANTIC_INVARIANTS = [
   "LOCKED carries no Permit; Permit IDs are restricted to READY_AT_CURRENT_HEAD, COMMITTING, or COMMITTED",
   "VALID_CURRENT has no No-Cut proof and exact interval bounds covering worldHead",
   "NO_CUT has exact receipt-derived L/U with L>=U and a two-Receipt endpoint witness",
+  "NO_CUT dependencySetHash equals sha256(canonicalJSON(sort(all three active receiptIds)))",
   "NO_CUT retains a RefreshPlan while its old proof may remain visible through non-authoritative refresh projections",
   "CURRENT and RETAINED evidence exactly mean the half-open Receipt covers worldHead; INVALID_AT_HEAD exactly means it does not",
   "AVAILABLE RefreshPlan exists only for BLOCKED_NO_CUT/HISTORICAL_STALE and owns exactly the current invalid-Receipt Agents; CLAIMED exposes no action",
+  "REOBSERVING/COLLECTING/VALIDATING with CLAIMED Plan binds exactly the active in-flight owner Agent set and each owner's new Assignment; FAILED/INTERRUPTED terminal products remain unfrozen",
   "READY_AT_CURRENT_HEAD accepts an absent initial Plan or the exact COMPLETED selective-refresh Plan and always exposes exactly COMMIT",
   "FAILED with WAITING and null reason is rejected; side-effect-free FAILED/INTERRUPTED Gate and reason products otherwise remain unfrozen",
   "availableActions is exactly REOBSERVE_INVALID for blocked/historical AVAILABLE Plans, COMMIT for READY_AT_CURRENT_HEAD, and empty otherwise",
