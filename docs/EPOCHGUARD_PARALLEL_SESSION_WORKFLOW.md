@@ -804,18 +804,18 @@ npm run check
 
 | ID | 名称 | 状态 | Base SHA | Commit SHA | 中央门 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
-| CONTROL | 规划/审核/测试 | ACTIVE | `475cb93` | — | — | 本 Session，位于 `epochguard/staging` |
+| CONTROL | 规划/审核/测试 | ACTIVE | `c6e07b8` | `e5f0b3a` | — | 本 Session，位于 `epochguard/staging`；负责 worktree 初始化与故障恢复 |
 | EG-CANARY | 可视化 Session 只读灰度 | ACCEPTED | `475cb93` | — | Visibility / Read-only | 可视化机制通过；worktree 隔离未通过 |
-| EG-00 | Contracts & Starter Seams | NOT_STARTED | — | — | Gate A | 用户批准后首先创建 |
-| EG-01 | EpochStore | NOT_STARTED | — | — | Gate B | EG-00 后启动 |
-| EG-02 | World / Receipt / Evidence | NOT_STARTED | — | — | Gate B | EG-00 后启动 |
-| EG-03 | Decision / Joint Validity | NOT_STARTED | — | — | Gate B | EG-00 后启动 |
-| EG-04 | Refresh / Effect Gate | NOT_STARTED | — | — | Gate B/C | EG-00 后 mock-first |
-| EG-05 | Diagnostics / Snapshot | NOT_STARTED | — | — | Gate B/D | EG-00 后启动 |
-| EG-06 | Role Profiles / Run Adapter | NOT_STARTED | — | — | Gate B/E | EG-00 后 mock-first |
-| EG-07 | Dashboard Preview | NOT_STARTED | — | — | Gate D | 只做独立 Preview |
-| EG-08 | Coordinator / Routes | NOT_STARTED | — | — | Gate B/C | EG-01～06 合入后 |
-| EG-09 | Production Integration | NOT_STARTED | — | — | Gate D/F | EG-07/08 合入后 |
+| EG-00 | Contracts & Starter Seams | MERGED | `c6e07b8` | `d0f7861` | Gate A **PASS** | 已合入 `epochguard/staging@e5f0b3a` |
+| EG-01 | EpochStore | RUNNING | `e5f0b3a` | — | Gate B | 已激活独立实现 |
+| EG-02 | World / Receipt / Evidence | RUNNING | `e5f0b3a` | — | Gate B | 已激活独立实现 |
+| EG-03 | Decision / Joint Validity | RUNNING | `e5f0b3a` | — | Gate B | 已激活独立实现 |
+| EG-04 | Refresh / Effect Gate | RUNNING | `e5f0b3a` | — | Gate B/C | 已激活，mock-first |
+| EG-05 | Diagnostics / Snapshot | RUNNING | `e5f0b3a` | — | Gate B/D | 已激活独立实现 |
+| EG-06 | Role Profiles / Run Adapter | RUNNING | `e5f0b3a` | — | Gate B/E | 已激活，mock-first |
+| EG-07 | Dashboard Preview | RUNNING | `e5f0b3a` | — | Gate D | 已激活，只做注入式 Preview |
+| EG-08 | Coordinator / Routes | NOT_STARTED | `c6e07b8` | — | Gate B/C | 等待 EG-01～06 稳定后再更新基线并激活 |
+| EG-09 | Production Integration | NOT_STARTED | `c6e07b8` | — | Gate D/F | 等待 EG-07/08 后再更新基线并激活 |
 
 状态只使用：
 
@@ -853,21 +853,57 @@ BLOCKED
 3. 灰度任务能读取 `epochguard/staging@475cb93` 或其后续已批准基线；
 4. 只有 worktree 灰度通过后，EG-00 才可以进入 `RUNNING`。
 
+后续处置：由于 Codex 项目注册暂未能直接选择子仓库，中央 Session 在 `C:\Users\董润泽\Desktop\hackathon\.epochguard-worktrees` 手动创建了 EG-00～EG-09 十个真实 Git worktree 和独立分支。每个可视化任务都必须在任何命令前核对自己的绝对 worktree 路径、分支和基线；中央抽查已证明十个 worktree 均为不同绝对路径、不同分支。EG-00 通过 Gate A 后，EG-01～EG-07 已由中央 Session 干净快进至 `e5f0b3a`。
+
+工作树的创建、路径/分支/基线校准、初始化失败、锁冲突和损坏恢复统一由中央 Session 负责。执行 Session 只报告故障并停止写入，不得自行重建、移动、删除 worktree，也不得切换到共享 checkout。此前失败的异步 fork 未形成正式任务或 Git worktree，已废弃；当前首批七个执行任务均运行在上述手工维护的真实 worktree 中。
+
+### 15.2 可视化执行 Session 注册表
+
+| ID | Thread ID | Branch | Worktree | 当前阶段 |
+| --- | --- | --- | --- | --- |
+| EG-00 | `01a04d0c-953a-78e3-a118-0822248058b4` | `epochguard/eg-00-contracts` | `.epochguard-worktrees/eg-00` | MERGED / GATE A PASS |
+| EG-01 | `01a04d0c-9c28-7ec3-83d1-29404eec12dc` | `epochguard/eg-01-store` | `.epochguard-worktrees/eg-01` | ACTIVE IMPLEMENTATION |
+| EG-02 | `01a04d0c-a19c-7a61-a104-dfde763c48de` | `epochguard/eg-02-evidence` | `.epochguard-worktrees/eg-02` | ACTIVE IMPLEMENTATION |
+| EG-03 | `01a04d0c-a7a7-7742-80f2-7d8414726909` | `epochguard/eg-03-validity` | `.epochguard-worktrees/eg-03` | ACTIVE IMPLEMENTATION |
+| EG-04 | `01a04d0c-ad8e-7e10-a74e-e3b97f8414f6` | `epochguard/eg-04-gate` | `.epochguard-worktrees/eg-04` | ACTIVE IMPLEMENTATION |
+| EG-05 | `01a04d0c-b41b-7621-8890-ae88ddeaa17c` | `epochguard/eg-05-snapshot` | `.epochguard-worktrees/eg-05` | ACTIVE IMPLEMENTATION |
+| EG-06 | `01a04d0c-ba9a-75d0-8b42-3c1fe87973ca` | `epochguard/eg-06-run-adapter` | `.epochguard-worktrees/eg-06` | ACTIVE IMPLEMENTATION |
+| EG-07 | `01a04d0c-bff2-7670-b5a3-dce3c6a66246` | `epochguard/eg-07-dashboard` | `.epochguard-worktrees/eg-07` | ACTIVE IMPLEMENTATION |
+| EG-08 | `01a04d0c-c522-72d2-8db5-9c92c7042784` | `epochguard/eg-08-service-routes` | `.epochguard-worktrees/eg-08` | PREP_ONLY |
+| EG-09 | `01a04d0c-caae-7e72-9c22-696dcfe0c9ad` | `epochguard/eg-09-integration` | `.epochguard-worktrees/eg-09` | PREP_ONLY |
+
+### 15.3 EG-00 / Gate A 验收记录
+
+| 字段 | 结果 |
+| --- | --- |
+| 合同提交 | `d0f7861b2a8ae105117474bef749875c8a36dcb7` |
+| staging 合并提交 | `e5f0b3ab2161bc0dafaf710d247afde98d7ab8a0` |
+| 合同版本 | `epochguard-contract-v6` |
+| 合同摘要 | `sha256:5bdce49d3daa3764bbc67dcafb26c231b328d92b184e59e56d01a90eddc59dbf` |
+| 合同测试 | Windows / WSL 均为 **27/27 PASS** |
+| Linux Server | **53/53 PASS**，typecheck 与 build PASS |
+| Windows Server | 除既知 POSIX `/tmp/codex-home` 路径断言外 **52/52 PASS**；typecheck、build、编译后 `/api/health` smoke PASS |
+| 独立语义审核 | 8,118 个 mutation candidates、479 个标注 snapshots、17,356 次 Server/Web decoder 调用；0 throw、0 divergence、0 data difference |
+| Schema/Digest parity | 67 个 Server schemas、22 个共享 schemas、32 条语义不变量、5 组 projection 全部匹配 |
+| Gate A | **PASS** |
+
+已知非 Gate A 阻断项：Windows 上单个测试硬编码 POSIX `/tmp` 路径；`npm audit` 报告 1 个 moderate 与 5 个 high 的既有依赖风险，需在发布门前单独跟踪，不得与合同语义正确性混为一项。
+
 ---
 
 ## 16. 用户批准清单
 
 在任何执行 Session 被创建前，需要用户确认：
 
-- [ ] 接受“1 个中央 Session + 10 个执行 Session”的编排；
-- [ ] 接受 EG-00 完成并审核后才启动第一并行波；
-- [ ] 接受每个执行 Session 使用独立 worktree；
-- [ ] 接受文件 allowlist 和唯一 Owner 制度；
-- [ ] 接受同 Role Agent triple 冲突时 `409 AGENTS_BUSY` 的 P0 策略；
-- [ ] 接受 P0 exactly-once 范围为同一 `Session + Action`；
-- [ ] 接受 Dashboard Session 只做注入式 Preview，生产接线由 EG-09 完成；
-- [ ] 接受当前 Session 只做裁决、审核、合并和验收，不代写产品功能；
-- [ ] 接受任一 invalid effect、required fixture missing、重复 Effect/Refresh Run、Snapshot 混搭或 FakeRunner 伪装都阻断发布。
+- [x] 接受“1 个中央 Session + 10 个执行 Session”的编排；
+- [x] 接受 EG-00 完成并审核后才启动第一并行波（EG-01～EG-07 已在 Gate A 后激活，EG-08/09 仍为 PREP_ONLY）；
+- [x] 接受每个执行 Session 使用独立 worktree；
+- [x] 接受文件 allowlist 和唯一 Owner 制度；
+- [x] 接受同 Role Agent triple 冲突时 `409 AGENTS_BUSY` 的 P0 策略；
+- [x] 接受 P0 exactly-once 范围为同一 `Session + Action`；
+- [x] 接受 Dashboard Session 只做注入式 Preview，生产接线由 EG-09 完成；
+- [x] 接受当前 Session 只做裁决、审核、合并和验收，不代写产品功能；
+- [x] 接受任一 invalid effect、required fixture missing、重复 Effect/Refresh Run、Snapshot 混搭或 FakeRunner 伪装都阻断发布。
 
 ---
 
