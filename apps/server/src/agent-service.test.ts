@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -78,6 +78,90 @@ describe("Agent lifecycle", () => {
     expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(messages[1]?.content).toContain("write hello world");
     expect(service.getAgent(agent.id).codexThreadId).toBe("fake-thread");
+    expect(service.getRun(run.id).threadId).toBe("fake-thread");
+  });
+
+  it("freezes thread evidence on the exact Run that completed", async () => {
+    let runNumber = 0;
+    const service = await makeService({
+      run: async () => {
+        runNumber += 1;
+        return {
+          output: `completed ${runNumber}`,
+          threadId: `thread_${runNumber}`,
+          usage: null,
+        };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({ name: "Thread Evidence" });
+
+    const first = await service.sendMessage(agent.id, "first");
+    await expect.poll(() => service.getRun(first.run.id).status).toBe("completed");
+    const second = await service.sendMessage(agent.id, "second");
+    await expect.poll(() => service.getRun(second.run.id).status).toBe("completed");
+
+    expect(service.getRun(first.run.id).threadId).toBe("thread_1");
+    expect(service.getRun(second.run.id).threadId).toBe("thread_2");
+    expect(service.getAgent(agent.id).codexThreadId).toBe("thread_2");
+  });
+
+  it("migrates legacy Run records without threadId to null", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-legacy-run-test-"));
+    temporaryDirectories.push(root);
+    const dataDirectory = path.join(root, "data");
+    const databasePath = path.join(dataDirectory, "db.json");
+    await mkdir(dataDirectory, { recursive: true });
+    await writeFile(
+      databasePath,
+      JSON.stringify(
+        {
+          version: 1,
+          agents: [],
+          messages: [],
+          runs: [
+            {
+              id: "legacy_run",
+              agentId: "deleted_agent",
+              status: "completed",
+              prompt: "legacy",
+              output: "done",
+              error: null,
+              usage: null,
+              startedAt: "2026-08-29T12:00:00.000Z",
+              completedAt: "2026-08-29T12:00:01.000Z",
+              createdAt: "2026-08-29T12:00:00.000Z",
+            },
+          ],
+        },
+        null,
+        2,
+      ) + "\n",
+      "utf8",
+    );
+    const config = loadConfig({
+      NODE_ENV: "test",
+      APP_DATA_DIR: dataDirectory,
+      AGENT_WORKSPACE_ROOT: path.join(root, "workspaces"),
+      CODEX_HOME: path.join(root, "codex"),
+      ARK_API_KEY: "test-key",
+      ARK_MODEL: "ep-test",
+    });
+    const store = new JsonStore(databasePath);
+    const service = new AgentService(
+      config,
+      store,
+      new WorkspaceManager(path.join(root, "workspaces")),
+      new FakeRunner(),
+    );
+    await service.initialize();
+
+    expect(service.getRun("legacy_run").threadId).toBeNull();
+    const persisted = JSON.parse(await readFile(databasePath, "utf8")) as {
+      runs: Array<{ threadId?: string | null }>;
+    };
+    expect(persisted.runs[0]).toHaveProperty("threadId", null);
   });
 
   it("atomically accepts only one concurrent run per Agent", async () => {

@@ -38,6 +38,8 @@ export interface AgentRun {
   output: string | null;
   error: string | null;
   usage: RunUsage | null;
+  /** Thread observed from the Runner that completed this exact Run. */
+  threadId: string | null;
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;

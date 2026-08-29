@@ -31,6 +31,12 @@ export class AgentService {
     await this.workspaces.initialize();
     await this.store.mutate((database) => {
       for (const run of database.runs) {
+        // Additive migration for launchpad.json records written before thread
+        // evidence was captured per Run.
+        const legacyRun = run as unknown as { threadId?: string | null };
+        if (legacyRun.threadId === undefined) {
+          legacyRun.threadId = null;
+        }
         if (run.status === "queued" || run.status === "running") {
           run.status = "cancelled";
           run.error = "Server restarted while this run was active";
@@ -170,6 +176,7 @@ export class AgentService {
       output: null,
       error: null,
       usage: null,
+      threadId: null,
       startedAt: null,
       completedAt: null,
       createdAt: timestamp,
@@ -258,6 +265,7 @@ export class AgentService {
         storedRun.status = "completed";
         storedRun.output = result.output;
         storedRun.usage = result.usage;
+        storedRun.threadId = result.threadId;
         storedRun.completedAt = completedAt;
         database.messages.push({
           id: randomUUID(),
