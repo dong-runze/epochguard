@@ -6,6 +6,7 @@ import {
   type ClaimRefreshPlanResult,
   type RefreshClaimArtifactContext,
   type RefreshMutationPort,
+  type RefreshPlannerWorldPort,
 } from "./refresh-planner.js";
 import {
   GOLDEN_ACTION_HASH,
@@ -17,13 +18,30 @@ import {
   type AgentAttempt,
   type EpochDatabase,
   type EpochSession,
+  type ObservationReceipt,
   type RefreshPlan,
+  type ResourceVersion,
   type RunAssignment,
   type ValidationRecord,
 } from "./types.js";
 
 const NOW = "2026-08-29T12:00:00.000Z";
 const DIGEST = sha256Digest("fixture");
+
+const plannerWorld: RefreshPlannerWorldPort = {
+  resolveResourceVersion(
+    database: Readonly<EpochDatabase>,
+    receipt: Readonly<ObservationReceipt>,
+  ): ResourceVersion | null {
+    return (
+      database.resourceVersions.find(
+        (version) =>
+          version.resourceId === `${receipt.source}:${receipt.entityKey}` &&
+          version.sourceRevision === receipt.sourceRevision,
+      ) ?? null
+    );
+  },
+};
 
 class MemoryRefreshStore implements RefreshMutationPort {
   private queue: Promise<void> = Promise.resolve();
@@ -141,6 +159,46 @@ function blockedFixture(): {
     createdAt: NOW,
   };
   const database = emptyDatabase();
+  const evidenceIntervals = [
+    { from: 18, until: null, observedAtSeq: 18 },
+    { from: 19, until: 20, observedAtSeq: 19 },
+    { from: 21, until: null, observedAtSeq: 21 },
+  ] as const;
+  const roleQuerySpecs = ROLES.map((role) =>
+    buildRoleQuerySpec(session.action, role),
+  );
+  database.roleQuerySpecs.push(...roleQuerySpecs);
+  database.resourceVersions.push(
+    ...roleQuerySpecs.map((spec, index) => ({
+      id: `version_${spec.role}_impossible_1`,
+      resourceId: `${spec.source}:${spec.entityKey}`,
+      sourceRevision: index + 1,
+      value: { role: spec.role, fixture: "impossible" },
+      valueHash: sha256Digest(`value-${spec.role}-impossible-1`),
+      validFromSeq: evidenceIntervals[index]!.from,
+      validUntilSeq: evidenceIntervals[index]!.until,
+    })),
+  );
+  database.receipts.push(
+    ...roleQuerySpecs.map((spec, index) => ({
+      schemaVersion: 1 as const,
+      receiptId: receiptIds[index]!,
+      sessionId: session.sessionId,
+      actionHash: session.actionHash,
+      agentId: `agent_${spec.role}`,
+      runAssignmentId: `assignment_${spec.role}_1`,
+      role: spec.role,
+      source: spec.source,
+      entityKey: spec.entityKey,
+      queryHash: spec.queryHash,
+      sourceRevision: index + 1,
+      valueHash: database.resourceVersions[index]!.valueHash,
+      observedAtSeq: evidenceIntervals[index]!.observedAtSeq,
+      nonce: `nonce-${spec.role}-impossible-`.padEnd(40, "x"),
+      issuer: "epochguard" as const,
+      issuedAt: NOW,
+    })),
+  );
   database.sessions.push(session);
   database.validations.push(validation);
   database.decisions.push(
@@ -182,6 +240,7 @@ function blockedFixture(): {
     refreshPlanId: "refresh_impossible_1",
     sessionId: session.sessionId,
     database,
+    world: plannerWorld,
   });
   session.activeRefreshPlanId = plan.refreshPlanId;
   validation.refreshPlanId = plan.refreshPlanId;
@@ -291,6 +350,7 @@ describe("Refresh Planner", () => {
         refreshPlanId: "refresh_multi_owner",
         sessionId: fixture.session.sessionId,
         database: multiOwner,
+        world: plannerWorld,
       }),
     ).toThrow(/P0 supports exactly one Budget refresh owner.*contract upgrade/);
 
@@ -301,6 +361,7 @@ describe("Refresh Planner", () => {
         refreshPlanId: "refresh_inventory_only",
         sessionId: fixture.session.sessionId,
         database: inventoryOnly,
+        world: plannerWorld,
       }),
     ).toThrow(/P0 supports exactly one Budget refresh owner.*contract upgrade/);
 
@@ -311,6 +372,7 @@ describe("Refresh Planner", () => {
         refreshPlanId: "refresh_historical",
         sessionId: fixture.session.sessionId,
         database: historical,
+        world: plannerWorld,
       }),
     ).toThrow(/cannot close HISTORICAL_STALE.*contract upgrade/);
   });
@@ -340,6 +402,24 @@ describe("Refresh Planner", () => {
         database.decisions[0]!.receiptIds = ["receipt_inventory_other"];
       },
     },
+    {
+      name: "collapsed witness endpoints",
+      mutate(database: EpochDatabase) {
+        database.noCutProofs[0]!.latestStartingReceiptId =
+          database.noCutProofs[0]!.earliestEndingReceiptId;
+      },
+    },
+    {
+      name: "non-canonical latest-starting endpoint",
+      mutate(database: EpochDatabase) {
+        database.noCutProofs[0]!.latestStartingReceiptId =
+          "receipt_inventory_1";
+        database.noCutProofs[0]!.conflictWitnessReceiptIds = [
+          "receipt_budget_1",
+          "receipt_inventory_1",
+        ];
+      },
+    },
   ])("rejects a $name that does not close authoritatively", ({ mutate }) => {
     const fixture = blockedFixture();
     fixture.database.refreshPlans = [];
@@ -352,8 +432,9 @@ describe("Refresh Planner", () => {
         refreshPlanId: "refresh_tampered_proof",
         sessionId: fixture.session.sessionId,
         database: fixture.database,
+        world: plannerWorld,
       }),
-    ).toThrow(/NoCutProof|dependency set/);
+    ).toThrow(/NoCutProof|dependency set|Receipt/);
   });
 
   it("refuses a persisted non-Budget Plan without creating dispatch artifacts", async () => {
@@ -370,6 +451,7 @@ describe("Refresh Planner", () => {
           refreshPlanId: fixture.plan.refreshPlanId,
         },
         now: NOW,
+        world: plannerWorld,
         createArtifacts: artifactFactory,
       }),
     ).rejects.toThrow(/P0 supports exactly one Budget refresh owner/);
@@ -392,6 +474,7 @@ describe("Refresh Planner", () => {
           refreshPlanId: fixture.plan.refreshPlanId,
         },
         now: NOW,
+        world: plannerWorld,
         createArtifacts: artifactFactory,
       });
       if (result.status === "CLAIMED") {
@@ -440,6 +523,40 @@ describe("Refresh Planner", () => {
     });
   });
 
+  it("rejects a repeated CLAIMED Plan whose active Validation link changed", async () => {
+    const fixture = blockedFixture();
+    const firstStore = new MemoryRefreshStore(fixture.database);
+    const first = await claimRefreshPlan(firstStore, {
+      sessionId: fixture.session.sessionId,
+      request: {
+        expectedSessionRevision: fixture.session.sessionRevision,
+        refreshPlanId: fixture.plan.refreshPlanId,
+      },
+      now: NOW,
+      world: plannerWorld,
+      createArtifacts,
+    });
+    expect(first.status).toBe("CLAIMED");
+
+    const claimedDatabase = firstStore.snapshot();
+    claimedDatabase.validations[0]!.refreshPlanId = null;
+    const retryStore = new MemoryRefreshStore(claimedDatabase);
+    await expect(
+      claimRefreshPlan(retryStore, {
+        sessionId: fixture.session.sessionId,
+        request: {
+          expectedSessionRevision: claimedDatabase.sessions[0]!.sessionRevision,
+          refreshPlanId: fixture.plan.refreshPlanId,
+        },
+        now: NOW,
+        world: plannerWorld,
+        createArtifacts,
+      }),
+    ).rejects.toThrow(/not bound by the active Validation/);
+    expect(retryStore.snapshot().attempts).toHaveLength(1);
+    expect(retryStore.snapshot().runAssignments).toHaveLength(1);
+  });
+
   it("fails closed on a second RefreshPlan because P0 allows one round", async () => {
     const fixture = blockedFixture();
     fixture.database.refreshPlans.unshift({
@@ -459,6 +576,7 @@ describe("Refresh Planner", () => {
           refreshPlanId: fixture.plan.refreshPlanId,
         },
         now: NOW,
+        world: plannerWorld,
         createArtifacts: artifactFactory,
       }),
     ).rejects.toThrow(/only one explicit Budget RefreshPlan per Session/);
@@ -493,6 +611,18 @@ describe("Refresh Planner", () => {
           "decision_budget_2";
       },
     },
+    {
+      name: "Validation RefreshPlan binding",
+      mutate(database: EpochDatabase) {
+        database.validations[0]!.refreshPlanId = null;
+      },
+    },
+    {
+      name: "AVAILABLE claimed Attempt",
+      mutate(database: EpochDatabase) {
+        database.refreshPlans[0]!.claimedAttemptId = "attempt_ghost";
+      },
+    },
   ])("invalidates a frozen plan when $name changes", async ({ mutate }) => {
     const fixture = blockedFixture();
     mutate(fixture.database);
@@ -505,6 +635,7 @@ describe("Refresh Planner", () => {
         refreshPlanId: fixture.plan.refreshPlanId,
       },
       now: NOW,
+      world: plannerWorld,
       createArtifacts,
     });
 
@@ -535,6 +666,7 @@ describe("Refresh Planner", () => {
         refreshPlanId: fixture.plan.refreshPlanId,
       },
       now: NOW,
+      world: plannerWorld,
       createArtifacts,
     });
 

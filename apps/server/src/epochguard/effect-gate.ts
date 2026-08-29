@@ -7,8 +7,10 @@ import {
   EffectRecordSchema,
   JointValidityCertificateSchema,
   ObservationReceiptSchema,
+  RefreshPlanSchema,
   ROLES,
   ResourceVersionSchema,
+  RoleAgentRegistrationSchema,
   RoleQuerySpecSchema,
   RunAssignmentSchema,
   TimestampSchema,
@@ -27,6 +29,7 @@ import {
   type ObservationReceipt,
   type ResourceVersion,
   type Role,
+  type RunAssignment,
   type StaleViewErrorBody,
   type ValidationRecord,
 } from "./types.js";
@@ -140,6 +143,36 @@ function expectedAgentForRole(session: EpochSession, role: Role): string {
   }
 }
 
+function requireRegisteredAssignmentProfile(
+  database: EpochDatabase,
+  role: Role,
+  expectedAgentId: string,
+  assignment: RunAssignment,
+  effectsInSession = 0,
+): void {
+  const registrationRecord = requireSingle(
+    database.roleAgentRegistrations.filter(
+      (candidate) =>
+        candidate.role === role &&
+        candidate.agentId === expectedAgentId &&
+        candidate.roleProfileVersion === assignment.roleProfileVersion &&
+        candidate.agentsMdDigest === assignment.agentsMdDigest,
+    ),
+    "DECISION_INVALID",
+    `${role} Assignment agent/profile must resolve exactly one frozen Registration`,
+    effectsInSession,
+  );
+  const parsedRegistration =
+    RoleAgentRegistrationSchema.safeParse(registrationRecord);
+  if (!parsedRegistration.success) {
+    reject(
+      "DECISION_INVALID",
+      `${role} frozen Registration is malformed`,
+      effectsInSession,
+    );
+  }
+}
+
 function effectScopeCount(database: EpochDatabase, sessionId: string): number {
   return database.effects.filter((effect) => effect.sessionId === sessionId).length;
 }
@@ -223,6 +256,13 @@ function validateCommittedEvidenceClosure(
         `committed ${role} Assignment/Run/Decision binding is invalid`,
       );
     }
+    requireRegisteredAssignmentProfile(
+      database,
+      role,
+      expectedAgentId,
+      assignment,
+      effectsInSession,
+    );
 
     const attemptRecord = requireSingle(
       database.attempts.filter(
@@ -242,7 +282,8 @@ function validateCommittedEvidenceClosure(
       attempt.actionHash !== expectedActionHash ||
       attempt.role !== role ||
       attempt.agentId !== expectedAgentId ||
-      attempt.runId !== decision.runId
+      attempt.runId !== decision.runId ||
+      attempt.outputDigest === null
     ) {
       fail(
         "DECISION_INVALID",
@@ -375,6 +416,160 @@ function validateCommittedEvidenceClosure(
   }
 }
 
+function validateCompletedRefreshPlanClosure(
+  database: EpochDatabase,
+  session: EpochSession,
+  validation: ValidationRecord,
+  expectedActionHash: string,
+  effectsInSession: number,
+): void {
+  if (validation.refreshPlanId === null) return;
+
+  const planRecord = requireSingle(
+    database.refreshPlans.filter(
+      (candidate) =>
+        candidate.refreshPlanId === validation.refreshPlanId,
+    ),
+    "BINDING_MISMATCH",
+    "the committed Validation RefreshPlan must resolve exactly once",
+    effectsInSession,
+  );
+  const parsedPlan = RefreshPlanSchema.safeParse(planRecord);
+  if (!parsedPlan.success) {
+    reject(
+      "BINDING_MISMATCH",
+      "the committed Validation RefreshPlan is malformed",
+      effectsInSession,
+    );
+  }
+  const plan = parsedPlan.data;
+  const activeDecisionIds = orderedActiveDecisionIds(
+    session,
+    effectsInSession,
+  );
+  if (
+    plan.status !== "COMPLETED" ||
+    plan.claimedAttemptId === null ||
+    plan.sessionId !== session.sessionId ||
+    plan.baseSessionRevision >= validation.baseSessionRevision ||
+    validation.baseSessionRevision >= session.sessionRevision ||
+    plan.validatedHead !== validation.validatedHead ||
+    !sameOrderedIds(plan.agentIds, [session.frozenAssignments.budgetAgentId]) ||
+    plan.activeDecisionCertificateIds[0] !== activeDecisionIds[0] ||
+    plan.activeDecisionCertificateIds[2] !== activeDecisionIds[2] ||
+    plan.activeDecisionCertificateIds[1] === activeDecisionIds[1]
+  ) {
+    reject(
+      "BINDING_MISMATCH",
+      "the completed RefreshPlan does not bind the committed Session revision, head, and P0 Budget replacement",
+      effectsInSession,
+    );
+  }
+
+  const priorReceiptIds: string[] = [];
+  for (const [index, role] of ROLES.entries()) {
+    const priorDecisionId = plan.activeDecisionCertificateIds[index]!;
+    const currentDecisionId = activeDecisionIds[index]!;
+    const decisionRecord = requireSingle(
+      database.decisions.filter(
+        (candidate) => candidate.certificateId === priorDecisionId,
+      ),
+      "BINDING_MISMATCH",
+      `completed RefreshPlan ${role} Decision must resolve exactly once`,
+      effectsInSession,
+    );
+    const parsedDecision = DependencyCertificateSchema.safeParse(decisionRecord);
+    if (!parsedDecision.success) {
+      reject(
+        "BINDING_MISMATCH",
+        `completed RefreshPlan ${role} Decision is malformed`,
+        effectsInSession,
+      );
+    }
+    const decision = parsedDecision.data;
+    const isBudgetReplacement = role === "budget";
+    if (
+      decision.sessionId !== session.sessionId ||
+      decision.actionHash !== expectedActionHash ||
+      decision.role !== role ||
+      decision.agentId !== expectedAgentForRole(session, role) ||
+      (isBudgetReplacement
+        ? decision.status !== "SUPERSEDED" ||
+          decision.supersededByCertificateId !== currentDecisionId
+        : priorDecisionId !== currentDecisionId ||
+          decision.status !== "ACTIVE" ||
+          decision.supersededByCertificateId !== null)
+    ) {
+      reject(
+        "BINDING_MISMATCH",
+        `completed RefreshPlan ${role} Decision does not close over the retained/replaced active tuple`,
+        effectsInSession,
+      );
+    }
+    priorReceiptIds.push(decision.receiptIds[0]);
+  }
+  if (
+    new Set(plan.activeDecisionCertificateIds).size !== ROLES.length ||
+    new Set(priorReceiptIds).size !== ROLES.length ||
+    snapshotReceiptDependencySetHash(priorReceiptIds) !==
+      plan.dependencySetHash
+  ) {
+    reject(
+      "BINDING_MISMATCH",
+      "the completed RefreshPlan dependency snapshot is not self-consistent",
+      effectsInSession,
+    );
+  }
+
+  const claimedAttemptRecord = requireSingle(
+    database.attempts.filter(
+      (candidate) => candidate.attemptId === plan.claimedAttemptId,
+    ),
+    "BINDING_MISMATCH",
+    "the completed RefreshPlan claimed Attempt must resolve exactly once",
+    effectsInSession,
+  );
+  const parsedClaimedAttempt = AgentAttemptSchema.safeParse(
+    claimedAttemptRecord,
+  );
+  const currentBudgetDecisionRecord = requireSingle(
+    database.decisions.filter(
+      (candidate) => candidate.certificateId === activeDecisionIds[1],
+    ),
+    "BINDING_MISMATCH",
+    "the completed RefreshPlan current Budget Decision must resolve exactly once",
+    effectsInSession,
+  );
+  const parsedCurrentBudgetDecision = DependencyCertificateSchema.safeParse(
+    currentBudgetDecisionRecord,
+  );
+  if (!parsedClaimedAttempt.success || !parsedCurrentBudgetDecision.success) {
+    reject(
+      "BINDING_MISMATCH",
+      "the completed RefreshPlan claimed Attempt or current Budget Decision is malformed",
+      effectsInSession,
+    );
+  }
+  const claimedAttempt = parsedClaimedAttempt.data;
+  const currentBudgetDecision = parsedCurrentBudgetDecision.data;
+  if (
+    claimedAttempt.status !== "ACCEPTED" ||
+    claimedAttempt.outputDigest === null ||
+    claimedAttempt.sessionId !== session.sessionId ||
+    claimedAttempt.actionHash !== expectedActionHash ||
+    claimedAttempt.role !== "budget" ||
+    claimedAttempt.agentId !== session.frozenAssignments.budgetAgentId ||
+    claimedAttempt.assignmentId !== currentBudgetDecision.runAssignmentId ||
+    claimedAttempt.runId !== currentBudgetDecision.runId
+  ) {
+    reject(
+      "BINDING_MISMATCH",
+      "the completed RefreshPlan claimed Attempt does not close over the current Budget Decision",
+      effectsInSession,
+    );
+  }
+}
+
 function returnExistingEffect(
   database: EpochDatabase,
   session: EpochSession,
@@ -455,7 +650,8 @@ function returnExistingEffect(
     permit.actionHash !== effect.actionHash ||
     permit.idempotencyKey !== effect.idempotencyKey ||
     permit.dependencySetHash !== effect.dependencySetHash ||
-    permit.jointValidityCertificateId !== effect.jointValidityCertificateId
+    permit.jointValidityCertificateId !== effect.jointValidityCertificateId ||
+    permit.validatedHead > database.headSeq
   ) {
     return reject(
       "BINDING_MISMATCH",
@@ -546,6 +742,13 @@ function returnExistingEffect(
     expectedActionHash,
     effect.dependencySetHash,
     permit.validatedHead,
+    sessionEffects.length,
+  );
+  validateCompletedRefreshPlanClosure(
+    database,
+    session,
+    validation,
+    expectedActionHash,
     sessionEffects.length,
   );
   return {
@@ -826,6 +1029,12 @@ export async function commitProtectedEffect(
             `${role} Assignment/Run/Decision binding is invalid`,
           );
         }
+        requireRegisteredAssignmentProfile(
+          database,
+          role,
+          expectedAgentId,
+          assignment,
+        );
 
         const attemptRecord = requireSingle(
           database.attempts.filter(
@@ -845,7 +1054,8 @@ export async function commitProtectedEffect(
           attempt.actionHash !== expectedActionHash ||
           attempt.role !== role ||
           attempt.agentId !== expectedAgentId ||
-          attempt.runId !== decision.runId
+          attempt.runId !== decision.runId ||
+          attempt.outputDigest === null
         ) {
           return reject(
             "DECISION_INVALID",

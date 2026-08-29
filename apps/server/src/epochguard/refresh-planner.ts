@@ -2,9 +2,11 @@ import {
   AgentAttemptSchema,
   DependencyCertificateSchema,
   NoCutProofSchema,
+  ObservationReceiptSchema,
   RefreshPlanSchema,
   RefreshSessionRequestSchema,
   ROLES,
+  ResourceVersionSchema,
   RunAssignmentSchema,
   TimestampSchema,
   ValidationRecordSchema,
@@ -16,8 +18,10 @@ import {
   type AlreadyReobservingErrorBody,
   type EpochDatabase,
   type EpochSession,
+  type ObservationReceipt,
   type RefreshPlan,
   type RefreshSessionRequest,
+  type ResourceVersion,
   type Role,
   type RunAssignment,
   type StaleViewErrorBody,
@@ -30,10 +34,18 @@ export interface RefreshEvidenceInterval {
   until: number | null;
 }
 
+export interface RefreshPlannerWorldPort {
+  resolveResourceVersion(
+    database: Readonly<EpochDatabase>,
+    receipt: Readonly<ObservationReceipt>,
+  ): ResourceVersion | null;
+}
+
 export interface BuildRefreshPlanInput {
   refreshPlanId: string;
   sessionId: string;
   database: Readonly<EpochDatabase>;
+  world: RefreshPlannerWorldPort;
 }
 
 export interface RefreshMutationPort {
@@ -58,6 +70,7 @@ export interface ClaimRefreshPlanInput {
   sessionId: string;
   request: RefreshSessionRequest;
   now: string;
+  world: RefreshPlannerWorldPort;
   createArtifacts(
     context: RefreshClaimArtifactContext,
   ): RefreshClaimArtifacts;
@@ -261,6 +274,9 @@ export function buildRefreshPlan(input: BuildRefreshPlanInput): RefreshPlan {
     return failInvariant("Validation is not frozen to the active Decision tuple");
   }
   const receiptIds: string[] = [];
+  const evidenceIntervals: Array<
+    RefreshEvidenceInterval & { receiptId: string }
+  > = [];
   for (const [index, role] of ROLES.entries()) {
     const decisionId = activeDecisionCertificateIds[index]!;
     const decisionRecords = input.database.decisions.filter(
@@ -280,7 +296,51 @@ export function buildRefreshPlan(input: BuildRefreshPlanInput): RefreshPlan {
     ) {
       return failInvariant(`active ${role} Decision binding is invalid`);
     }
-    receiptIds.push(decision.receiptIds[0]);
+    const receiptId = decision.receiptIds[0];
+    const receiptRecords = input.database.receipts.filter(
+      (candidate) => candidate.receiptId === receiptId,
+    );
+    if (receiptRecords.length !== 1) {
+      return failInvariant(`active ${role} Receipt must resolve exactly once`);
+    }
+    const receipt = ObservationReceiptSchema.parse(receiptRecords[0]);
+    if (
+      receipt.sessionId !== session.sessionId ||
+      receipt.actionHash !== session.actionHash ||
+      receipt.agentId !== decision.agentId ||
+      receipt.runAssignmentId !== decision.runAssignmentId ||
+      receipt.role !== role ||
+      receipt.source !== role ||
+      receipt.observedAtSeq > validation.validatedHead
+    ) {
+      return failInvariant(`active ${role} Receipt binding is invalid`);
+    }
+    const parsedVersion = ResourceVersionSchema.safeParse(
+      input.world.resolveResourceVersion(input.database, receipt),
+    );
+    if (!parsedVersion.success) {
+      return failInvariant(
+        `active ${role} Receipt history must resolve authoritatively`,
+      );
+    }
+    const version = parsedVersion.data;
+    if (
+      version.sourceRevision !== receipt.sourceRevision ||
+      version.valueHash !== receipt.valueHash ||
+      version.validFromSeq > receipt.observedAtSeq ||
+      (version.validUntilSeq !== null &&
+        receipt.observedAtSeq >= version.validUntilSeq)
+    ) {
+      return failInvariant(`active ${role} Receipt history is invalid`);
+    }
+    receiptIds.push(receiptId);
+    evidenceIntervals.push({
+      receiptId,
+      role,
+      agentId: decision.agentId,
+      from: version.validFromSeq,
+      until: version.validUntilSeq,
+    });
   }
   if (new Set(receiptIds).size !== ROLES.length) {
     return failInvariant("active Decisions must bind three distinct Receipts");
@@ -299,31 +359,60 @@ export function buildRefreshPlan(input: BuildRefreshPlanInput): RefreshPlan {
   const proof = NoCutProofSchema.parse(proofRecords[0]);
   const receiptSet = new Set(receiptIds);
   const witnessSet = new Set(proof.conflictWitnessReceiptIds);
+  const effectiveIntervals = evidenceIntervals.map((interval) => ({
+    ...interval,
+    until: interval.until ?? validation.validatedHead + 1,
+  }));
+  const lowerBound = Math.max(
+    ...effectiveIntervals.map((interval) => interval.from),
+  );
+  const upperBound = Math.min(
+    ...effectiveIntervals.map((interval) => interval.until),
+  );
+  const latestStartingReceiptId = effectiveIntervals
+    .filter((interval) => interval.from === lowerBound)
+    .map((interval) => interval.receiptId)
+    .sort()[0]!;
+  const earliestEndingReceiptId = effectiveIntervals
+    .filter((interval) => interval.until === upperBound)
+    .map((interval) => interval.receiptId)
+    .sort()[0]!;
   if (
     proof.validationId !== validation.validationId ||
     proof.sessionId !== session.sessionId ||
     proof.actionHash !== session.actionHash ||
     proof.dependencySetHash !== dependencySetHash ||
     proof.validatedAtHead !== validation.validatedHead ||
-    proof.lowerBound !== validation.lowerBound ||
-    proof.upperBound !== validation.upperBound ||
-    proof.lowerBound < proof.upperBound ||
+    proof.lowerBound !== lowerBound ||
+    proof.upperBound !== upperBound ||
+    validation.lowerBound !== lowerBound ||
+    validation.upperBound !== upperBound ||
+    lowerBound < upperBound ||
     !sameOrderedIds(
       proof.decisionCertificateIds,
       activeDecisionCertificateIds,
     ) ||
-    !receiptSet.has(proof.latestStartingReceiptId) ||
-    !receiptSet.has(proof.earliestEndingReceiptId) ||
+    proof.latestStartingReceiptId !== latestStartingReceiptId ||
+    proof.earliestEndingReceiptId !== earliestEndingReceiptId ||
+    proof.latestStartingReceiptId === proof.earliestEndingReceiptId ||
+    !receiptSet.has(latestStartingReceiptId) ||
+    !receiptSet.has(earliestEndingReceiptId) ||
     witnessSet.size !== 2 ||
-    !witnessSet.has(proof.earliestEndingReceiptId) ||
-    !witnessSet.has(proof.latestStartingReceiptId)
+    !witnessSet.has(earliestEndingReceiptId) ||
+    !witnessSet.has(latestStartingReceiptId)
   ) {
     return failInvariant(
       "NoCutProof does not close over the current Validation and active dependency set",
     );
   }
-  const agentIds = [...proof.refreshAgentIds];
+  requireP0BudgetOwner(session, proof.refreshAgentIds);
+  const agentIds = refreshSet(validation.validatedHead, evidenceIntervals);
   requireP0BudgetOwner(session, agentIds);
+  if (!sameOrderedIds(proof.refreshAgentIds, agentIds)) {
+    return failInvariant(
+      "NoCutProof refresh owners do not match authoritative Receipt intervals",
+    );
+  }
 
   return RefreshPlanSchema.parse({
     refreshPlanId: input.refreshPlanId,
@@ -338,16 +427,44 @@ export function buildRefreshPlan(input: BuildRefreshPlanInput): RefreshPlan {
   });
 }
 
-function planStillMatches(
+function activeValidationBindsPlan(
   database: EpochDatabase,
   session: EpochSession,
   plan: RefreshPlan,
 ): boolean {
+  const validationRecords = database.validations.filter(
+    (candidate) => candidate.validationId === session.activeValidationId,
+  );
+  if (validationRecords.length !== 1) return false;
+  const parsedValidation = ValidationRecordSchema.safeParse(
+    validationRecords[0],
+  );
+  return (
+    parsedValidation.success &&
+    parsedValidation.data.sessionId === session.sessionId &&
+    parsedValidation.data.refreshPlanId === plan.refreshPlanId
+  );
+}
+
+function planStillMatches(
+  database: EpochDatabase,
+  session: EpochSession,
+  plan: RefreshPlan,
+  world: RefreshPlannerWorldPort,
+): boolean {
   try {
+    if (
+      plan.status !== "AVAILABLE" ||
+      plan.claimedAttemptId !== null ||
+      !activeValidationBindsPlan(database, session, plan)
+    ) {
+      return false;
+    }
     const authoritative = buildRefreshPlan({
       refreshPlanId: plan.refreshPlanId,
       sessionId: session.sessionId,
       database,
+      world,
     });
     return (
       plan.sessionId === authoritative.sessionId &&
@@ -521,6 +638,11 @@ export async function claimRefreshPlan(
       const agentId = requireP0BudgetOwner(session, plan.agentIds);
 
       if (plan.status === "CLAIMED") {
+        if (!activeValidationBindsPlan(database, session, plan)) {
+          return failInvariant(
+            "CLAIMED RefreshPlan is not bound by the active Validation",
+          );
+        }
         const claimedAttemptId = assertClaimedAttempt(
           database,
           session,
@@ -549,7 +671,7 @@ export async function claimRefreshPlan(
       if (
         plan.status !== "AVAILABLE" ||
         session.activeRefreshPlanId !== plan.refreshPlanId ||
-        !planStillMatches(database, session, plan)
+        !planStillMatches(database, session, plan, input.world)
       ) {
         plan.status = "INVALIDATED";
         plan.claimedAttemptId = null;

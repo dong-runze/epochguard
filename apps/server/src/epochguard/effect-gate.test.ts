@@ -150,7 +150,14 @@ function readyDatabase(): EpochDatabase {
     schemaVersion: 1,
     snapshotRevision: 5,
     headSeq: 10,
-    roleAgentRegistrations: [],
+    roleAgentRegistrations: ROLES.map((role) => ({
+      role,
+      agentId: `agent_${role}`,
+      agentNameAtRegistration: `${role} Agent`,
+      roleProfileVersion: `${role}-v1`,
+      agentsMdDigest: DIGEST,
+      registeredAt: NOW,
+    })),
     worldCommits: [],
     resourceVersions,
     roleQuerySpecs,
@@ -292,6 +299,55 @@ async function committedDatabase(): Promise<EpochDatabase> {
     throw new Error("failed to create committed Effect fixture");
   }
   return store.snapshot();
+}
+
+async function committedDatabaseWithCompletedRefreshPlan(): Promise<EpochDatabase> {
+  const database = await committedDatabase();
+  const session = database.sessions[0]!;
+  const validation = database.validations[0]!;
+  const inventoryDecisionId = session.activeDecisionCertificateIds.inventory!;
+  const currentBudgetDecisionId = session.activeDecisionCertificateIds.budget!;
+  const policyDecisionId = session.activeDecisionCertificateIds.policy!;
+  const currentBudgetDecision = database.decisions.find(
+    (candidate) => candidate.certificateId === currentBudgetDecisionId,
+  );
+  if (currentBudgetDecision === undefined) {
+    throw new Error("missing current Budget Decision");
+  }
+  const priorBudgetDecision = {
+    ...structuredClone(currentBudgetDecision),
+    certificateId: "decision_budget_before_refresh",
+    receiptIds: ["receipt_budget_before_refresh"] as [string],
+    decisionDigest: sha256Digest("decision-budget-before-refresh"),
+    status: "SUPERSEDED" as const,
+    supersededByCertificateId: currentBudgetDecisionId,
+  };
+  database.decisions.push(priorBudgetDecision);
+  const priorDecisionIds = [
+    inventoryDecisionId,
+    priorBudgetDecision.certificateId,
+    policyDecisionId,
+  ] as [string, string, string];
+  const priorReceiptIds = priorDecisionIds.map((decisionId) => {
+    const decision = database.decisions.find(
+      (candidate) => candidate.certificateId === decisionId,
+    );
+    if (decision === undefined) throw new Error("missing prior Decision");
+    return decision.receiptIds[0];
+  });
+  database.refreshPlans.push({
+    refreshPlanId: "refresh_normal_completed",
+    sessionId: session.sessionId,
+    baseSessionRevision: validation.baseSessionRevision - 1,
+    validatedHead: validation.validatedHead,
+    dependencySetHash: snapshotReceiptDependencySetHash(priorReceiptIds),
+    activeDecisionCertificateIds: priorDecisionIds,
+    agentIds: [session.frozenAssignments.budgetAgentId],
+    status: "COMPLETED",
+    claimedAttemptId: "attempt_budget_1",
+  });
+  validation.refreshPlanId = "refresh_normal_completed";
+  return database;
 }
 
 describe("Effect Gate", () => {
@@ -452,6 +508,13 @@ describe("Effect Gate", () => {
       reasonCode: "DECISION_INVALID",
     },
     {
+      name: "accepted Attempt without output digest",
+      mutate(database: EpochDatabase) {
+        database.attempts[0]!.outputDigest = null;
+      },
+      reasonCode: "DECISION_INVALID",
+    },
+    {
       name: "Receipt query",
       mutate(database: EpochDatabase) {
         database.receipts[0]!.queryHash = sha256Digest("wrong-query");
@@ -548,8 +611,115 @@ describe("Effect Gate", () => {
         database.sessions[0]!.state = "READY_AT_CURRENT_HEAD";
       },
     },
+    {
+      name: "committed head rollback before Permit head",
+      mutate(database: EpochDatabase) {
+        database.headSeq = database.permits[0]!.validatedHead - 1;
+      },
+    },
   ])("rejects a tampered committed closure: $name", async ({ mutate }) => {
     const database = await committedDatabase();
+    mutate(database);
+    const store = new MemoryEffectStore(database);
+    const ports = makePorts(store);
+    const result = await commit(ports, 5);
+
+    expect(result).toMatchObject({
+      status: "REJECTED",
+      reasonCode: "BINDING_MISMATCH",
+      effectsInSession: 1,
+    });
+    expect(ports.createEffectId).not.toHaveBeenCalled();
+    expect(store.snapshot().effects).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      name: "accepted Attempt without output digest",
+      mutate(database: EpochDatabase) {
+        database.attempts[0]!.outputDigest = null;
+      },
+    },
+    {
+      name: "unregistered Assignment profile version",
+      mutate(database: EpochDatabase) {
+        database.runAssignments[0]!.roleProfileVersion =
+          "inventory-unregistered-v2";
+      },
+    },
+    {
+      name: "unregistered Assignment profile digest",
+      mutate(database: EpochDatabase) {
+        database.runAssignments[0]!.agentsMdDigest = sha256Digest(
+          "inventory-unregistered-profile",
+        );
+      },
+    },
+    {
+      name: "consistently rebound but unregistered Agent",
+      mutate(database: EpochDatabase) {
+        const agentId = "agent_inventory_unregistered";
+        database.sessions[0]!.frozenAssignments.inventoryAgentId = agentId;
+        database.decisions[0]!.agentId = agentId;
+        database.runAssignments[0]!.agentId = agentId;
+        database.attempts[0]!.agentId = agentId;
+        database.receipts[0]!.agentId = agentId;
+      },
+    },
+  ])("rejects a tampered committed provenance: $name", async ({ mutate }) => {
+    const database = await committedDatabase();
+    mutate(database);
+    const store = new MemoryEffectStore(database);
+    const ports = makePorts(store);
+    const result = await commit(ports, 5);
+
+    expect(result).toMatchObject({
+      status: "REJECTED",
+      reasonCode: "DECISION_INVALID",
+      effectsInSession: 1,
+    });
+    expect(ports.createEffectId).not.toHaveBeenCalled();
+    expect(store.snapshot().effects).toHaveLength(1);
+  });
+
+  it("returns the same Effect for a healthy completed Budget RefreshPlan", async () => {
+    const database = await committedDatabaseWithCompletedRefreshPlan();
+    const effectId = database.effects[0]!.effectId;
+    const store = new MemoryEffectStore(database);
+    const ports = makePorts(store);
+    const result = await commit(ports, 5);
+
+    expect(result).toMatchObject({
+      status: "COMMITTED",
+      created: false,
+      effect: { effectId },
+      effectsInSession: 1,
+    });
+    expect(ports.createEffectId).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "ghost Plan ID",
+      mutate(database: EpochDatabase) {
+        database.validations[0]!.refreshPlanId = "refresh_ghost";
+      },
+    },
+    {
+      name: "wrong Plan Session",
+      mutate(database: EpochDatabase) {
+        database.refreshPlans[0]!.sessionId = "session_other";
+      },
+    },
+    {
+      name: "wrong Plan base revision",
+      mutate(database: EpochDatabase) {
+        database.refreshPlans[0]!.baseSessionRevision =
+          database.validations[0]!.baseSessionRevision;
+      },
+    },
+  ])("rejects an unclosed completed RefreshPlan: $name", async ({ mutate }) => {
+    const database = await committedDatabaseWithCompletedRefreshPlan();
     mutate(database);
     const store = new MemoryEffectStore(database);
     const ports = makePorts(store);
