@@ -31,6 +31,12 @@ export class AgentService {
     await this.workspaces.initialize();
     await this.store.mutate((database) => {
       for (const run of database.runs) {
+        // Additive migration for launchpad.json records written before thread
+        // evidence was captured per Run.
+        const legacyRun = run as unknown as { threadId?: string | null };
+        if (legacyRun.threadId === undefined) {
+          legacyRun.threadId = null;
+        }
         if (run.status === "queued" || run.status === "running") {
           run.status = "cancelled";
           run.error = "Server restarted while this run was active";
@@ -170,6 +176,7 @@ export class AgentService {
       output: null,
       error: null,
       usage: null,
+      threadId: null,
       startedAt: null,
       completedAt: null,
       createdAt: timestamp,
@@ -250,6 +257,9 @@ export class AgentService {
         prompt: run.prompt,
         threadId: agentAtStart.codexThreadId,
       });
+      if (this.cancellationRequests.has(agentAtStart.id)) {
+        throw new RunCancelledError();
+      }
       const completedAt = now();
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
@@ -258,6 +268,7 @@ export class AgentService {
         storedRun.status = "completed";
         storedRun.output = result.output;
         storedRun.usage = result.usage;
+        storedRun.threadId = result.threadId;
         storedRun.completedAt = completedAt;
         database.messages.push({
           id: randomUUID(),
@@ -274,7 +285,9 @@ export class AgentService {
       });
     } catch (error) {
       const completedAt = now();
-      const cancelled = error instanceof RunCancelledError;
+      const cancelled =
+        error instanceof RunCancelledError ||
+        this.cancellationRequests.has(agentAtStart.id);
       const message = error instanceof Error ? error.message : String(error);
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
@@ -282,6 +295,7 @@ export class AgentService {
         if (storedRun) {
           storedRun.status = cancelled ? "cancelled" : "failed";
           storedRun.error = message;
+          storedRun.threadId = null;
           storedRun.completedAt = completedAt;
         }
         if (agent) {
