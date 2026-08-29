@@ -1,13 +1,17 @@
 import {
   AgentAttemptSchema,
-  RefreshSessionRequestSchema,
+  DependencyCertificateSchema,
+  NoCutProofSchema,
   RefreshPlanSchema,
+  RefreshSessionRequestSchema,
   ROLES,
   RunAssignmentSchema,
   TimestampSchema,
+  ValidationRecordSchema,
   buildRoleQuerySpec,
   makeAlreadyReobservingError,
   makeStaleViewError,
+  snapshotReceiptDependencySetHash,
   type AgentAttempt,
   type AlreadyReobservingErrorBody,
   type EpochDatabase,
@@ -17,7 +21,6 @@ import {
   type Role,
   type RunAssignment,
   type StaleViewErrorBody,
-  type ValidationRecord,
 } from "./types.js";
 
 export interface RefreshEvidenceInterval {
@@ -29,9 +32,8 @@ export interface RefreshEvidenceInterval {
 
 export interface BuildRefreshPlanInput {
   refreshPlanId: string;
-  session: EpochSession;
-  validation: ValidationRecord;
-  evidence: readonly RefreshEvidenceInterval[];
+  sessionId: string;
+  database: Readonly<EpochDatabase>;
 }
 
 export interface RefreshMutationPort {
@@ -188,19 +190,46 @@ export function refreshSet(
  * write in their shared mutation. No mutable browser field participates.
  */
 export function buildRefreshPlan(input: BuildRefreshPlanInput): RefreshPlan {
-  const { session, validation } = input;
-  if (
-    session.state !== "BLOCKED_NO_CUT" &&
-    session.state !== "HISTORICAL_STALE"
-  ) {
-    return failInvariant("only blocked or historical-stale Sessions can plan refresh");
+  const sessions = input.database.sessions.filter(
+    (candidate) => candidate.sessionId === input.sessionId,
+  );
+  if (sessions.length !== 1) {
+    return failInvariant("Session ID must resolve exactly once");
   }
-  const expectedOutcome =
-    session.state === "BLOCKED_NO_CUT"
-      ? "NO_VALID_OBSERVED_WORLD_CUT"
-      : "HISTORICAL_BUT_STALE_NOW";
-  if (validation.outcome !== expectedOutcome) {
-    return failInvariant("Validation outcome does not match the blocked Session state");
+  const session = sessions[0]!;
+  if (session.state === "HISTORICAL_STALE") {
+    return failInvariant(
+      "P0 cannot close HISTORICAL_STALE refresh provenance; a future contract upgrade is required",
+    );
+  }
+  if (session.state !== "BLOCKED_NO_CUT") {
+    return failInvariant("P0 only plans refresh for BLOCKED_NO_CUT Sessions");
+  }
+  if (
+    session.activeValidationId === null ||
+    session.activePermitId !== null ||
+    !ROLES.every((role) => session.activeAttemptIds[role] === null)
+  ) {
+    return failInvariant(
+      "blocked Session must have one active Validation and no Permit or in-flight Attempt",
+    );
+  }
+  const validationRecords = input.database.validations.filter(
+    (candidate) => candidate.validationId === session.activeValidationId,
+  );
+  if (validationRecords.length !== 1) {
+    return failInvariant("active Validation must resolve exactly once");
+  }
+  const validation = ValidationRecordSchema.parse(validationRecords[0]);
+  if (
+    validation.outcome !== "NO_VALID_OBSERVED_WORLD_CUT" ||
+    validation.noCutProofId === null ||
+    validation.jointValidityCertificateId !== null ||
+    validation.validatedHead !== input.database.headSeq
+  ) {
+    return failInvariant(
+      "P0 requires a current NO_VALID_OBSERVED_WORLD_CUT Validation",
+    );
   }
   if (
     validation.sessionId !== session.sessionId ||
@@ -231,15 +260,69 @@ export function buildRefreshPlan(input: BuildRefreshPlanInput): RefreshPlan {
   ) {
     return failInvariant("Validation is not frozen to the active Decision tuple");
   }
-  input.evidence.forEach((interval) => {
-    if (roleForAgent(session, interval.agentId) !== interval.role) {
-      failInvariant("evidence owner does not match the frozen Role assignment");
+  const receiptIds: string[] = [];
+  for (const [index, role] of ROLES.entries()) {
+    const decisionId = activeDecisionCertificateIds[index]!;
+    const decisionRecords = input.database.decisions.filter(
+      (candidate) => candidate.certificateId === decisionId,
+    );
+    if (decisionRecords.length !== 1) {
+      return failInvariant(`active ${role} Decision must resolve exactly once`);
     }
-  });
-  const agentIds = refreshSet(validation.validatedHead, input.evidence);
-  if (agentIds.length === 0) {
-    return failInvariant("a blocked RefreshPlan must contain at least one invalid owner");
+    const decision = DependencyCertificateSchema.parse(decisionRecords[0]);
+    if (
+      decision.status !== "ACTIVE" ||
+      decision.supersededByCertificateId !== null ||
+      decision.sessionId !== session.sessionId ||
+      decision.actionHash !== session.actionHash ||
+      decision.role !== role ||
+      roleForAgent(session, decision.agentId) !== role
+    ) {
+      return failInvariant(`active ${role} Decision binding is invalid`);
+    }
+    receiptIds.push(decision.receiptIds[0]);
   }
+  if (new Set(receiptIds).size !== ROLES.length) {
+    return failInvariant("active Decisions must bind three distinct Receipts");
+  }
+  const dependencySetHash = snapshotReceiptDependencySetHash(receiptIds);
+  if (dependencySetHash !== validation.dependencySetHash) {
+    return failInvariant("Validation dependency set is not derived from active Decisions");
+  }
+
+  const proofRecords = input.database.noCutProofs.filter(
+    (candidate) => candidate.proofId === validation.noCutProofId,
+  );
+  if (proofRecords.length !== 1) {
+    return failInvariant("Validation NoCutProof must resolve exactly once");
+  }
+  const proof = NoCutProofSchema.parse(proofRecords[0]);
+  const receiptSet = new Set(receiptIds);
+  const witnessSet = new Set(proof.conflictWitnessReceiptIds);
+  if (
+    proof.validationId !== validation.validationId ||
+    proof.sessionId !== session.sessionId ||
+    proof.actionHash !== session.actionHash ||
+    proof.dependencySetHash !== dependencySetHash ||
+    proof.validatedAtHead !== validation.validatedHead ||
+    proof.lowerBound !== validation.lowerBound ||
+    proof.upperBound !== validation.upperBound ||
+    proof.lowerBound < proof.upperBound ||
+    !sameOrderedIds(
+      proof.decisionCertificateIds,
+      activeDecisionCertificateIds,
+    ) ||
+    !receiptSet.has(proof.latestStartingReceiptId) ||
+    !receiptSet.has(proof.earliestEndingReceiptId) ||
+    witnessSet.size !== 2 ||
+    !witnessSet.has(proof.earliestEndingReceiptId) ||
+    !witnessSet.has(proof.latestStartingReceiptId)
+  ) {
+    return failInvariant(
+      "NoCutProof does not close over the current Validation and active dependency set",
+    );
+  }
+  const agentIds = [...proof.refreshAgentIds];
   requireP0BudgetOwner(session, agentIds);
 
   return RefreshPlanSchema.parse({
@@ -247,7 +330,7 @@ export function buildRefreshPlan(input: BuildRefreshPlanInput): RefreshPlan {
     sessionId: session.sessionId,
     baseSessionRevision: session.sessionRevision,
     validatedHead: validation.validatedHead,
-    dependencySetHash: validation.dependencySetHash,
+    dependencySetHash,
     activeDecisionCertificateIds,
     agentIds,
     status: "AVAILABLE",
@@ -260,36 +343,26 @@ function planStillMatches(
   session: EpochSession,
   plan: RefreshPlan,
 ): boolean {
-  const activeDecisionIds = activeDecisionIdsOrNull(session);
-  if (activeDecisionIds === null) return false;
-  const validations = database.validations.filter(
-    (candidate) => candidate.validationId === session.activeValidationId,
-  );
-  const validation = validations[0];
-  const expectedOutcome =
-    session.state === "BLOCKED_NO_CUT"
-      ? "NO_VALID_OBSERVED_WORLD_CUT"
-      : session.state === "HISTORICAL_STALE"
-        ? "HISTORICAL_BUT_STALE_NOW"
-        : null;
-  return (
-    expectedOutcome !== null &&
-    session.activePermitId === null &&
-    ROLES.every((role) => session.activeAttemptIds[role] === null) &&
-    plan.sessionId === session.sessionId &&
-    plan.baseSessionRevision === session.sessionRevision &&
-    plan.validatedHead === database.headSeq &&
-    sameOrderedIds(plan.activeDecisionCertificateIds, activeDecisionIds) &&
-    validations.length === 1 &&
-    validation !== undefined &&
-    validation.sessionId === session.sessionId &&
-    validation.actionHash === session.actionHash &&
-    validation.outcome === expectedOutcome &&
-    validation.validatedHead === plan.validatedHead &&
-    validation.dependencySetHash === plan.dependencySetHash &&
-    sameOrderedIds(validation.decisionCertificateIds, activeDecisionIds) &&
-    validation.refreshPlanId === plan.refreshPlanId
-  );
+  try {
+    const authoritative = buildRefreshPlan({
+      refreshPlanId: plan.refreshPlanId,
+      sessionId: session.sessionId,
+      database,
+    });
+    return (
+      plan.sessionId === authoritative.sessionId &&
+      plan.baseSessionRevision === authoritative.baseSessionRevision &&
+      plan.validatedHead === authoritative.validatedHead &&
+      plan.dependencySetHash === authoritative.dependencySetHash &&
+      sameOrderedIds(
+        plan.activeDecisionCertificateIds,
+        authoritative.activeDecisionCertificateIds,
+      ) &&
+      sameOrderedIds(plan.agentIds, authoritative.agentIds)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function requireP0BudgetOwner(

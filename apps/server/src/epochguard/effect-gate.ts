@@ -23,10 +23,12 @@ import {
   type EpochDatabase,
   type EpochSession,
   type FailureCode,
+  type JointValidityCertificate,
   type ObservationReceipt,
   type ResourceVersion,
   type Role,
   type StaleViewErrorBody,
+  type ValidationRecord,
 } from "./types.js";
 
 export interface EffectGateMutationPort {
@@ -87,10 +89,17 @@ function sameOrderedIds(left: readonly string[], right: readonly string[]): bool
   );
 }
 
-function orderedActiveDecisionIds(session: EpochSession): [string, string, string] {
+function orderedActiveDecisionIds(
+  session: EpochSession,
+  effectsInSession = 0,
+): [string, string, string] {
   const { inventory, budget, policy } = session.activeDecisionCertificateIds;
   if (inventory === null || budget === null || policy === null) {
-    reject("DECISION_INVALID", "all three active Decision IDs are required");
+    reject(
+      "DECISION_INVALID",
+      "all three active Decision IDs are required",
+      effectsInSession,
+    );
   }
   return [inventory, budget, policy];
 }
@@ -114,8 +123,9 @@ function requireSingle<T>(
   values: readonly T[],
   reasonCode: FailureCode,
   message: string,
+  effectsInSession = 0,
 ): T {
-  if (values.length !== 1) reject(reasonCode, message);
+  if (values.length !== 1) reject(reasonCode, message, effectsInSession);
   return values[0]!;
 }
 
@@ -134,9 +144,241 @@ function effectScopeCount(database: EpochDatabase, sessionId: string): number {
   return database.effects.filter((effect) => effect.sessionId === sessionId).length;
 }
 
+function validateCommittedEvidenceClosure(
+  database: EpochDatabase,
+  session: EpochSession,
+  world: EffectGateWorldPort,
+  jvc: JointValidityCertificate,
+  validation: ValidationRecord,
+  expectedActionHash: string,
+  dependencySetHash: string,
+  validatedHead: number,
+  effectsInSession: number,
+): void {
+  const fail = (reasonCode: FailureCode, message: string): never =>
+    reject(reasonCode, message, effectsInSession);
+  const activeDecisionIds = orderedActiveDecisionIds(session, effectsInSession);
+  const receiptIds: string[] = [];
+  const attemptIds: string[] = [];
+  const runIds: string[] = [];
+  const intervalBounds: Array<{ from: number; until: number }> = [];
+
+  for (const [index, role] of ROLES.entries()) {
+    const decisionId = activeDecisionIds[index]!;
+    const decisionRecord = requireSingle(
+      database.decisions.filter(
+        (candidate) => candidate.certificateId === decisionId,
+      ),
+      "DECISION_INVALID",
+      `committed ${role} Decision must resolve exactly once`,
+      effectsInSession,
+    );
+    const parsedDecision = DependencyCertificateSchema.safeParse(decisionRecord);
+    const decision = parsedDecision.success
+      ? parsedDecision.data
+      : fail("DECISION_INVALID", `committed ${role} Decision is malformed`);
+    const expectedAgentId = expectedAgentForRole(session, role);
+    if (
+      decision.status !== "ACTIVE" ||
+      decision.supersededByCertificateId !== null ||
+      decision.sessionId !== session.sessionId ||
+      decision.actionHash !== expectedActionHash ||
+      decision.role !== role ||
+      decision.agentId !== expectedAgentId ||
+      decision.verdict !== "ALLOW"
+    ) {
+      fail(
+        "DECISION_INVALID",
+        `committed ${role} Decision is not an active ALLOW for its frozen Agent`,
+      );
+    }
+
+    const assignmentRecord = requireSingle(
+      database.runAssignments.filter(
+        (candidate) => candidate.assignmentId === decision.runAssignmentId,
+      ),
+      "DECISION_INVALID",
+      `committed ${role} Assignment must resolve exactly once`,
+      effectsInSession,
+    );
+    const parsedAssignment = RunAssignmentSchema.safeParse(assignmentRecord);
+    const assignment = parsedAssignment.success
+      ? parsedAssignment.data
+      : fail("DECISION_INVALID", `committed ${role} Assignment is malformed`);
+    const receiptId = decision.receiptIds[0];
+    if (
+      assignment.status !== "CONSUMED" ||
+      assignment.boundRunId !== decision.runId ||
+      assignment.consumedByDecisionCertificateId !== decision.certificateId ||
+      assignment.boundAt === null ||
+      assignment.consumedAt === null ||
+      assignment.sessionId !== session.sessionId ||
+      assignment.actionHash !== expectedActionHash ||
+      assignment.agentId !== expectedAgentId ||
+      assignment.role !== role ||
+      assignment.receiptId !== receiptId
+    ) {
+      fail(
+        "DECISION_INVALID",
+        `committed ${role} Assignment/Run/Decision binding is invalid`,
+      );
+    }
+
+    const attemptRecord = requireSingle(
+      database.attempts.filter(
+        (candidate) => candidate.assignmentId === assignment.assignmentId,
+      ),
+      "DECISION_INVALID",
+      `committed ${role} Attempt must resolve exactly once`,
+      effectsInSession,
+    );
+    const parsedAttempt = AgentAttemptSchema.safeParse(attemptRecord);
+    const attempt = parsedAttempt.success
+      ? parsedAttempt.data
+      : fail("DECISION_INVALID", `committed ${role} Attempt is malformed`);
+    if (
+      attempt.status !== "ACCEPTED" ||
+      attempt.sessionId !== session.sessionId ||
+      attempt.actionHash !== expectedActionHash ||
+      attempt.role !== role ||
+      attempt.agentId !== expectedAgentId ||
+      attempt.runId !== decision.runId
+    ) {
+      fail(
+        "DECISION_INVALID",
+        `committed ${role} Attempt does not prove its accepted Run`,
+      );
+    }
+
+    const receiptRecord = requireSingle(
+      database.receipts.filter(
+        (candidate) => candidate.receiptId === receiptId,
+      ),
+      "DECISION_INVALID",
+      `committed ${role} Receipt must resolve exactly once`,
+      effectsInSession,
+    );
+    const parsedReceipt = ObservationReceiptSchema.safeParse(receiptRecord);
+    const receipt = parsedReceipt.success
+      ? parsedReceipt.data
+      : fail("DECISION_INVALID", `committed ${role} Receipt is malformed`);
+    const expectedQuery = buildRoleQuerySpec(session.action, role);
+    const persistedQueryMatches = database.roleQuerySpecs.some((candidate) => {
+      const parsed = RoleQuerySpecSchema.safeParse(candidate);
+      return (
+        parsed.success &&
+        parsed.data.queryHash === expectedQuery.queryHash &&
+        canonicalizeRoleQuery(parsed.data) === canonicalizeRoleQuery(expectedQuery)
+      );
+    });
+    if (
+      !persistedQueryMatches ||
+      assignment.queryHash !== expectedQuery.queryHash ||
+      receipt.queryHash !== expectedQuery.queryHash ||
+      receipt.sessionId !== session.sessionId ||
+      receipt.actionHash !== expectedActionHash ||
+      receipt.agentId !== expectedAgentId ||
+      receipt.runAssignmentId !== assignment.assignmentId ||
+      receipt.role !== role ||
+      receipt.source !== role ||
+      receipt.entityKey !== expectedQuery.entityKey ||
+      receipt.observedAtSeq > validatedHead
+    ) {
+      fail(
+        "DECISION_INVALID",
+        `committed ${role} Receipt/query provenance is invalid`,
+      );
+    }
+
+    const resolvedVersion = world.resolveResourceVersion(database, receipt);
+    const parsedVersion = ResourceVersionSchema.safeParse(resolvedVersion);
+    const version = parsedVersion.success
+      ? parsedVersion.data
+      : fail(
+          "HISTORY_UNVERIFIABLE",
+          `committed ${role} source history cannot resolve the Receipt revision`,
+        );
+    if (
+      version.sourceRevision !== receipt.sourceRevision ||
+      version.valueHash !== receipt.valueHash ||
+      version.validFromSeq > receipt.observedAtSeq ||
+      (version.validUntilSeq !== null &&
+        receipt.observedAtSeq >= version.validUntilSeq) ||
+      version.validFromSeq > validatedHead ||
+      (version.validUntilSeq !== null && validatedHead >= version.validUntilSeq)
+    ) {
+      fail(
+        "HISTORY_UNVERIFIABLE",
+        `committed ${role} Receipt was not valid at the committed head`,
+      );
+    }
+
+    const jvcInterval = requireSingle(
+      jvc.intervals.filter((interval) => interval.receiptId === receipt.receiptId),
+      "BINDING_MISMATCH",
+      `committed ${role} JVC interval must resolve exactly once`,
+      effectsInSession,
+    );
+    const closedAfterCommit =
+      jvcInterval.until === null &&
+      version.validUntilSeq !== null &&
+      validatedHead < version.validUntilSeq;
+    if (
+      jvcInterval.source !== receipt.source ||
+      jvcInterval.sourceRevision !== receipt.sourceRevision ||
+      jvcInterval.from !== version.validFromSeq ||
+      (jvcInterval.until !== version.validUntilSeq && !closedAfterCommit) ||
+      jvcInterval.from > validatedHead ||
+      (jvcInterval.until !== null && validatedHead >= jvcInterval.until)
+    ) {
+      fail(
+        "BINDING_MISMATCH",
+        `committed ${role} JVC interval is not historically self-consistent`,
+      );
+    }
+
+    receiptIds.push(receipt.receiptId);
+    attemptIds.push(attempt.attemptId);
+    runIds.push(decision.runId);
+    intervalBounds.push({
+      from: jvcInterval.from,
+      until: jvcInterval.until ?? validatedHead + 1,
+    });
+  }
+
+  if (
+    new Set(receiptIds).size !== ROLES.length ||
+    new Set(attemptIds).size !== ROLES.length ||
+    new Set(runIds).size !== ROLES.length
+  ) {
+    fail(
+      "DECISION_INVALID",
+      "committed closure must contain three distinct Receipts, Attempts, and Runs",
+    );
+  }
+  const recomputedDependencySetHash =
+    snapshotReceiptDependencySetHash(receiptIds);
+  const lowerBound = Math.max(...intervalBounds.map((interval) => interval.from));
+  const upperBound = Math.min(...intervalBounds.map((interval) => interval.until));
+  if (
+    recomputedDependencySetHash !== dependencySetHash ||
+    validation.lowerBound !== lowerBound ||
+    validation.upperBound !== upperBound ||
+    lowerBound >= upperBound ||
+    lowerBound > validatedHead ||
+    validatedHead >= upperBound
+  ) {
+    fail(
+      "BINDING_MISMATCH",
+      "committed dependency set or historical interval intersection is invalid",
+    );
+  }
+}
+
 function returnExistingEffect(
   database: EpochDatabase,
   session: EpochSession,
+  world: EffectGateWorldPort,
   expectedActionHash: string,
   expectedIdempotencyKey: string,
 ): CommitProtectedEffectResult | null {
@@ -161,6 +403,7 @@ function returnExistingEffect(
   }
   const effect = parsed.data;
   if (
+    effect.sessionId !== session.sessionId ||
     effect.actionHash !== expectedActionHash ||
     effect.idempotencyKey !== expectedIdempotencyKey ||
     effect.type !== session.action.type
@@ -171,6 +414,140 @@ function returnExistingEffect(
       sessionEffects.length,
     );
   }
+  if (
+    session.state !== "COMMITTED" ||
+    session.activePermitId !== effect.permitId ||
+    session.activeRefreshPlanId !== null ||
+    !ROLES.every((role) => session.activeAttemptIds[role] === null) ||
+    database.refreshPlans.some(
+      (plan) =>
+        plan.sessionId === session.sessionId &&
+        (plan.status === "AVAILABLE" || plan.status === "CLAIMED"),
+    )
+  ) {
+    return reject(
+      "BINDING_MISMATCH",
+      "the existing Effect is not owned by a closed COMMITTED Session",
+      sessionEffects.length,
+    );
+  }
+
+  const permitRecord = requireSingle(
+    database.permits.filter((candidate) => candidate.permitId === effect.permitId),
+    "BINDING_MISMATCH",
+    "the existing Effect Permit must resolve exactly once",
+    sessionEffects.length,
+  );
+  const parsedPermit = EffectPermitSchema.safeParse(permitRecord);
+  if (!parsedPermit.success) {
+    return reject(
+      "BINDING_MISMATCH",
+      "the existing Effect Permit is malformed",
+      sessionEffects.length,
+    );
+  }
+  const permit = parsedPermit.data;
+  if (
+    permit.status !== "CONSUMED" ||
+    permit.consumedAt === null ||
+    permit.consumedAt !== effect.createdAt ||
+    permit.sessionId !== effect.sessionId ||
+    permit.actionHash !== effect.actionHash ||
+    permit.idempotencyKey !== effect.idempotencyKey ||
+    permit.dependencySetHash !== effect.dependencySetHash ||
+    permit.jointValidityCertificateId !== effect.jointValidityCertificateId
+  ) {
+    return reject(
+      "BINDING_MISMATCH",
+      "the existing Effect and consumed Permit do not close over the same commit",
+      sessionEffects.length,
+    );
+  }
+
+  const jvcRecord = requireSingle(
+    database.jointValidityCertificates.filter(
+      (candidate) =>
+        candidate.certificateId === effect.jointValidityCertificateId,
+    ),
+    "BINDING_MISMATCH",
+    "the existing Effect JVC must resolve exactly once",
+    sessionEffects.length,
+  );
+  const parsedJvc = JointValidityCertificateSchema.safeParse(jvcRecord);
+  if (!parsedJvc.success) {
+    return reject(
+      "BINDING_MISMATCH",
+      "the existing Effect JVC is malformed",
+      sessionEffects.length,
+    );
+  }
+  const jvc = parsedJvc.data;
+  if (
+    jvc.sessionId !== effect.sessionId ||
+    jvc.actionHash !== effect.actionHash ||
+    jvc.dependencySetHash !== effect.dependencySetHash ||
+    jvc.validatedAtHead !== permit.validatedHead ||
+    jvc.selectedCutSeq !== permit.validatedHead ||
+    jvc.currentHeadCovered !== true
+  ) {
+    return reject(
+      "BINDING_MISMATCH",
+      "the existing Effect, Permit, and JVC historical fields do not match",
+      sessionEffects.length,
+    );
+  }
+
+  const validationRecord = requireSingle(
+    database.validations.filter(
+      (candidate) => candidate.validationId === jvc.validationId,
+    ),
+    "BINDING_MISMATCH",
+    "the committed JVC Validation must resolve exactly once",
+    sessionEffects.length,
+  );
+  const parsedValidation = ValidationRecordSchema.safeParse(validationRecord);
+  if (!parsedValidation.success) {
+    return reject(
+      "BINDING_MISMATCH",
+      "the committed JVC Validation is malformed",
+      sessionEffects.length,
+    );
+  }
+  const validation = parsedValidation.data;
+  const activeDecisionIds = orderedActiveDecisionIds(
+    session,
+    sessionEffects.length,
+  );
+  if (
+    session.activeValidationId !== validation.validationId ||
+    validation.sessionId !== effect.sessionId ||
+    validation.actionHash !== effect.actionHash ||
+    validation.dependencySetHash !== effect.dependencySetHash ||
+    validation.validatedHead !== permit.validatedHead ||
+    validation.outcome !== "VALID_CURRENT_ALLOW" ||
+    validation.jointValidityCertificateId !== jvc.certificateId ||
+    validation.noCutProofId !== null ||
+    !sameOrderedIds(validation.decisionCertificateIds, activeDecisionIds) ||
+    !sameOrderedIds(jvc.decisionCertificateIds, activeDecisionIds)
+  ) {
+    return reject(
+      "BINDING_MISMATCH",
+      "the committed Validation does not close over Session, JVC, and Decisions",
+      sessionEffects.length,
+    );
+  }
+
+  validateCommittedEvidenceClosure(
+    database,
+    session,
+    world,
+    jvc,
+    validation,
+    expectedActionHash,
+    effect.dependencySetHash,
+    permit.validatedHead,
+    sessionEffects.length,
+  );
   return {
     status: "COMMITTED",
     created: false,
@@ -258,6 +635,7 @@ export async function commitProtectedEffect(
       const existing = returnExistingEffect(
         database,
         session,
+        ports.world,
         expectedActionHash,
         expectedIdempotencyKey,
       );
@@ -275,6 +653,20 @@ export async function commitProtectedEffect(
         return reject(
           "BINDING_MISMATCH",
           "only READY_AT_CURRENT_HEAD may enter the Effect Gate",
+        );
+      }
+      if (
+        !ROLES.every((role) => session.activeAttemptIds[role] === null) ||
+        session.activeRefreshPlanId !== null ||
+        database.refreshPlans.some(
+          (plan) =>
+            plan.sessionId === session.sessionId &&
+            (plan.status === "AVAILABLE" || plan.status === "CLAIMED"),
+        )
+      ) {
+        return reject(
+          "BINDING_MISMATCH",
+          "READY Session must not retain an in-flight Attempt or RefreshPlan",
         );
       }
       if (session.activePermitId === null) {

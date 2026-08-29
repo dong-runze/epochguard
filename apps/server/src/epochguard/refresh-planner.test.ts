@@ -10,8 +10,10 @@ import {
 import {
   GOLDEN_ACTION_HASH,
   GOLDEN_ACTION_INPUT,
+  ROLES,
   buildRoleQuerySpec,
   sha256Digest,
+  snapshotReceiptDependencySetHash,
   type AgentAttempt,
   type EpochDatabase,
   type EpochSession,
@@ -84,6 +86,12 @@ function blockedFixture(): {
     "decision_budget_1",
     "decision_policy_1",
   ] as const;
+  const receiptIds = [
+    "receipt_inventory_1",
+    "receipt_budget_1",
+    "receipt_policy_1",
+  ] as const;
+  const dependencySetHash = snapshotReceiptDependencySetHash(receiptIds);
   const session: EpochSession = {
     sessionId: "session_impossible",
     scenarioId: "impossible-collage-v1",
@@ -121,7 +129,7 @@ function blockedFixture(): {
     actionHash: session.actionHash,
     baseSessionRevision: 4,
     decisionCertificateIds: [...decisionIds],
-    dependencySetHash: sha256Digest("three-active-receipts"),
+    dependencySetHash,
     validatedHead: 21,
     outcome: "NO_VALID_OBSERVED_WORLD_CUT",
     lowerBound: 21,
@@ -132,36 +140,51 @@ function blockedFixture(): {
     verificationLatencyMs: 1,
     createdAt: NOW,
   };
-  const plan = buildRefreshPlan({
-    refreshPlanId: "refresh_impossible_1",
-    session,
-    validation,
-    evidence: [
-      {
-        role: "inventory",
-        agentId: "agent_inventory",
-        from: 18,
-        until: null,
-      },
-      {
-        role: "budget",
-        agentId: "agent_budget",
-        from: 19,
-        until: 20,
-      },
-      {
-        role: "policy",
-        agentId: "agent_policy",
-        from: 21,
-        until: null,
-      },
-    ],
-  });
-  session.activeRefreshPlanId = plan.refreshPlanId;
-  validation.refreshPlanId = plan.refreshPlanId;
   const database = emptyDatabase();
   database.sessions.push(session);
   database.validations.push(validation);
+  database.decisions.push(
+    ...ROLES.map((role, index) => ({
+      certificateId: decisionIds[index]!,
+      sessionId: session.sessionId,
+      actionHash: session.actionHash,
+      agentId: `agent_${role}`,
+      runAssignmentId: `assignment_${role}_1`,
+      runId: `run_${role}_1`,
+      role,
+      verdict: "ALLOW" as const,
+      receiptIds: [receiptIds[index]!] as [string],
+      decisionDigest: sha256Digest(`decision-${role}`),
+      status: "ACTIVE" as const,
+      supersededByCertificateId: null,
+      constructedBy: "epochguard" as const,
+      createdAt: NOW,
+    })),
+  );
+  database.noCutProofs.push({
+    proofId: "proof_impossible_1",
+    validationId: validation.validationId,
+    reason: "NO_VALID_OBSERVED_WORLD_CUT",
+    sessionId: session.sessionId,
+    actionHash: session.actionHash,
+    dependencySetHash,
+    decisionCertificateIds: [...decisionIds],
+    validatedAtHead: 21,
+    lowerBound: 21,
+    upperBound: 20,
+    latestStartingReceiptId: receiptIds[2],
+    earliestEndingReceiptId: receiptIds[1],
+    conflictWitnessReceiptIds: [receiptIds[1], receiptIds[2]],
+    refreshAgentIds: ["agent_budget"],
+    createdAt: NOW,
+  });
+  const plan = buildRefreshPlan({
+    refreshPlanId: "refresh_impossible_1",
+    sessionId: session.sessionId,
+    database,
+  });
+  session.activeRefreshPlanId = plan.refreshPlanId;
+  validation.refreshPlanId = plan.refreshPlanId;
   database.refreshPlans.push(plan);
   return { database, session, validation, plan };
 }
@@ -248,68 +271,89 @@ describe("Refresh Planner", () => {
     });
   });
 
-  it("fails closed instead of inventing non-Budget or multi-owner P0 semantics", () => {
+  it("derives owner only from NoCutProof and rejects unsupported P0 shapes", () => {
     const fixture = blockedFixture();
-    const session = structuredClone(fixture.session);
-    const validation = structuredClone(fixture.validation);
-    session.activeRefreshPlanId = null;
-    validation.refreshPlanId = null;
+    const planningDatabase = (): EpochDatabase => {
+      const database = structuredClone(fixture.database);
+      database.refreshPlans = [];
+      database.sessions[0]!.activeRefreshPlanId = null;
+      database.validations[0]!.refreshPlanId = null;
+      return database;
+    };
 
+    const multiOwner = planningDatabase();
+    multiOwner.noCutProofs[0]!.refreshAgentIds = [
+      "agent_budget",
+      "agent_policy",
+    ];
     expect(() =>
       buildRefreshPlan({
         refreshPlanId: "refresh_multi_owner",
-        session,
-        validation,
-        evidence: [
-          {
-            role: "inventory",
-            agentId: "agent_inventory",
-            from: 18,
-            until: null,
-          },
-          {
-            role: "budget",
-            agentId: "agent_budget",
-            from: 19,
-            until: 20,
-          },
-          {
-            role: "policy",
-            agentId: "agent_policy",
-            from: 22,
-            until: null,
-          },
-        ],
+        sessionId: fixture.session.sessionId,
+        database: multiOwner,
       }),
     ).toThrow(/P0 supports exactly one Budget refresh owner.*contract upgrade/);
 
+    const inventoryOnly = planningDatabase();
+    inventoryOnly.noCutProofs[0]!.refreshAgentIds = ["agent_inventory"];
     expect(() =>
       buildRefreshPlan({
         refreshPlanId: "refresh_inventory_only",
-        session,
-        validation,
-        evidence: [
-          {
-            role: "inventory",
-            agentId: "agent_inventory",
-            from: 18,
-            until: 20,
-          },
-          {
-            role: "budget",
-            agentId: "agent_budget",
-            from: 19,
-            until: null,
-          },
-          {
-            role: "policy",
-            agentId: "agent_policy",
-            from: 21,
-            until: null,
-          },
-        ],
+        sessionId: fixture.session.sessionId,
+        database: inventoryOnly,
       }),
     ).toThrow(/P0 supports exactly one Budget refresh owner.*contract upgrade/);
+
+    const historical = planningDatabase();
+    historical.sessions[0]!.state = "HISTORICAL_STALE";
+    expect(() =>
+      buildRefreshPlan({
+        refreshPlanId: "refresh_historical",
+        sessionId: fixture.session.sessionId,
+        database: historical,
+      }),
+    ).toThrow(/cannot close HISTORICAL_STALE.*contract upgrade/);
+  });
+
+  it.each([
+    {
+      name: "Proof dependency",
+      mutate(database: EpochDatabase) {
+        database.noCutProofs[0]!.dependencySetHash = sha256Digest("wrong-proof-set");
+      },
+    },
+    {
+      name: "Proof head",
+      mutate(database: EpochDatabase) {
+        database.noCutProofs[0]!.validatedAtHead = 20;
+      },
+    },
+    {
+      name: "Proof Action",
+      mutate(database: EpochDatabase) {
+        database.noCutProofs[0]!.actionHash = sha256Digest("wrong-proof-action");
+      },
+    },
+    {
+      name: "active Decision dependency",
+      mutate(database: EpochDatabase) {
+        database.decisions[0]!.receiptIds = ["receipt_inventory_other"];
+      },
+    },
+  ])("rejects a $name that does not close authoritatively", ({ mutate }) => {
+    const fixture = blockedFixture();
+    fixture.database.refreshPlans = [];
+    fixture.database.sessions[0]!.activeRefreshPlanId = null;
+    fixture.database.validations[0]!.refreshPlanId = null;
+    mutate(fixture.database);
+
+    expect(() =>
+      buildRefreshPlan({
+        refreshPlanId: "refresh_tampered_proof",
+        sessionId: fixture.session.sessionId,
+        database: fixture.database,
+      }),
+    ).toThrow(/NoCutProof|dependency set/);
   });
 
   it("refuses a persisted non-Budget Plan without creating dispatch artifacts", async () => {

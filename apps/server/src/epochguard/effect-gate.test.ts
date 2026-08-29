@@ -285,6 +285,15 @@ async function commit(
   });
 }
 
+async function committedDatabase(): Promise<EpochDatabase> {
+  const store = new MemoryEffectStore(readyDatabase());
+  const result = await commit(makePorts(store));
+  if (result.status !== "COMMITTED" || !result.created) {
+    throw new Error("failed to create committed Effect fixture");
+  }
+  return store.snapshot();
+}
+
 describe("Effect Gate", () => {
   it("converges concurrent and retried commits on one Effect", async () => {
     const store = new MemoryEffectStore(readyDatabase());
@@ -370,6 +379,37 @@ describe("Effect Gate", () => {
       name: "dependency",
       mutate(database: EpochDatabase) {
         database.validations[0]!.dependencySetHash = sha256Digest("wrong-set");
+      },
+      reasonCode: "BINDING_MISMATCH",
+    },
+    {
+      name: "READY Budget in-flight Attempt",
+      mutate(database: EpochDatabase) {
+        database.sessions[0]!.activeAttemptIds.budget =
+          "attempt_budget_refresh_inflight";
+      },
+      reasonCode: "BINDING_MISMATCH",
+    },
+    {
+      name: "READY CLAIMED RefreshPlan",
+      mutate(database: EpochDatabase) {
+        const session = database.sessions[0]!;
+        session.activeRefreshPlanId = "refresh_normal_claimed";
+        database.refreshPlans.push({
+          refreshPlanId: "refresh_normal_claimed",
+          sessionId: session.sessionId,
+          baseSessionRevision: session.sessionRevision,
+          validatedHead: database.headSeq,
+          dependencySetHash: database.validations[0]!.dependencySetHash,
+          activeDecisionCertificateIds: [
+            session.activeDecisionCertificateIds.inventory!,
+            session.activeDecisionCertificateIds.budget!,
+            session.activeDecisionCertificateIds.policy!,
+          ],
+          agentIds: [session.frozenAssignments.budgetAgentId],
+          status: "CLAIMED",
+          claimedAttemptId: "attempt_budget_refresh_inflight",
+        });
       },
       reasonCode: "BINDING_MISMATCH",
     },
@@ -465,6 +505,82 @@ describe("Effect Gate", () => {
       effectsInSession: 0,
     });
     expect(store.snapshot().effects).toHaveLength(0);
+  });
+
+  it.each([
+    {
+      name: "Effect dependencySetHash",
+      mutate(database: EpochDatabase) {
+        database.effects[0]!.dependencySetHash = sha256Digest(
+          "wrong-effect-dependency",
+        );
+      },
+    },
+    {
+      name: "Effect permitId",
+      mutate(database: EpochDatabase) {
+        database.effects[0]!.permitId = "permit_other";
+      },
+    },
+    {
+      name: "Effect JVC ID",
+      mutate(database: EpochDatabase) {
+        database.effects[0]!.jointValidityCertificateId = "jvc_other";
+      },
+    },
+    {
+      name: "Permit status",
+      mutate(database: EpochDatabase) {
+        database.permits[0]!.status = "REVOKED";
+      },
+    },
+    {
+      name: "Permit dependencySetHash",
+      mutate(database: EpochDatabase) {
+        database.permits[0]!.dependencySetHash = sha256Digest(
+          "wrong-permit-dependency",
+        );
+      },
+    },
+    {
+      name: "Session state",
+      mutate(database: EpochDatabase) {
+        database.sessions[0]!.state = "READY_AT_CURRENT_HEAD";
+      },
+    },
+  ])("rejects a tampered committed closure: $name", async ({ mutate }) => {
+    const database = await committedDatabase();
+    mutate(database);
+    const store = new MemoryEffectStore(database);
+    const ports = makePorts(store);
+    const result = await commit(ports, 5);
+
+    expect(result).toMatchObject({
+      status: "REJECTED",
+      reasonCode: "BINDING_MISMATCH",
+      effectsInSession: 1,
+    });
+    expect(ports.createEffectId).not.toHaveBeenCalled();
+    expect(store.snapshot().effects).toHaveLength(1);
+  });
+
+  it("returns the same healthy Effect before stale revision despite later head", async () => {
+    const database = await committedDatabase();
+    const effectId = database.effects[0]!.effectId;
+    database.headSeq += 1;
+    database.resourceVersions[0]!.validUntilSeq = database.headSeq;
+    const store = new MemoryEffectStore(database);
+    const ports = makePorts(store);
+    const result = await commit(ports, 5);
+
+    expect(result).toMatchObject({
+      status: "COMMITTED",
+      created: false,
+      effect: { effectId },
+      effectsInSession: 1,
+    });
+    expect(ports.createEffectId).not.toHaveBeenCalled();
+    expect(store.snapshot().effects).toHaveLength(1);
   });
 
   it("returns the exact STALE_VIEW body without consuming the Permit", async () => {
