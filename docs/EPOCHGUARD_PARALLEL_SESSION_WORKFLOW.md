@@ -804,7 +804,8 @@ npm run check
 
 | ID | 名称 | 状态 | Base SHA | Commit SHA | 中央门 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
-| CONTROL | 规划/审核/测试 | ACTIVE | `8d0bd4f` | — | — | 本 Session |
+| CONTROL | 规划/审核/测试 | ACTIVE | `475cb93` | — | — | 本 Session，位于 `epochguard/staging` |
+| EG-CANARY | 可视化 Session 只读灰度 | ACCEPTED | `475cb93` | — | Visibility / Read-only | 可视化机制通过；worktree 隔离未通过 |
 | EG-00 | Contracts & Starter Seams | NOT_STARTED | — | — | Gate A | 用户批准后首先创建 |
 | EG-01 | EpochStore | NOT_STARTED | — | — | Gate B | EG-00 后启动 |
 | EG-02 | World / Receipt / Evidence | NOT_STARTED | — | — | Gate B | EG-00 后启动 |
@@ -828,6 +829,29 @@ ACCEPTED
 MERGED
 BLOCKED
 ```
+
+### 15.1 EG-CANARY 灰度记录
+
+| 字段 | 结果 |
+| --- | --- |
+| 可视化任务 | `EG-CANARY 可视化 Session 灰度测试` |
+| Thread ID | `01a04cf8-2aa7-7f73-8ce2-27c7fc72cf2b` |
+| 仓库 | `C:\Users\董润泽\Desktop\hackathon\volc-agent-launchpad` |
+| 基线 | `epochguard/staging@475cb93` |
+| 文档可见性 | 最终设计与并行流程文档均可读 |
+| 工作包识别 | EG-00～EG-09 共 10 个，批准清单与激活顺序均可见 |
+| 读写结果 | 执行前后 Git 工作区均干净，未留下文件变更 |
+| 可视化 Session 结论 | **PASS** |
+| worktree 隔离结论 | **NOT PASSED / NOT TESTED**：任务与当前 Session 共享 checkout |
+
+原因：Codex 当前保存的项目根是父目录 `C:\Users\董润泽\Desktop\hackathon`，该目录本身不是 Git 仓库；真正的仓库位于子目录 `volc-agent-launchpad`。因此灰度任务只能使用本地共享 checkout。
+
+晋升条件：在启动正式 EG-00 前，必须将 `volc-agent-launchpad` 子仓库单独保存为 Codex Git 项目，然后再创建一个只读 worktree 灰度任务，确认：
+
+1. 新任务的 `git worktree list` 显示不同绝对路径；
+2. 主 checkout 与灰度 worktree 的 Git 状态互不影响；
+3. 灰度任务能读取 `epochguard/staging@475cb93` 或其后续已批准基线；
+4. 只有 worktree 灰度通过后，EG-00 才可以进入 `RUNNING`。
 
 ---
 
