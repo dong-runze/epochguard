@@ -804,11 +804,11 @@ npm run check
 
 | ID | 名称 | 状态 | Base SHA | Commit SHA | 中央门 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
-| CONTROL | 规划/审核/测试 | ACTIVE | `c6e07b8` | `b5576dc` | — | 本 Session，位于 `epochguard/staging`；负责 worktree 初始化与故障恢复 |
+| CONTROL | 规划/审核/测试 | ACTIVE | `c6e07b8` | `9b14f0c` | — | 本 Session，位于 `epochguard/staging`；负责 worktree 初始化与故障恢复 |
 | EG-CANARY | 可视化 Session 只读灰度 | ACCEPTED | `475cb93` | — | Visibility / Read-only | 可视化机制通过；worktree 隔离未通过 |
 | EG-00 | Contracts & Starter Seams | MERGED | `c6e07b8` | `d0f7861` | Gate A **PASS** | 已合入 `epochguard/staging@e5f0b3a` |
 | EG-01 | EpochStore | MERGED | `e5f0b3a` | `a7ba259` | Gate B Store **PASS** | 已合入 `epochguard/staging@b5576dc` |
-| EG-02 | World / Receipt / Evidence | RUNNING | `e5f0b3a` | — | Gate B | 已激活独立实现 |
+| EG-02 | World / Receipt / Evidence | MERGED | `e5f0b3a` | `1ff733d` | Gate B World/Evidence **PASS** | 已合入 `epochguard/staging@9b14f0c` |
 | EG-03 | Decision / Joint Validity | RUNNING | `e5f0b3a` | — | Gate B | 已激活独立实现 |
 | EG-04 | Refresh / Effect Gate | RUNNING | `e5f0b3a` | — | Gate B/C | 已激活，mock-first |
 | EG-05 | Diagnostics / Snapshot | RUNNING | `e5f0b3a` | — | Gate B/D | 已激活独立实现 |
@@ -863,7 +863,7 @@ BLOCKED
 | --- | --- | --- | --- | --- |
 | EG-00 | `01a04d0c-953a-78e3-a118-0822248058b4` | `epochguard/eg-00-contracts` | `.epochguard-worktrees/eg-00` | MERGED / GATE A PASS |
 | EG-01 | `01a04d0c-9c28-7ec3-83d1-29404eec12dc` | `epochguard/eg-01-store` | `.epochguard-worktrees/eg-01` | MERGED / GATE B STORE PASS |
-| EG-02 | `01a04d0c-a19c-7a61-a104-dfde763c48de` | `epochguard/eg-02-evidence` | `.epochguard-worktrees/eg-02` | ACTIVE IMPLEMENTATION |
+| EG-02 | `01a04d0c-a19c-7a61-a104-dfde763c48de` | `epochguard/eg-02-evidence` | `.epochguard-worktrees/eg-02` | MERGED / GATE B WORLD-EVIDENCE PASS |
 | EG-03 | `01a04d0c-a7a7-7742-80f2-7d8414726909` | `epochguard/eg-03-validity` | `.epochguard-worktrees/eg-03` | ACTIVE IMPLEMENTATION |
 | EG-04 | `01a04d0c-ad8e-7e10-a74e-e3b97f8414f6` | `epochguard/eg-04-gate` | `.epochguard-worktrees/eg-04` | ACTIVE IMPLEMENTATION |
 | EG-05 | `01a04d0c-b41b-7621-8890-ae88ddeaa17c` | `epochguard/eg-05-snapshot` | `.epochguard-worktrees/eg-05` | ACTIVE IMPLEMENTATION |
@@ -903,6 +903,23 @@ BLOCKED
 | Gate B Store 子项 | **PASS** |
 
 验收边界：EpochStore 只承诺单 Node 进程内的单 writer JSON 持久化，不宣称支持多进程或多服务副本共享同一文件。全量 Windows Server 的既知 POSIX `/tmp/codex-home` 断言仍单独跟踪，不归因于 EG-01。
+
+### 15.5 EG-02 / World、Receipt 与 Evidence 验收记录
+
+| 字段 | 结果 |
+| --- | --- |
+| 初始模块提交 | `914d4465ec74349aba34d1c2b364c248c154e436` |
+| 安全修复提交 | `1ff733d45d18f44d52627160395c4d6994e0d498` |
+| staging 合并提交 | `9b14f0c9838f49c0b32cbe52c7c145662852e849` |
+| 变更边界 | 2 个线性提交；只新增 EG-02 allowlist 内 4 个实现文件及 4 个测试文件 |
+| 中央累计测试 | Contracts + EpochStore + World/Fixture/Receipt/Evidence **54/54 PASS** |
+| 构建门 | Server typecheck / build **PASS** |
+| 资源完整性 | 所有公开 resolver 与 Evidence Pack 构建路径均重算 canonical value hash；返回对象与持久历史无 alias |
+| 写入前门 | 错误、占位或陈旧 Evidence Pack hash 在首次 workspace write 前拒绝；测试确认零写入 |
+| 独立复核 | Resolver value-only tamper、嵌套 alias、Pack hash/no-write、合同与 allowlist 均 **PASS** |
+| Gate B World/Evidence 子项 | **PASS** |
+
+验收边界：本子项证明确定性 WorldLedger、Receipt 与 canonical Evidence Pack 的本地安全语义；真实 Run 绑定、联合验证和协调器端到端门仍分别由 EG-06、EG-03 与 EG-08 承担，不能以本记录替代 Gate E 或完整 Gate B/C。
 
 ---
 
