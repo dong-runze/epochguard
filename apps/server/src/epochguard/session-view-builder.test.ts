@@ -1,0 +1,1106 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  EpochDatabaseSchema,
+  GOLDEN_ACTION_HASH,
+  GOLDEN_ACTION_INPUT,
+  ROLES,
+  buildRoleQuerySpec,
+  canonicalJson,
+  decodeSessionDashboardSnapshot,
+  sha256Digest,
+  snapshotReceiptDependencySetHash,
+  type EpochDatabase,
+  type Role,
+  type Verdict,
+} from "./types.js";
+import {
+  SessionViewBuilder,
+  SessionViewBuilderError,
+  buildSessionDashboardSnapshotFromSnapshot,
+} from "./session-view-builder.js";
+
+const SESSION_ID = "session_eg05";
+const HEAD = 21;
+const NOW = "2026-08-29T12:00:00.000Z";
+const LATER = "2026-08-29T12:01:00.000Z";
+
+const roleAgentId = (role: Role): string => `agent_${role}`;
+const roleTitle = (role: Role): string =>
+  `${role[0]?.toUpperCase() ?? ""}${role.slice(1)}`;
+const assignmentId = (role: Role, run = 1): string =>
+  `assignment_${role}_${run}`;
+const attemptId = (role: Role, run = 1): string => `attempt_${role}_${run}`;
+const runId = (role: Role, run = 1): string => `run_${role}_${run}`;
+const receiptId = (role: Role, run = 1): string => `receipt_${role}_${run}`;
+const certificateId = (role: Role, run = 1): string =>
+  `decision_${role}_${run}`;
+
+const ACTION = {
+  ...GOLDEN_ACTION_INPUT,
+  actionId: "action_eg05",
+  sessionId: SESSION_ID,
+  actionHash: GOLDEN_ACTION_HASH,
+  idempotencyKey: `${SESSION_ID}:${GOLDEN_ACTION_HASH}`,
+};
+
+const VALUES = {
+  inventory: { availableUnits: 4 },
+  budget: { remainingBudgetCents: 900_000 },
+  policy: { permitted: true },
+} as const;
+
+type EvidenceSpec = {
+  sourceRevision: number;
+  observedAtSeq: number;
+  validFromSeq: number;
+  validUntilSeq: number | null;
+};
+
+const STABLE_EVIDENCE: Record<Role, EvidenceSpec> = {
+  inventory: {
+    sourceRevision: 18,
+    observedAtSeq: 18,
+    validFromSeq: 10,
+    validUntilSeq: null,
+  },
+  budget: {
+    sourceRevision: 19,
+    observedAtSeq: 19,
+    validFromSeq: 11,
+    validUntilSeq: null,
+  },
+  policy: {
+    sourceRevision: 20,
+    observedAtSeq: 20,
+    validFromSeq: 12,
+    validUntilSeq: null,
+  },
+};
+
+const NO_CUT_EVIDENCE: Record<Role, EvidenceSpec> = {
+  inventory: {
+    sourceRevision: 18,
+    observedAtSeq: 18,
+    validFromSeq: 18,
+    validUntilSeq: null,
+  },
+  budget: {
+    sourceRevision: 19,
+    observedAtSeq: 19,
+    validFromSeq: 19,
+    validUntilSeq: 20,
+  },
+  policy: {
+    sourceRevision: 21,
+    observedAtSeq: 21,
+    validFromSeq: 21,
+    validUntilSeq: null,
+  },
+};
+
+function makeDatabase(
+  verdicts: Record<Role, Verdict> = {
+    inventory: "ALLOW",
+    budget: "ALLOW",
+    policy: "ALLOW",
+  },
+): EpochDatabase {
+  const queries = ROLES.map((role) => buildRoleQuerySpec(GOLDEN_ACTION_INPUT, role));
+  const queryFor = (role: Role) => {
+    const query = queries.find((candidate) => candidate.role === role);
+    if (query === undefined) throw new Error(`missing ${role} query`);
+    return query;
+  };
+  const valueHashFor = (role: Role): string =>
+    sha256Digest(canonicalJson(VALUES[role]));
+  const receiptIds = ROLES.map((role) => receiptId(role));
+  const decisionIds = ROLES.map((role) => certificateId(role)) as [
+    string,
+    string,
+    string,
+  ];
+  const dependencySetHash = snapshotReceiptDependencySetHash(receiptIds);
+
+  return EpochDatabaseSchema.parse({
+    schemaVersion: 1,
+    snapshotRevision: 101,
+    headSeq: HEAD,
+    roleAgentRegistrations: ROLES.map((role) => ({
+      role,
+      agentId: roleAgentId(role),
+      agentNameAtRegistration: `${roleTitle(role)} Agent`,
+      roleProfileVersion: `profile_${role}_v1`,
+      agentsMdDigest: sha256Digest(`agents-md:${role}`),
+      registeredAt: NOW,
+    })),
+    worldCommits: [],
+    resourceVersions: ROLES.map((role) => ({
+      id: `version_${role}_1`,
+      resourceId: `resource_${role}`,
+      sourceRevision: STABLE_EVIDENCE[role].sourceRevision,
+      value: VALUES[role],
+      valueHash: valueHashFor(role),
+      validFromSeq: STABLE_EVIDENCE[role].validFromSeq,
+      validUntilSeq: STABLE_EVIDENCE[role].validUntilSeq,
+    })),
+    roleQuerySpecs: queries,
+    runAssignments: ROLES.map((role) => ({
+      assignmentId: assignmentId(role),
+      sessionId: SESSION_ID,
+      actionHash: GOLDEN_ACTION_HASH,
+      agentId: roleAgentId(role),
+      agentNameAtAssignment: `${roleTitle(role)} Agent`,
+      role,
+      receiptId: receiptId(role),
+      queryHash: queryFor(role).queryHash,
+      roleProfileVersion: `profile_${role}_v1`,
+      promptTemplateVersion: `prompt_${role}_v1`,
+      agentsMdDigest: sha256Digest(`agents-md:${role}`),
+      runtimeLabelAtDispatch: `codex-${role}`,
+      evidencePackRelativePath: `.epochguard/sessions/${SESSION_ID}/${role}/${assignmentId(role)}.json`,
+      evidencePackHash: sha256Digest(`evidence-pack:${role}:1`),
+      boundRunId: runId(role),
+      status: "CONSUMED",
+      consumedByDecisionCertificateId: certificateId(role),
+      createdAt: NOW,
+      boundAt: NOW,
+      consumedAt: NOW,
+    })),
+    receipts: ROLES.map((role) => ({
+      schemaVersion: 1,
+      receiptId: receiptId(role),
+      sessionId: SESSION_ID,
+      actionHash: GOLDEN_ACTION_HASH,
+      agentId: roleAgentId(role),
+      runAssignmentId: assignmentId(role),
+      role,
+      source: role,
+      entityKey: queryFor(role).entityKey,
+      queryHash: queryFor(role).queryHash,
+      sourceRevision: STABLE_EVIDENCE[role].sourceRevision,
+      valueHash: valueHashFor(role),
+      observedAtSeq: STABLE_EVIDENCE[role].observedAtSeq,
+      nonce: `nonce-${role}-`.padEnd(40, "x"),
+      issuer: "epochguard",
+      issuedAt: NOW,
+    })),
+    sessions: [
+      {
+        sessionId: SESSION_ID,
+        scenarioId: "normal-world-v1",
+        action: ACTION,
+        actionHash: GOLDEN_ACTION_HASH,
+        state: verdicts.policy === "DENY" ? "CONSISTENT_DENY" : "READY_AT_CURRENT_HEAD",
+        sessionRevision: 8,
+        coordinationMode: "CONCURRENT",
+        frozenAssignments: {
+          inventoryAgentId: roleAgentId("inventory"),
+          budgetAgentId: roleAgentId("budget"),
+          policyAgentId: roleAgentId("policy"),
+        },
+        activeDecisionCertificateIds: {
+          inventory: certificateId("inventory"),
+          budget: certificateId("budget"),
+          policy: certificateId("policy"),
+        },
+        activeAttemptIds: { inventory: null, budget: null, policy: null },
+        activeValidationId: "validation_current",
+        activeRefreshPlanId: null,
+        activePermitId: verdicts.policy === "DENY" ? null : "permit_current",
+        stateUpdatedAt: NOW,
+        createdAt: NOW,
+      },
+    ],
+    attempts: ROLES.map((role) => ({
+      attemptId: attemptId(role),
+      sessionId: SESSION_ID,
+      actionHash: GOLDEN_ACTION_HASH,
+      role,
+      agentId: roleAgentId(role),
+      assignmentId: assignmentId(role),
+      runId: runId(role),
+      status: "ACCEPTED",
+      runStartedAt: NOW,
+      runCompletedAt: LATER,
+      threadId: `thread_${role}_1`,
+      usage: { inputTokens: 100, outputTokens: 20 },
+      outputDigest: sha256Digest(`output:${role}:1`),
+    })),
+    decisions: ROLES.map((role) => ({
+      certificateId: certificateId(role),
+      sessionId: SESSION_ID,
+      actionHash: GOLDEN_ACTION_HASH,
+      agentId: roleAgentId(role),
+      runAssignmentId: assignmentId(role),
+      runId: runId(role),
+      role,
+      verdict: verdicts[role],
+      receiptIds: [receiptId(role)],
+      decisionDigest: sha256Digest(`decision:${role}:1:${verdicts[role]}`),
+      status: "ACTIVE",
+      supersededByCertificateId: null,
+      constructedBy: "epochguard",
+      createdAt: LATER,
+    })),
+    validations: [
+      {
+        validationId: "validation_current",
+        sessionId: SESSION_ID,
+        actionHash: GOLDEN_ACTION_HASH,
+        baseSessionRevision: 7,
+        decisionCertificateIds: decisionIds,
+        dependencySetHash,
+        validatedHead: HEAD,
+        outcome: verdicts.policy === "DENY" ? "CONSISTENT_DENY" : "VALID_CURRENT_ALLOW",
+        lowerBound: 12,
+        upperBound: HEAD + 1,
+        jointValidityCertificateId: "jvc_current",
+        noCutProofId: null,
+        refreshPlanId: null,
+        verificationLatencyMs: 7,
+        createdAt: LATER,
+      },
+    ],
+    jointValidityCertificates: [
+      {
+        certificateId: "jvc_current",
+        validationId: "validation_current",
+        sessionId: SESSION_ID,
+        actionHash: GOLDEN_ACTION_HASH,
+        dependencySetHash,
+        validatedAtHead: HEAD,
+        selectedCutSeq: HEAD,
+        currentHeadCovered: true,
+        decisionCertificateIds: decisionIds,
+        intervals: ROLES.map((role) => ({
+          receiptId: receiptId(role),
+          source: role,
+          sourceRevision: STABLE_EVIDENCE[role].sourceRevision,
+          from: STABLE_EVIDENCE[role].validFromSeq,
+          until: STABLE_EVIDENCE[role].validUntilSeq,
+        })),
+        validatorVersion: "epochguard-jv-v1",
+        createdAt: LATER,
+      },
+    ],
+    noCutProofs: [],
+    refreshPlans: [],
+    permits:
+      verdicts.policy === "DENY"
+        ? []
+        : [
+            {
+              permitId: "permit_current",
+              sessionId: SESSION_ID,
+              actionHash: GOLDEN_ACTION_HASH,
+              dependencySetHash,
+              jointValidityCertificateId: "jvc_current",
+              validatedHead: HEAD,
+              idempotencyKey: `${SESSION_ID}:permit_current`,
+              status: "ISSUED",
+              issuedAt: LATER,
+              consumedAt: null,
+            },
+          ],
+    effects: [],
+    diagnostics:
+      verdicts.policy === "DENY"
+        ? [
+            {
+              diagnosticId: "diagnostic_deny",
+              sessionId: SESSION_ID,
+              actionHash: GOLDEN_ACTION_HASH,
+              sessionRevision: 8,
+              fixtureRef: null,
+              kind: "EXPECTED_BLOCK",
+              stage: "VALIDATE",
+              reasonCode: "CONSISTENT_DENY",
+              role: null,
+              attemptId: null,
+              assignmentId: null,
+              runId: null,
+              artifactRefs: [{ kind: "VALIDATION", id: "validation_current" }],
+              causedByDiagnosticIds: [],
+              expected: null,
+              actual: null,
+              rejectedOutputArtifactId: null,
+              auditSeq: 1,
+              recommendedAction: "NONE",
+            },
+          ]
+        : [],
+    rejectedOutputArtifacts: [],
+    auditEvents: [
+      {
+        eventId: "event_state",
+        sessionId: SESSION_ID,
+        actionHash: GOLDEN_ACTION_HASH,
+        sessionRevision: 8,
+        auditSeq: 10,
+        type: "SESSION_STATE",
+        status: verdicts.policy === "DENY" ? "DENIED" : "READY",
+        role: null,
+        artifactRefs: [],
+        createdAt: LATER,
+      },
+    ],
+  });
+}
+
+function makeCollectingDatabase(): EpochDatabase {
+  const database = makeDatabase();
+  database.snapshotRevision = 102;
+  const session = database.sessions[0]!;
+  session.state = "COLLECTING";
+  session.sessionRevision = 2;
+  session.activeDecisionCertificateIds = {
+    inventory: null,
+    budget: null,
+    policy: null,
+  };
+  session.activeAttemptIds = {
+    inventory: attemptId("inventory"),
+    budget: attemptId("budget"),
+    policy: attemptId("policy"),
+  };
+  session.activeValidationId = null;
+  session.activePermitId = null;
+  database.runAssignments.forEach((assignment) => {
+    assignment.status = "BOUND";
+    assignment.consumedByDecisionCertificateId = null;
+    assignment.consumedAt = null;
+  });
+  database.attempts.forEach((attempt) => {
+    attempt.status = "RUNNING";
+    attempt.runCompletedAt = null;
+    attempt.outputDigest = null;
+  });
+  database.receipts = [];
+  database.decisions = [];
+  database.validations = [];
+  database.jointValidityCertificates = [];
+  database.permits = [];
+  database.auditEvents[0]!.status = "COLLECTING";
+  return EpochDatabaseSchema.parse(database);
+}
+
+function makeNoCutDatabase(): EpochDatabase {
+  const database = makeDatabase();
+  database.snapshotRevision = 201;
+  const session = database.sessions[0]!;
+  session.scenarioId = "impossible-collage-v1";
+  session.state = "BLOCKED_NO_CUT";
+  session.sessionRevision = 4;
+  session.activeValidationId = "validation_no_cut";
+  session.activeRefreshPlanId = "refresh_budget";
+  session.activePermitId = null;
+
+  for (const role of ROLES) {
+    const evidence = NO_CUT_EVIDENCE[role];
+    const version = database.resourceVersions.find(
+      (candidate) => candidate.resourceId === `resource_${role}`,
+    )!;
+    version.sourceRevision = evidence.sourceRevision;
+    version.validFromSeq = evidence.validFromSeq;
+    version.validUntilSeq = evidence.validUntilSeq;
+    const receipt = database.receipts.find((candidate) => candidate.role === role)!;
+    receipt.sourceRevision = evidence.sourceRevision;
+    receipt.observedAtSeq = evidence.observedAtSeq;
+  }
+
+  const decisionIds = ROLES.map((role) => certificateId(role)) as [
+    string,
+    string,
+    string,
+  ];
+  const dependencySetHash = snapshotReceiptDependencySetHash(
+    ROLES.map((role) => receiptId(role)),
+  );
+  database.validations = [
+    {
+      validationId: "validation_no_cut",
+      sessionId: SESSION_ID,
+      actionHash: GOLDEN_ACTION_HASH,
+      baseSessionRevision: 3,
+      decisionCertificateIds: decisionIds,
+      dependencySetHash,
+      validatedHead: HEAD,
+      outcome: "NO_VALID_OBSERVED_WORLD_CUT",
+      lowerBound: 21,
+      upperBound: 20,
+      jointValidityCertificateId: null,
+      noCutProofId: "proof_no_cut",
+      refreshPlanId: "refresh_budget",
+      verificationLatencyMs: 9,
+      createdAt: LATER,
+    },
+  ];
+  database.jointValidityCertificates = [];
+  database.noCutProofs = [
+    {
+      proofId: "proof_no_cut",
+      validationId: "validation_no_cut",
+      reason: "NO_VALID_OBSERVED_WORLD_CUT",
+      sessionId: SESSION_ID,
+      actionHash: GOLDEN_ACTION_HASH,
+      dependencySetHash,
+      decisionCertificateIds: decisionIds,
+      validatedAtHead: HEAD,
+      lowerBound: 21,
+      upperBound: 20,
+      latestStartingReceiptId: receiptId("policy"),
+      earliestEndingReceiptId: receiptId("budget"),
+      conflictWitnessReceiptIds: [receiptId("budget"), receiptId("policy")],
+      refreshAgentIds: [roleAgentId("budget")],
+      createdAt: LATER,
+    },
+  ];
+  database.refreshPlans = [
+    {
+      refreshPlanId: "refresh_budget",
+      sessionId: SESSION_ID,
+      baseSessionRevision: 3,
+      validatedHead: HEAD,
+      dependencySetHash,
+      activeDecisionCertificateIds: decisionIds,
+      agentIds: [roleAgentId("budget")],
+      status: "AVAILABLE",
+      claimedAttemptId: null,
+    },
+  ];
+  database.permits = [];
+  database.diagnostics = [
+    {
+      diagnosticId: "diagnostic_no_cut",
+      sessionId: SESSION_ID,
+      actionHash: GOLDEN_ACTION_HASH,
+      sessionRevision: 4,
+      fixtureRef: "impossible-collage-v1",
+      kind: "EXPECTED_BLOCK",
+      stage: "VALIDATE",
+      reasonCode: "NO_VALID_OBSERVED_WORLD_CUT",
+      role: null,
+      attemptId: null,
+      assignmentId: null,
+      runId: null,
+      artifactRefs: [
+        { kind: "VALIDATION", id: "validation_no_cut" },
+        { kind: "PROOF", id: "proof_no_cut" },
+        { kind: "RECEIPT", id: receiptId("budget") },
+        { kind: "RECEIPT", id: receiptId("policy") },
+        { kind: "REFRESH_PLAN", id: "refresh_budget" },
+      ],
+      causedByDiagnosticIds: [],
+      expected: null,
+      actual: null,
+      rejectedOutputArtifactId: null,
+      auditSeq: 1,
+      recommendedAction: "REOBSERVE_INVALID",
+    },
+  ];
+  database.auditEvents[0]!.status = "BLOCKED_NO_CUT";
+  return EpochDatabaseSchema.parse(database);
+}
+
+function makeReobservingDatabase(): EpochDatabase {
+  const database = makeNoCutDatabase();
+  database.snapshotRevision = 202;
+  const session = database.sessions[0]!;
+  session.state = "REOBSERVING";
+  session.sessionRevision = 5;
+  session.activeAttemptIds.budget = attemptId("budget", 2);
+  const plan = database.refreshPlans[0]!;
+  plan.status = "CLAIMED";
+  plan.claimedAttemptId = attemptId("budget", 2);
+  const query = database.roleQuerySpecs.find((candidate) => candidate.role === "budget")!;
+  database.runAssignments.push({
+    assignmentId: assignmentId("budget", 2),
+    sessionId: SESSION_ID,
+    actionHash: GOLDEN_ACTION_HASH,
+    agentId: roleAgentId("budget"),
+    agentNameAtAssignment: "Budget Agent rerun",
+    role: "budget",
+    receiptId: receiptId("budget", 2),
+    queryHash: query.queryHash,
+    roleProfileVersion: "profile_budget_v1",
+    promptTemplateVersion: "prompt_budget_v1",
+    agentsMdDigest: sha256Digest("agents-md:budget"),
+    runtimeLabelAtDispatch: "codex-budget-refresh",
+    evidencePackRelativePath: `.epochguard/sessions/${SESSION_ID}/budget/${assignmentId("budget", 2)}.json`,
+    evidencePackHash: sha256Digest("evidence-pack:budget:2"),
+    boundRunId: runId("budget", 2),
+    status: "BOUND",
+    consumedByDecisionCertificateId: null,
+    createdAt: LATER,
+    boundAt: LATER,
+    consumedAt: null,
+  });
+  database.attempts.push({
+    attemptId: attemptId("budget", 2),
+    sessionId: SESSION_ID,
+    actionHash: GOLDEN_ACTION_HASH,
+    role: "budget",
+    agentId: roleAgentId("budget"),
+    assignmentId: assignmentId("budget", 2),
+    runId: runId("budget", 2),
+    status: "RUNNING",
+    runStartedAt: LATER,
+    runCompletedAt: null,
+    threadId: "thread_budget_2",
+    usage: null,
+    outputDigest: null,
+  });
+  database.auditEvents[0]!.status = "REOBSERVING";
+  return EpochDatabaseSchema.parse(database);
+}
+
+function makeFailedDatabase(): EpochDatabase {
+  const database = makeReobservingDatabase();
+  database.snapshotRevision = 203;
+  const session = database.sessions[0]!;
+  session.state = "FAILED";
+  session.sessionRevision = 6;
+  const failedAttempt = database.attempts.find(
+    (attempt) => attempt.attemptId === attemptId("budget", 2),
+  )!;
+  failedAttempt.status = "FAILED";
+  failedAttempt.runCompletedAt = "2026-08-29T12:02:00.000Z";
+  const failedAssignment = database.runAssignments.find(
+    (assignment) => assignment.assignmentId === assignmentId("budget", 2),
+  )!;
+  failedAssignment.status = "REJECTED";
+  database.diagnostics.push({
+    diagnosticId: "diagnostic_run_failed",
+    sessionId: SESSION_ID,
+    actionHash: GOLDEN_ACTION_HASH,
+    sessionRevision: 6,
+    fixtureRef: null,
+    kind: "SYSTEM_FAILURE",
+    stage: "RUN",
+    reasonCode: "RUN_FAILED",
+    role: "budget",
+    attemptId: attemptId("budget", 2),
+    assignmentId: assignmentId("budget", 2),
+    runId: runId("budget", 2),
+    artifactRefs: [
+      { kind: "ATTEMPT", id: attemptId("budget", 2) },
+      { kind: "ASSIGNMENT", id: assignmentId("budget", 2) },
+      { kind: "RUN", id: runId("budget", 2) },
+    ],
+    causedByDiagnosticIds: ["diagnostic_no_cut"],
+    expected: null,
+    actual: null,
+    rejectedOutputArtifactId: null,
+    auditSeq: 2,
+    recommendedAction: "NEW_SESSION",
+  });
+  database.auditEvents[0]!.status = "FAILED";
+  return EpochDatabaseSchema.parse(database);
+}
+
+function makeRecoveredDenyDatabase(): EpochDatabase {
+  const database = makeNoCutDatabase();
+  database.snapshotRevision = 204;
+  const session = database.sessions[0]!;
+  session.state = "CONSISTENT_DENY";
+  session.sessionRevision = 8;
+  session.activeDecisionCertificateIds.budget = certificateId("budget", 2);
+  session.activeAttemptIds.budget = null;
+  session.activeValidationId = "validation_recovered_deny";
+  session.activePermitId = null;
+
+  const oldBudgetDecision = database.decisions.find(
+    (decision) => decision.certificateId === certificateId("budget"),
+  )!;
+  oldBudgetDecision.status = "SUPERSEDED";
+  oldBudgetDecision.supersededByCertificateId = certificateId("budget", 2);
+  const query = database.roleQuerySpecs.find((candidate) => candidate.role === "budget")!;
+  const refreshedValue = { remainingBudgetCents: 100_000 };
+  const refreshedValueHash = sha256Digest(canonicalJson(refreshedValue));
+  database.resourceVersions.push({
+    id: "version_budget_2",
+    resourceId: "resource_budget",
+    sourceRevision: 20,
+    value: refreshedValue,
+    valueHash: refreshedValueHash,
+    validFromSeq: 20,
+    validUntilSeq: null,
+  });
+  database.runAssignments.push({
+    assignmentId: assignmentId("budget", 2),
+    sessionId: SESSION_ID,
+    actionHash: GOLDEN_ACTION_HASH,
+    agentId: roleAgentId("budget"),
+    agentNameAtAssignment: "Budget Agent rerun",
+    role: "budget",
+    receiptId: receiptId("budget", 2),
+    queryHash: query.queryHash,
+    roleProfileVersion: "profile_budget_v1",
+    promptTemplateVersion: "prompt_budget_v1",
+    agentsMdDigest: sha256Digest("agents-md:budget"),
+    runtimeLabelAtDispatch: "codex-budget-refresh",
+    evidencePackRelativePath: `.epochguard/sessions/${SESSION_ID}/budget/${assignmentId("budget", 2)}.json`,
+    evidencePackHash: sha256Digest("evidence-pack:budget:2"),
+    boundRunId: runId("budget", 2),
+    status: "CONSUMED",
+    consumedByDecisionCertificateId: certificateId("budget", 2),
+    createdAt: LATER,
+    boundAt: LATER,
+    consumedAt: "2026-08-29T12:02:00.000Z",
+  });
+  database.attempts.push({
+    attemptId: attemptId("budget", 2),
+    sessionId: SESSION_ID,
+    actionHash: GOLDEN_ACTION_HASH,
+    role: "budget",
+    agentId: roleAgentId("budget"),
+    assignmentId: assignmentId("budget", 2),
+    runId: runId("budget", 2),
+    status: "ACCEPTED",
+    runStartedAt: LATER,
+    runCompletedAt: "2026-08-29T12:02:00.000Z",
+    threadId: "thread_budget_2",
+    usage: { inputTokens: 101, outputTokens: 21 },
+    outputDigest: sha256Digest("output:budget:2"),
+  });
+  database.receipts.push({
+    schemaVersion: 1,
+    receiptId: receiptId("budget", 2),
+    sessionId: SESSION_ID,
+    actionHash: GOLDEN_ACTION_HASH,
+    agentId: roleAgentId("budget"),
+    runAssignmentId: assignmentId("budget", 2),
+    role: "budget",
+    source: "budget",
+    entityKey: query.entityKey,
+    queryHash: query.queryHash,
+    sourceRevision: 20,
+    valueHash: refreshedValueHash,
+    observedAtSeq: HEAD,
+    nonce: "nonce-budget-refresh".padEnd(40, "x"),
+    issuer: "epochguard",
+    issuedAt: "2026-08-29T12:02:00.000Z",
+  });
+  database.decisions.push({
+    certificateId: certificateId("budget", 2),
+    sessionId: SESSION_ID,
+    actionHash: GOLDEN_ACTION_HASH,
+    agentId: roleAgentId("budget"),
+    runAssignmentId: assignmentId("budget", 2),
+    runId: runId("budget", 2),
+    role: "budget",
+    verdict: "DENY",
+    receiptIds: [receiptId("budget", 2)],
+    decisionDigest: sha256Digest("decision:budget:2:DENY"),
+    status: "ACTIVE",
+    supersededByCertificateId: null,
+    constructedBy: "epochguard",
+    createdAt: "2026-08-29T12:02:00.000Z",
+  });
+
+  const activeDecisionIds = [
+    certificateId("inventory"),
+    certificateId("budget", 2),
+    certificateId("policy"),
+  ] as [string, string, string];
+  const activeReceiptIds = [
+    receiptId("inventory"),
+    receiptId("budget", 2),
+    receiptId("policy"),
+  ];
+  const dependencySetHash = snapshotReceiptDependencySetHash(activeReceiptIds);
+  database.validations.push({
+    validationId: "validation_recovered_deny",
+    sessionId: SESSION_ID,
+    actionHash: GOLDEN_ACTION_HASH,
+    baseSessionRevision: 7,
+    decisionCertificateIds: activeDecisionIds,
+    dependencySetHash,
+    validatedHead: HEAD,
+    outcome: "CONSISTENT_DENY",
+    lowerBound: 21,
+    upperBound: HEAD + 1,
+    jointValidityCertificateId: "jvc_recovered_deny",
+    noCutProofId: null,
+    refreshPlanId: "refresh_budget",
+    verificationLatencyMs: 8,
+    createdAt: "2026-08-29T12:02:00.000Z",
+  });
+  database.jointValidityCertificates = [
+    {
+      certificateId: "jvc_recovered_deny",
+      validationId: "validation_recovered_deny",
+      sessionId: SESSION_ID,
+      actionHash: GOLDEN_ACTION_HASH,
+      dependencySetHash,
+      validatedAtHead: HEAD,
+      selectedCutSeq: HEAD,
+      currentHeadCovered: true,
+      decisionCertificateIds: activeDecisionIds,
+      intervals: [
+        {
+          receiptId: receiptId("inventory"),
+          source: "inventory",
+          sourceRevision: NO_CUT_EVIDENCE.inventory.sourceRevision,
+          from: NO_CUT_EVIDENCE.inventory.validFromSeq,
+          until: NO_CUT_EVIDENCE.inventory.validUntilSeq,
+        },
+        {
+          receiptId: receiptId("budget", 2),
+          source: "budget",
+          sourceRevision: 20,
+          from: 20,
+          until: null,
+        },
+        {
+          receiptId: receiptId("policy"),
+          source: "policy",
+          sourceRevision: NO_CUT_EVIDENCE.policy.sourceRevision,
+          from: NO_CUT_EVIDENCE.policy.validFromSeq,
+          until: NO_CUT_EVIDENCE.policy.validUntilSeq,
+        },
+      ],
+      validatorVersion: "epochguard-jv-v1",
+      createdAt: "2026-08-29T12:02:00.000Z",
+    },
+  ];
+  const plan = database.refreshPlans[0]!;
+  plan.status = "COMPLETED";
+  plan.claimedAttemptId = attemptId("budget", 2);
+  database.diagnostics.push({
+    diagnosticId: "diagnostic_recovered_deny",
+    sessionId: SESSION_ID,
+    actionHash: GOLDEN_ACTION_HASH,
+    sessionRevision: 8,
+    fixtureRef: "impossible-collage-v1",
+    kind: "EXPECTED_BLOCK",
+    stage: "VALIDATE",
+    reasonCode: "CONSISTENT_DENY",
+    role: null,
+    attemptId: null,
+    assignmentId: null,
+    runId: null,
+    artifactRefs: [
+      { kind: "VALIDATION", id: "validation_recovered_deny" },
+      { kind: "REFRESH_PLAN", id: "refresh_budget" },
+      { kind: "RECEIPT", id: receiptId("budget", 2) },
+    ],
+    causedByDiagnosticIds: ["diagnostic_no_cut"],
+    expected: null,
+    actual: null,
+    rejectedOutputArtifactId: null,
+    auditSeq: 2,
+    recommendedAction: "NONE",
+  });
+  database.auditEvents[0]!.status = "CONSISTENT_DENY";
+  return EpochDatabaseSchema.parse(database);
+}
+
+function makeCommittedDatabase(): EpochDatabase {
+  const database = makeDatabase();
+  database.snapshotRevision = 301;
+  const session = database.sessions[0]!;
+  session.state = "COMMITTED";
+  session.sessionRevision = 10;
+  const permit = database.permits[0]!;
+  permit.status = "CONSUMED";
+  permit.consumedAt = "2026-08-29T12:03:00.000Z";
+  database.effects = [
+    {
+      effectId: "effect_campaign",
+      type: "PUBLISH_CAMPAIGN",
+      idempotencyKey: `${SESSION_ID}:effect_campaign`,
+      permitId: permit.permitId,
+      sessionId: SESSION_ID,
+      actionHash: GOLDEN_ACTION_HASH,
+      dependencySetHash: permit.dependencySetHash,
+      jointValidityCertificateId: permit.jointValidityCertificateId,
+      createdAt: "2026-08-29T12:03:00.000Z",
+    },
+  ];
+  database.auditEvents[0]!.status = "COMMITTED";
+  return EpochDatabaseSchema.parse(database);
+}
+
+function snapshot(database: EpochDatabase, generatedAt = NOW) {
+  return buildSessionDashboardSnapshotFromSnapshot(database, SESSION_ID, generatedAt);
+}
+
+describe("SessionViewBuilder golden projections", () => {
+  it.each([
+    ["collecting", makeCollectingDatabase, "COLLECTING", "WAITING", "PENDING", 0],
+    ["ready", makeDatabase, "READY_AT_CURRENT_HEAD", "READY", "VALID_CURRENT", 0],
+    ["no-cut", makeNoCutDatabase, "BLOCKED_NO_CUT", "LOCKED", "NO_CUT", 0],
+    ["reobserving", makeReobservingDatabase, "REOBSERVING", "LOCKED", "NO_CUT", 0],
+    [
+      "deny",
+      makeRecoveredDenyDatabase,
+      "CONSISTENT_DENY",
+      "LOCKED",
+      "VALID_CURRENT",
+      0,
+    ],
+    ["committed", makeCommittedDatabase, "COMMITTED", "RELEASED", "VALID_CURRENT", 1],
+    ["failed", makeFailedDatabase, "FAILED", "FAILED", "NO_CUT", 0],
+  ])(
+    "builds the %s golden state through the frozen decoder",
+    (_name, factory, sessionState, gateState, validityState, effects) => {
+      const result = snapshot(factory());
+      expect(decodeSessionDashboardSnapshot(result)).toEqual(result);
+      expect(result.sessionState).toBe(sessionState);
+      expect(result.gate.state).toBe(gateState);
+      expect(result.jointValidity.state).toBe(validityState);
+      expect(result.gate.effectsInSession).toBe(effects);
+    },
+  );
+
+  it("derives canonical no-cut witness and keeps proofId stable across GETs", () => {
+    const database = makeNoCutDatabase();
+    const first = snapshot(structuredClone(database), NOW);
+    const second = snapshot(structuredClone(database), LATER);
+
+    expect(first.jointValidity.noCutProof?.proofId).toBe("proof_no_cut");
+    expect(second.jointValidity.noCutProof?.proofId).toBe("proof_no_cut");
+    expect(first.generatedAt).not.toBe(second.generatedAt);
+    expect(first.jointValidity.noCutProof?.witness).toEqual([
+      {
+        role: "budget",
+        receiptId: receiptId("budget"),
+        from: 19,
+        until: 20,
+      },
+      {
+        role: "policy",
+        receiptId: receiptId("policy"),
+        from: 21,
+        until: null,
+      },
+    ]);
+  });
+
+  it("keeps retained activeDecision separate from the new inFlightAttempt", () => {
+    const result = snapshot(makeReobservingDatabase());
+    const budget = result.agents.find((agent) => agent.role === "budget")!;
+
+    expect(budget.activeDecision?.runId).toBe(runId("budget"));
+    expect(budget.activeDecision?.receipt.receiptId).toBe(receiptId("budget"));
+    expect(budget.activeDecision?.runtimeProof.assignmentId).toBe(
+      assignmentId("budget"),
+    );
+    expect(budget.inFlightAttempt).toMatchObject({
+      attemptId: attemptId("budget", 2),
+      assignmentId: assignmentId("budget", 2),
+      runId: runId("budget", 2),
+      status: "RUNNING",
+    });
+    expect(budget.inFlightAttempt?.runId).not.toBe(budget.activeDecision?.runId);
+  });
+
+  it("projects the recovered DENY from only the refreshed Budget evidence", () => {
+    const result = snapshot(makeRecoveredDenyDatabase());
+    expect(result.refreshPlan).toMatchObject({
+      refreshPlanId: "refresh_budget",
+      status: "COMPLETED",
+      agentIds: [roleAgentId("budget")],
+    });
+    expect(result.metrics).toMatchObject({
+      reobservedAgents: 1,
+      rerunsAvoided: 2,
+      denyDecisions: 1,
+    });
+    expect(result.agents.map((agent) => [agent.role, agent.runCount])).toEqual([
+      ["inventory", 1],
+      ["budget", 2],
+      ["policy", 1],
+    ]);
+    expect(result.agents[1]!.activeDecision).toMatchObject({
+      certificateId: certificateId("budget", 2),
+      runId: runId("budget", 2),
+      verdict: "DENY",
+      evidenceState: "CURRENT",
+    });
+    expect(result.agents[1]!.inFlightAttempt).toBeNull();
+  });
+
+  it("projects terminal RUN diagnostic refs from the failed mirrored Attempt", () => {
+    const result = snapshot(makeFailedDatabase());
+    expect(result.latestDiagnostics[0]).toMatchObject({
+      diagnosticId: "diagnostic_run_failed",
+      stage: "RUN",
+      reasonCode: "RUN_FAILED",
+      role: "budget",
+      relevantIds: [
+        { kind: "ATTEMPT", id: attemptId("budget", 2) },
+        { kind: "ASSIGNMENT", id: assignmentId("budget", 2) },
+        { kind: "RUN", id: runId("budget", 2) },
+      ],
+    });
+    expect(result.gate.reasonCode).toBe("RUN_FAILED");
+  });
+});
+
+describe("single-snapshot isolation and fail-closed projection", () => {
+  it("reads Store once, clones immediately, and cannot mix a concurrently mutated revision", () => {
+    const firstRevision = makeDatabase();
+    const nextRevision = makeCommittedDatabase();
+    let liveStoreValue = firstRevision;
+    let calls = 0;
+    const store = {
+      snapshot(): unknown {
+        calls += 1;
+        if (calls > 1) throw new Error("second snapshot read is forbidden");
+        const returnedLiveObject = liveStoreValue;
+        return returnedLiveObject;
+      },
+    };
+    const builder = new SessionViewBuilder(store, () => {
+      // This simulates a concurrent writer replacing and mutating Store state
+      // after the sole read but before projection begins.
+      liveStoreValue = nextRevision;
+      Object.assign(firstRevision, structuredClone(nextRevision));
+      return NOW;
+    });
+
+    const result = builder.build(SESSION_ID);
+    expect(calls).toBe(1);
+    expect(result.snapshotRevision).toBe(101);
+    expect(result.sessionState).toBe("READY_AT_CURRENT_HEAD");
+    expect(result.gate).toMatchObject({
+      state: "READY",
+      effectsInSession: 0,
+      effectId: null,
+    });
+    expect(liveStoreValue.snapshotRevision).toBe(301);
+  });
+
+  it("fails closed on unknown EpochStore schema", () => {
+    const invalid = { ...makeDatabase(), schemaVersion: 2 };
+    expect(() => snapshot(invalid as unknown as EpochDatabase)).toThrowError(
+      expect.objectContaining({ code: "UNSUPPORTED_SCHEMA" }),
+    );
+  });
+
+  it("fails closed when contract-v6 rejects the final candidate", () => {
+    expect(() => snapshot(makeDatabase(), "not-an-iso-timestamp")).toThrowError(
+      expect.objectContaining({ code: "PROJECTION_MISMATCH" }),
+    );
+  });
+
+  it("fails closed when stored proof conflicts with the canonical witness", () => {
+    const database = makeNoCutDatabase();
+    database.noCutProofs[0]!.conflictWitnessReceiptIds = [
+      receiptId("policy"),
+      receiptId("budget"),
+    ];
+    expect(() => snapshot(database)).toThrowError(SessionViewBuilderError);
+  });
+});
+
+describe("fixed redaction boundary", () => {
+  it("keeps secrets, env dumps, absolute paths, prompts, and raw output out", () => {
+    const database = makeDatabase();
+    database.runAssignments[0]!.agentNameAtAssignment =
+      "C:\\Users\\Alice\\secrets.env";
+    database.runAssignments[1]!.runtimeLabelAtDispatch =
+      "OPENAI_API_KEY=sk-topsecret-value";
+    database.runAssignments[2]!.roleProfileVersion = "API_KEY_SENTINEL";
+    database.runAssignments[2]!.promptTemplateVersion = "RAW_PROMPT_SENTINEL";
+    database.attempts[2]!.threadId =
+      "<EPOCH_DECISION> RAW_OUTPUT_SENTINEL Bearer abcdefgh";
+    database.auditEvents[0]!.type = "ENV_DUMP_SENTINEL";
+    database.auditEvents[0]!.status = "password=hunter2";
+    database.worldCommits.push({
+      seq: HEAD,
+      changes: [
+        {
+          resourceId: "resource_inventory",
+          previousVersionId: null,
+          nextVersionId: "version_inventory_1",
+        },
+      ],
+      reason: "/home/alice/.env ABSOLUTE_PATH_SENTINEL",
+      createdAt: NOW,
+    });
+    const inventoryVersion = database.resourceVersions.find(
+      (version) => version.resourceId === "resource_inventory",
+    )!;
+    inventoryVersion.value = {
+      availableUnits: 4,
+      rawPrompt: "You are the Inventory Agent RAW_PROMPT_SENTINEL",
+      environment: "OPENAI_API_KEY=sk-resource-secret",
+    };
+    inventoryVersion.valueHash = sha256Digest(canonicalJson(inventoryVersion.value));
+    database.receipts.find((receipt) => receipt.role === "inventory")!.valueHash =
+      inventoryVersion.valueHash;
+    database.diagnostics.push({
+      diagnosticId: "diagnostic_redaction",
+      sessionId: SESSION_ID,
+      actionHash: GOLDEN_ACTION_HASH,
+      sessionRevision: 8,
+      fixtureRef: "C:\\workspace\\RAW_OUTPUT_SENTINEL.txt",
+      kind: "SYSTEM_FAILURE",
+      stage: "PROJECTION",
+      reasonCode: "PROJECTION_MISMATCH",
+      role: null,
+      attemptId: null,
+      assignmentId: null,
+      runId: null,
+      artifactRefs: [],
+      causedByDiagnosticIds: [],
+      expected: { prompt: "RAW_PROMPT_SENTINEL" },
+      actual: { env: "OPENAI_API_KEY=sk-diagnostic-secret" },
+      rejectedOutputArtifactId: null,
+      auditSeq: 2,
+      recommendedAction: "NONE",
+    });
+    const sanitizedContent = "<EPOCH_DECISION> RAW_OUTPUT_SENTINEL sk-artifact-secret";
+    database.rejectedOutputArtifacts.push({
+      artifactId: "rejected_redaction",
+      sessionId: SESSION_ID,
+      attemptId: attemptId("inventory"),
+      originalDigest: sha256Digest("raw artifact"),
+      redactionVersion: "epoch-redact-v1",
+      reason: "PARSE_REJECTED",
+      originalByteLength: sanitizedContent.length,
+      sanitizedContent,
+      sanitizedContentDigest: sha256Digest(sanitizedContent),
+      truncated: false,
+      createdAt: NOW,
+    });
+
+    const result = snapshot(EpochDatabaseSchema.parse(database));
+    const serialized = JSON.stringify(result);
+    for (const forbidden of [
+      "topsecret",
+      "resource-secret",
+      "diagnostic-secret",
+      "artifact-secret",
+      "RAW_PROMPT_SENTINEL",
+      "RAW_OUTPUT_SENTINEL",
+      "ENV_DUMP_SENTINEL",
+      "ABSOLUTE_PATH_SENTINEL",
+      "C:\\\\Users",
+      "/home/alice",
+      "<EPOCH_DECISION>",
+      "Bearer abcdefgh",
+      "hunter2",
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+    expect(result.agents[0]!.agentNameAtAssignment).toBe("inventory Agent");
+    expect(result.agents[1]!.activeDecision?.runtimeProof.runtimeLabel).toBe(
+      "redacted-runtime",
+    );
+    expect(result.agents[2]!.activeDecision?.runtimeProof).toMatchObject({
+      threadId: null,
+      roleProfileVersion: "redacted-role-profile",
+      promptTemplateVersion: "redacted-prompt-template",
+    });
+    expect(result.events[0]).toMatchObject({
+      type: "EVENT",
+      status: "REDACTED",
+      summary: "Session: EVENT REDACTED",
+    });
+  });
+});
