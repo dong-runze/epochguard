@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-export const CONTRACT_VERSION = "epochguard-contract-v4" as const;
+export const CONTRACT_VERSION = "epochguard-contract-v5" as const;
 export const CONTRACT_SCHEMA_VERSION = 1 as const;
 export const CONTRACT_DIGEST =
-  "sha256:a3360afb53ed8d77742eb4e61e4d916b5f44f2d16c939bef14f853c6ab9f6823" as const;
+  "sha256:da04cd74212dc564efd3349790d64f27691bd8a2b073d9663949e322da7b5ae8" as const;
 
 export const ROLES = ["inventory", "budget", "policy"] as const;
 export const SOURCES = ["inventory", "budget", "policy"] as const;
@@ -101,6 +101,10 @@ export const FAILURE_CODES = [
   "SESSION_NOT_FOUND",
   "UNSUPPORTED_SCHEMA",
   "PROJECTION_MISMATCH",
+] as const;
+export const REFRESH_PLAN_REASON_CODES = [
+  "NO_VALID_OBSERVED_WORLD_CUT",
+  "HISTORICAL_BUT_STALE_NOW",
 ] as const;
 
 export const DIAGNOSTIC_KINDS = [
@@ -200,6 +204,7 @@ export const CoordinationModeSchema = z.enum(COORDINATION_MODES);
 export const GateStateSchema = z.enum(GATE_STATES);
 export const JointValidityStateSchema = z.enum(JOINT_VALIDITY_STATES);
 export const FailureCodeSchema = z.enum(FAILURE_CODES);
+export const RefreshPlanReasonCodeSchema = z.enum(REFRESH_PLAN_REASON_CODES);
 export const DiagnosticKindSchema = z.enum(DIAGNOSTIC_KINDS);
 export const DiagnosticStageSchema = z.enum(DIAGNOSTIC_STAGES);
 export const RecommendedActionSchema = z.enum(RECOMMENDED_ACTIONS);
@@ -213,6 +218,9 @@ export type ScenarioId = z.infer<typeof ScenarioIdSchema>;
 export type SessionState = z.infer<typeof SessionStateSchema>;
 export type AttemptState = z.infer<typeof AttemptStateSchema>;
 export type FailureCode = z.infer<typeof FailureCodeSchema>;
+export type RefreshPlanReasonCode = z.infer<
+  typeof RefreshPlanReasonCodeSchema
+>;
 
 export const ActionCanonicalFieldsSchema = z
   .object({
@@ -958,7 +966,7 @@ const SessionDashboardSnapshotShapeSchema = z
         refreshPlanId: OpaqueIdSchema,
         status: z.enum(["AVAILABLE", "CLAIMED", "COMPLETED"]),
         agentIds: z.array(OpaqueIdSchema).min(1).max(3),
-        reasonCode: FailureCodeSchema,
+        reasonCode: RefreshPlanReasonCodeSchema,
       })
       .strict()
       .nullable(),
@@ -1049,6 +1057,7 @@ export const SNAPSHOT_UNIVERSAL_SAFETY_RULES = {
   actionHash: "validate Snapshot Action shape before canonical hashing; safeParse never throws",
   receiptTemporal: [
     "validUntilSeq=null or validUntilSeq>validFromSeq",
+    "finite validUntilSeq<=worldHead",
     "validFromSeq<=observedAtSeq",
     "observedAtSeq<(validUntilSeq??worldHead+1)",
     "observedAtSeq<=worldHead",
@@ -1063,18 +1072,31 @@ export const SNAPSHOT_UNIVERSAL_SAFETY_RULES = {
     ],
     attempt: ["inFlightAttempt.attemptId"],
   },
-  claimedRefresh: {
-    sessionStates: ["REOBSERVING", "COLLECTING", "VALIDATING"],
-    planStatus: "CLAIMED",
-    ownerSet: "exact Agent set with an active inFlightAttempt",
-    assignment: "new relative to the owner's active Decision assignment",
+  refreshLifecycle: {
+    reasonCodes: REFRESH_PLAN_REASON_CODES,
+    claimedStates: ["REOBSERVING", "COLLECTING"],
+    claimedTerminalExceptions: ["FAILED", "INTERRUPTED"],
+    reobserving:
+      "three retained old Decisions; plan owners = invalid Receipt owners = active in-flight owners",
+    collecting:
+      "plan owners partition into current-valid completed owners and invalid remaining in-flight owners",
+    validating:
+      "null initial Plan or COMPLETED refresh Plan with three active current-valid Decisions and no in-flight Attempt",
+    ownerAttempt:
+      "active pre-acceptance Attempt with new Assignment and, when non-null, new Run ID",
   },
   noCutDependencySetHash:
     "sha256(canonicalJSON(sort(all three active receiptIds)))",
+  noCutWitness: {
+    order: ["canonical earliest-ending Receipt", "canonical latest-starting Receipt"],
+    tieBreak: "UTF-16 code-unit lexicographically smallest receiptId for each endpoint",
+  },
 } as const;
 
-const CLAIMED_REFRESH_BINDING_STATES =
-  SNAPSHOT_UNIVERSAL_SAFETY_RULES.claimedRefresh.sessionStates;
+const CLAIMED_REFRESH_STATES =
+  SNAPSHOT_UNIVERSAL_SAFETY_RULES.refreshLifecycle.claimedStates;
+const CLAIMED_REFRESH_TERMINAL_EXCEPTIONS =
+  SNAPSHOT_UNIVERSAL_SAFETY_RULES.refreshLifecycle.claimedTerminalExceptions;
 const ACTIVE_IN_FLIGHT_ATTEMPT_STATES = [
   "ASSIGNMENT_CREATED",
   "DISPATCHING",
@@ -1109,6 +1131,10 @@ function sameIdSet(left: readonly string[], right: readonly string[]): boolean {
   );
 }
 
+function compareLexicographicIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function receiptCoversWorldHead(
   snapshot: SessionDashboardSnapshotCandidate,
   decision: NonNullable<
@@ -1131,7 +1157,8 @@ function receiptHasValidTemporalSemantics(
   const effectiveUntil = receipt.validUntilSeq ?? snapshot.worldHead + 1;
   return (
     (receipt.validUntilSeq === null ||
-      receipt.validUntilSeq > receipt.validFromSeq) &&
+      (receipt.validUntilSeq > receipt.validFromSeq &&
+        receipt.validUntilSeq <= snapshot.worldHead)) &&
     receipt.validFromSeq <= receipt.observedAtSeq &&
     receipt.observedAtSeq < effectiveUntil &&
     receipt.observedAtSeq <= snapshot.worldHead
@@ -1142,6 +1169,54 @@ export function snapshotReceiptDependencySetHash(
   receiptIds: readonly string[],
 ): string {
   return sha256Digest(canonicalJson([...receiptIds].sort()));
+}
+
+type SnapshotAgentCandidate =
+  SessionDashboardSnapshotCandidate["agents"][number];
+
+function refreshReasonForJointValidity(
+  state: SessionDashboardSnapshotCandidate["jointValidity"]["state"],
+): RefreshPlanReasonCode | null {
+  if (state === "NO_CUT") return "NO_VALID_OBSERVED_WORLD_CUT";
+  if (state === "HISTORICAL_STALE") return "HISTORICAL_BUT_STALE_NOW";
+  return null;
+}
+
+function agentDecisionIsCurrentValid(
+  snapshot: SessionDashboardSnapshotCandidate,
+  agent: SnapshotAgentCandidate,
+): boolean {
+  return (
+    agent.activeDecision !== null &&
+    agent.activeDecision.evidenceState !== "INVALID_AT_HEAD" &&
+    receiptCoversWorldHead(snapshot, agent.activeDecision)
+  );
+}
+
+function agentDecisionIsInvalidAtHead(
+  snapshot: SessionDashboardSnapshotCandidate,
+  agent: SnapshotAgentCandidate,
+): boolean {
+  return (
+    agent.activeDecision !== null &&
+    agent.activeDecision.evidenceState === "INVALID_AT_HEAD" &&
+    !receiptCoversWorldHead(snapshot, agent.activeDecision)
+  );
+}
+
+function agentHasActiveNewRefreshAttempt(agent: SnapshotAgentCandidate): boolean {
+  const decision = agent.activeDecision;
+  const attempt = agent.inFlightAttempt;
+  return (
+    decision !== null &&
+    attempt !== null &&
+    (ACTIVE_IN_FLIGHT_ATTEMPT_STATES as readonly string[]).includes(
+      attempt.status,
+    ) &&
+    agent.runCount > 1 &&
+    attempt.assignmentId !== decision.runtimeProof.assignmentId &&
+    (attempt.runId === null || attempt.runId !== decision.runId)
+  );
 }
 
 function validateUniqueSnapshotIdentityReferences(
@@ -1471,14 +1546,12 @@ function addSnapshotInvariantIssues(
     );
   }
 
-  const receiptByRole = new Map(
-    snapshot.agents.flatMap((agent) =>
-      agent.activeDecision === null
-        ? []
-        : ([[agent.role, agent.activeDecision.receipt]] as const),
-    ),
+  const receiptEntries = snapshot.agents.flatMap((agent) =>
+    agent.activeDecision === null
+      ? []
+      : [{ role: agent.role, receipt: agent.activeDecision.receipt }],
   );
-  const receipts = [...receiptByRole.values()];
+  const receipts = receiptEntries.map((entry) => entry.receipt);
   const expectedDependencySetHash =
     receipts.length === 3
       ? snapshotReceiptDependencySetHash(
@@ -1520,6 +1593,30 @@ function addSnapshotInvariantIssues(
     }
   } else if (snapshot.jointValidity.state === "NO_CUT") {
     const proof = snapshot.jointValidity.noCutProof;
+    const canonicalLatestStart =
+      expectedLower === null
+        ? null
+        : (receiptEntries
+            .filter((entry) => entry.receipt.validFromSeq === expectedLower)
+            .sort((left, right) =>
+              compareLexicographicIds(
+                left.receipt.receiptId,
+                right.receipt.receiptId,
+              ),
+            )[0] ?? null);
+    const canonicalEarliestEnd =
+      expectedUpper === null
+        ? null
+        : (receiptEntries
+            .filter(
+              (entry) => entry.receipt.validUntilSeq === expectedUpper,
+            )
+            .sort((left, right) =>
+              compareLexicographicIds(
+                left.receipt.receiptId,
+                right.receipt.receiptId,
+              ),
+            )[0] ?? null);
     const boundsAgree =
       proof !== null &&
       snapshot.jointValidity.lowerBound === proof.lowerBound &&
@@ -1529,29 +1626,27 @@ function addSnapshotInvariantIssues(
       proof.lowerBound >= proof.upperBound &&
       proof.dependencySetHash === expectedDependencySetHash &&
       snapshot.jointValidity.currentHeadCovered === false;
-    let witnessAgrees = proof !== null;
-    if (proof !== null) {
-      const seenRoles = new Set<string>();
-      let hasLatestStart = false;
-      let hasEarliestEnd = false;
-      for (const witness of proof.witness) {
-        const receipt = receiptByRole.get(witness.role);
-        seenRoles.add(witness.role);
-        witnessAgrees &&=
-          receipt !== undefined &&
-          witness.receiptId === receipt.receiptId &&
-          witness.from === receipt.validFromSeq &&
-          witness.until === receipt.validUntilSeq;
-        hasLatestStart ||= witness.from === proof.lowerBound;
-        hasEarliestEnd ||= witness.until === proof.upperBound;
-      }
-      witnessAgrees &&=
-        seenRoles.size === proof.witness.length && hasLatestStart && hasEarliestEnd;
-    }
+    const canonicalWitnessEntries = [
+      canonicalEarliestEnd,
+      canonicalLatestStart,
+    ] as const;
+    const witnessAgrees =
+      proof !== null &&
+      canonicalWitnessEntries.every((entry, index) => {
+        const witness = proof.witness[index];
+        return (
+          entry !== null &&
+          witness !== undefined &&
+          witness.role === entry.role &&
+          witness.receiptId === entry.receipt.receiptId &&
+          witness.from === entry.receipt.validFromSeq &&
+          witness.until === entry.receipt.validUntilSeq
+        );
+      });
     if (!boundsAgree || !witnessAgrees) {
       snapshotIssue(
         context,
-        "NO_CUT requires non-overlapping half-open bounds L>=U and a matching Receipt witness",
+        "NO_CUT requires L>=U and the deterministic canonical earliest-end/latest-start Receipt witness",
         ["jointValidity"],
       );
     }
@@ -1618,46 +1713,138 @@ function addSnapshotInvariantIssues(
     }
   }
 
+  const plan = snapshot.refreshPlan;
+  const inFlightAgents = snapshot.agents.filter(
+    (agent) => agent.inFlightAttempt !== null,
+  );
+  const inFlightAgentIds = inFlightAgents.map((agent) => agent.agentId);
+  const retainedRefreshReason = refreshReasonForJointValidity(
+    snapshot.jointValidity.state,
+  );
+
   if (
-    snapshot.refreshPlan?.status === "CLAIMED" &&
-    (CLAIMED_REFRESH_BINDING_STATES as readonly string[]).includes(
+    plan !== null &&
+    retainedRefreshReason !== null &&
+    plan.reasonCode !== retainedRefreshReason
+  ) {
+    snapshotIssue(
+      context,
+      "RefreshPlan reason must match the retained NO_CUT or HISTORICAL_STALE validation",
+      ["refreshPlan", "reasonCode"],
+    );
+  }
+
+  if (
+    plan?.status === "CLAIMED" &&
+    !(CLAIMED_REFRESH_STATES as readonly string[]).includes(
+      snapshot.sessionState,
+    ) &&
+    !(CLAIMED_REFRESH_TERMINAL_EXCEPTIONS as readonly string[]).includes(
       snapshot.sessionState,
     )
   ) {
-    const inFlightOwners = snapshot.agents.filter(
-      (agent) => agent.inFlightAttempt !== null,
+    snapshotIssue(
+      context,
+      "CLAIMED RefreshPlan is restricted to REOBSERVING/COLLECTING or terminal FAILED/INTERRUPTED projections",
+      ["refreshPlan", "status"],
     );
-    const inFlightOwnerIds = inFlightOwners.map((agent) => agent.agentId);
-    const ownerAttemptsAreActiveAndNew = inFlightOwners.every((agent) => {
-      const attempt = agent.inFlightAttempt;
-      if (attempt === null) return false;
-      const representedRuns =
-        (agent.activeDecision === null ? 0 : 1) + 1;
-      return (
-        (ACTIVE_IN_FLIGHT_ATTEMPT_STATES as readonly string[]).includes(
-          attempt.status,
-        ) &&
-        agent.runCount >= representedRuns &&
-        (agent.activeDecision === null ||
-          attempt.assignmentId !==
-            agent.activeDecision.runtimeProof.assignmentId)
-      );
-    });
+  }
+
+  if (snapshot.sessionState === "REOBSERVING") {
+    const ownerIds = new Set(plan?.agentIds ?? []);
+    const ownersAndNonOwnersAreCoherent = snapshot.agents.every((agent) =>
+      ownerIds.has(agent.agentId)
+        ? agentDecisionIsInvalidAtHead(snapshot, agent) &&
+          agentHasActiveNewRefreshAttempt(agent)
+        : agentDecisionIsCurrentValid(snapshot, agent) &&
+          agent.inFlightAttempt === null,
+    );
     if (
-      inFlightOwners.length === 0 ||
-      !sameIdSet(snapshot.refreshPlan.agentIds, inFlightOwnerIds) ||
-      !ownerAttemptsAreActiveAndNew
+      plan?.status !== "CLAIMED" ||
+      decisions.length !== 3 ||
+      retainedRefreshReason === null ||
+      invalidAgentIds.length === 0 ||
+      !sameIdSet(plan.agentIds, invalidAgentIds) ||
+      !sameIdSet(plan.agentIds, inFlightAgentIds) ||
+      !ownersAndNonOwnersAreCoherent
     ) {
       snapshotIssue(
         context,
-        "CLAIMED refresh must bind exactly its active owner Attempts and new Assignments",
+        "REOBSERVING must retain three old Decisions and bind exactly invalid owners to active new Attempts",
         ["refreshPlan"],
       );
     }
   }
 
-  if (snapshot.jointValidity.state === "NO_CUT" && snapshot.refreshPlan === null) {
-    snapshotIssue(context, "NO_CUT must retain a RefreshPlan", ["refreshPlan"]);
+  if (snapshot.sessionState === "COLLECTING" && plan !== null) {
+    const ownerIds = new Set(plan.agentIds);
+    const collectingJointValidityAllowed = [
+      "PENDING",
+      "NO_CUT",
+      "HISTORICAL_STALE",
+    ].includes(snapshot.jointValidity.state);
+    const ownersPartitionCorrectly = snapshot.agents.every((agent) => {
+      const isOwner = ownerIds.has(agent.agentId);
+      const isRemaining = agent.inFlightAttempt !== null;
+      if (!isOwner) {
+        return (
+          !isRemaining && agentDecisionIsCurrentValid(snapshot, agent)
+        );
+      }
+      return isRemaining
+        ? agentDecisionIsInvalidAtHead(snapshot, agent) &&
+            agentHasActiveNewRefreshAttempt(agent)
+        : agentDecisionIsCurrentValid(snapshot, agent) && agent.runCount > 1;
+    });
+    if (
+      plan.status !== "CLAIMED" ||
+      decisions.length !== 3 ||
+      inFlightAgents.length === 0 ||
+      !collectingJointValidityAllowed ||
+      !sameIdSet(invalidAgentIds, inFlightAgentIds) ||
+      !ownersPartitionCorrectly
+    ) {
+      snapshotIssue(
+        context,
+        "COLLECTING refresh owners must partition into completed current Decisions and remaining invalid active Attempts",
+        ["refreshPlan"],
+      );
+    }
+  }
+
+  if (snapshot.sessionState === "VALIDATING" && plan !== null) {
+    const completedRefreshProjection =
+      plan.status === "COMPLETED" &&
+      decisions.length === 3 &&
+      decisionsValidAtHead &&
+      inFlightAgents.length === 0 &&
+      sameIdSet(plan.agentIds, reobservedAgentIds) &&
+      snapshot.gate.state === "CHECKING" &&
+      snapshot.gate.reasonCode === null &&
+      snapshot.gate.effectsInSession === 0 &&
+      snapshot.gate.permitId === null &&
+      snapshot.gate.effectId === null &&
+      snapshot.jointValidity.state === "PENDING" &&
+      snapshot.availableActions.length === 0;
+    if (!completedRefreshProjection) {
+      snapshotIssue(
+        context,
+        "Refresh VALIDATING requires a COMPLETED Plan, three current-valid Decisions, PENDING validation, and no in-flight Attempt or side effect",
+        ["refreshPlan"],
+      );
+    }
+  }
+
+  if (
+    (snapshot.jointValidity.state === "NO_CUT" ||
+      snapshot.jointValidity.state === "HISTORICAL_STALE") &&
+    snapshot.refreshPlan === null
+  ) {
+    snapshotIssue(
+      context,
+      "NO_CUT/HISTORICAL_STALE validation evidence must retain its RefreshPlan",
+      ["refreshPlan"],
+    );
   }
 
   if (projectionRule !== null) {
@@ -2502,6 +2689,7 @@ const CONTRACT_FIELD_MANIFEST = {
     gateStates: GATE_STATES,
     jointValidityStates: JOINT_VALIDITY_STATES,
     failureCodes: FAILURE_CODES,
+    refreshPlanReasonCodes: REFRESH_PLAN_REASON_CODES,
     diagnosticKinds: DIAGNOSTIC_KINDS,
     diagnosticStages: DIAGNOSTIC_STAGES,
     artifactRefKinds: ARTIFACT_REF_KINDS,
@@ -2840,6 +3028,7 @@ export const CONTRACT_SCHEMA_REGISTRY = {
   GateState: GateStateSchema,
   JointValidityState: JointValidityStateSchema,
   FailureCode: FailureCodeSchema,
+  RefreshPlanReasonCode: RefreshPlanReasonCodeSchema,
   DiagnosticKind: DiagnosticKindSchema,
   DiagnosticStage: DiagnosticStageSchema,
   RecommendedAction: RecommendedActionSchema,
@@ -2895,6 +3084,7 @@ export const SHARED_CONTRACT_SCHEMA_NAMES = [
   "ScenarioId",
   "SessionState",
   "FailureCode",
+  "RefreshPlanReasonCode",
   "ArtifactRefKind",
   "ArtifactRef",
   "SessionDashboardSnapshot",
@@ -2925,7 +3115,7 @@ export const CONTRACT_SEMANTIC_INVARIANTS = [
   "Snapshot Agents are ordered inventory,budget,policy and have distinct Agent identities",
   "Snapshot actionHash equals sha256(canonical Snapshot Action)",
   "Snapshot safe decoders validate the Action shape before hashing and never throw for malformed Action fields",
-  "Every active Receipt has validUntilSeq=null or >validFromSeq, validFromSeq<=observedAtSeq<(validUntilSeq??worldHead+1), and observedAtSeq<=worldHead",
+  "Every active Receipt has validUntilSeq=null or validFromSeq<validUntilSeq<=worldHead, validFromSeq<=observedAtSeq<(validUntilSeq??worldHead+1), and observedAtSeq<=worldHead",
   "Snapshot certificate, run, receipt, assignment, and attempt references are unique across Agents within each ID namespace",
   "Snapshot metrics equal active Decision verdicts, reobserved Agent runCounts, and refresh ownership",
   "Only BLOCKED_NO_CUT, HISTORICAL_STALE, CONSISTENT_DENY, READY_AT_CURRENT_HEAD, and COMMITTED have bidirectionally frozen projection products; other Session states retain only universal safety constraints",
@@ -2933,12 +3123,12 @@ export const CONTRACT_SEMANTIC_INVARIANTS = [
   "non-RELEASED Snapshot has zero Effects and no Effect ID",
   "LOCKED carries no Permit; Permit IDs are restricted to READY_AT_CURRENT_HEAD, COMMITTING, or COMMITTED",
   "VALID_CURRENT has no No-Cut proof and exact interval bounds covering worldHead",
-  "NO_CUT has exact receipt-derived L/U with L>=U and a two-Receipt endpoint witness",
+  "NO_CUT has exact receipt-derived L/U with L>=U and the canonical earliest-end/latest-start witness; endpoint ties choose UTF-16 code-unit lexicographically smallest receiptId",
   "NO_CUT dependencySetHash equals sha256(canonicalJSON(sort(all three active receiptIds)))",
-  "NO_CUT retains a RefreshPlan while its old proof may remain visible through non-authoritative refresh projections",
+  "NO_CUT/HISTORICAL_STALE retained validation evidence requires a RefreshPlan whose reasonCode exactly matches the validation outcome",
   "CURRENT and RETAINED evidence exactly mean the half-open Receipt covers worldHead; INVALID_AT_HEAD exactly means it does not",
-  "AVAILABLE RefreshPlan exists only for BLOCKED_NO_CUT/HISTORICAL_STALE and owns exactly the current invalid-Receipt Agents; CLAIMED exposes no action",
-  "REOBSERVING/COLLECTING/VALIDATING with CLAIMED Plan binds exactly the active in-flight owner Agent set and each owner's new Assignment; FAILED/INTERRUPTED terminal products remain unfrozen",
+  "Snapshot RefreshPlan.reasonCode is exactly NO_VALID_OBSERVED_WORLD_CUT or HISTORICAL_BUT_STALE_NOW; AVAILABLE exists only for matching blocked/historical invalid owners",
+  "REOBSERVING CLAIMED retains three invalid old-owner Decisions; COLLECTING CLAIMED partitions completed and remaining owners; refresh VALIDATING uses COMPLETED with no in-flight; CLAIMED terminal exceptions are FAILED/INTERRUPTED",
   "READY_AT_CURRENT_HEAD accepts an absent initial Plan or the exact COMPLETED selective-refresh Plan and always exposes exactly COMMIT",
   "FAILED with WAITING and null reason is rejected; side-effect-free FAILED/INTERRUPTED Gate and reason products otherwise remain unfrozen",
   "availableActions is exactly REOBSERVE_INVALID for blocked/historical AVAILABLE Plans, COMMIT for READY_AT_CURRENT_HEAD, and empty otherwise",
@@ -2990,13 +3180,13 @@ export function normalizeContractDigestReferences(
 
 export const GOLDEN_SNAPSHOT_HASHES = {
   normalReady:
-    "sha256:6881ef0374ff817f38d9de88136bd2a9c90c928f8c3e482587daad888f1355b5",
+    "sha256:bb08968979b53da4ef33e132dec08714d327754929a5440dca65a784bf5e94cc",
   normalReleased:
-    "sha256:e90ddce04fbb1d4ca7271ddcaff4b7e1d8b96a46514ced43d4858cee37ab6f82",
+    "sha256:62df2a23824d543994a37c3f89c1717207e26830b45eb6847ea5af1688bea291",
   impossible:
-    "sha256:f7485c02853a5c6df35f0db052b4c46ed05c5e992c5d038d0c18253a057b20bf",
+    "sha256:41ac9120d6048362e217cc59ed02e471dd7d1a1689e6d50160056092f3bd5ccd",
   recovered:
-    "sha256:76607b683f2e276d6b7b4ae063e6c5dc60c9f4f0a99f7495925233496c86e271",
+    "sha256:254058701fb7de96c2e4b41cc9c113503f469e1d93ccbc5f8fccfb212fc4064f",
 } as const;
 
 function contractJsonSchema(schema: z.ZodType): JsonValue {
