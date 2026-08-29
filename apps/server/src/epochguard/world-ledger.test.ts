@@ -160,6 +160,34 @@ describe("WorldLedger", () => {
     ).toBeUndefined();
   });
 
+  it("returns detached resolver results that cannot rewrite persisted history", () => {
+    const database = replayImpossibleFixture();
+    const resolved = resolveResourceVersionByIdentity(
+      database,
+      "budget",
+      "campaign_42",
+      19,
+    );
+    if (resolved === undefined) throw new Error("Budget version is missing");
+
+    resolved.validUntilSeq = null;
+    (resolved.value as { remainingBudgetCents: number }).remainingBudgetCents = 1;
+
+    const stored = database.resourceVersions.find(
+      (version) => version.id === resolved.id,
+    );
+    expect(stored?.validUntilSeq).toBe(20);
+    expect(stored?.value).toEqual({ remainingBudgetCents: 800_000 });
+    expect(
+      resolveResourceVersionByIdentity(
+        database,
+        "budget",
+        "campaign_42",
+        19,
+      )?.value,
+    ).toEqual({ remainingBudgetCents: 800_000 });
+  });
+
   it("rejects sequence and duplicate-resource violations without mutating history", () => {
     const database = emptyDatabase();
     const ledger = new WorldLedger();

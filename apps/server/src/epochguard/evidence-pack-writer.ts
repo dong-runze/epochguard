@@ -4,7 +4,6 @@ import {
   ActionIntentSchema,
   EvidencePackRelativePathSchema,
   ObservationReceiptSchema,
-  ResourceVersionSchema,
   RoleQuerySpecSchema,
   RunAssignmentSchema,
   buildRoleQuerySpec,
@@ -18,7 +17,10 @@ import {
   type RoleQuerySpec,
   type RunAssignment,
 } from "./types.js";
-import { resourceIdFor } from "./world-ledger.js";
+import {
+  parseVerifiedResourceVersion,
+  resourceIdFor,
+} from "./world-ledger.js";
 
 const InventoryValueSchema = z
   .object({ availableUnits: z.number().int().nonnegative() })
@@ -288,7 +290,7 @@ export function buildCanonicalEvidencePack(
   const querySpec = RoleQuerySpecSchema.parse(input.querySpec);
   const assignment = RunAssignmentSchema.parse(input.assignment);
   const receipt = ObservationReceiptSchema.parse(input.receipt);
-  const resourceVersion = ResourceVersionSchema.parse(input.resourceVersion);
+  const resourceVersion = parseVerifiedResourceVersion(input.resourceVersion);
   assertBindings(
     action,
     querySpec,
@@ -340,6 +342,7 @@ export class EvidencePackWriter {
   ): Promise<WrittenCanonicalEvidencePack> {
     const built = this.buildCanonicalPack(input);
     const assignment = RunAssignmentSchema.parse(input.assignment);
+    assertEvidencePackHash(assignment, built);
     const writtenRelativePath = await this.workspace.writeEvidencePackAtomic(
       assignment.agentId,
       assignment.sessionId,

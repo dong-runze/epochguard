@@ -15,7 +15,11 @@ import {
   getEpochGuardFixture,
   initializeFixtureWorld,
 } from "./fixtures.js";
-import { ReceiptIssuer, type IssuedObservation } from "./receipt-issuer.js";
+import {
+  ReceiptIssuer,
+  resolveReceiptResourceVersion,
+  type IssuedObservation,
+} from "./receipt-issuer.js";
 import { WorldLedger } from "./world-ledger.js";
 import type {
   ActionIntent,
@@ -136,7 +140,10 @@ function buildInput(prepared: PreparedBudgetEvidence): EvidencePackBuildInput {
     querySpec: prepared.querySpec,
     assignment: prepared.assignment,
     receipt: prepared.observation.receipt,
-    resourceVersion: prepared.observation.resourceVersion,
+    resourceVersion: resolveReceiptResourceVersion(
+      prepared.database,
+      prepared.observation.receipt,
+    ),
     worldHeadSeq: prepared.database.headSeq,
   };
 }
@@ -158,6 +165,44 @@ describe("EvidencePackWriter", () => {
       '{"action":{"campaignId":"campaign_42","estimatedCostCents":500000},"assignment":{"actionHash":"sha256:bd99e824e58087f03cd1018fe7457865a596ae74ffbb5a707b1d2c3b6da5c202","promptTemplateVersion":"epoch-prompt-v1","queryHash":"sha256:3497fdc0405a9ac929b9aa370295fac815db538f19efb1c51923c06d744711c4","role":"budget","roleProfileVersion":"budget-v1","runAssignmentId":"assignment_budget_initial","sessionId":"session_golden"},"decisionRule":"ALLOW iff remainingBudgetCents >= estimatedCostCents.","observation":{"nonce":"nonce_budget_initial_0123456789abcdef0123456789abcdef","observedAtSeq":19,"receiptId":"receipt_budget_initial","remainingBudgetCents":800000},"responseMarker":"EPOCH_DECISION"}',
     );
     expect(() => assertEvidencePackHash(prepared.assignment, second)).not.toThrow();
+  });
+
+  it("rejects value-only ResourceVersion tampering with the old valueHash", () => {
+    const prepared = prepareBudgetEvidence();
+    const input = buildInput(prepared);
+    const tamperedVersion = structuredClone(input.resourceVersion);
+    tamperedVersion.value = { remainingBudgetCents: 0 };
+
+    expect(() =>
+      buildCanonicalEvidencePack({
+        ...input,
+        resourceVersion: tamperedVersion,
+      }),
+    ).toThrow(/valueHash does not match/);
+  });
+
+  it("rejects placeholder, stale, or wrong expected hashes before any workspace write", async () => {
+    const prepared = prepareBudgetEvidence();
+    const input = buildInput(prepared);
+    let workspaceWrites = 0;
+    const writer = new EvidencePackWriter({
+      writeEvidencePackAtomic: async () => {
+        workspaceWrites += 1;
+        return input.assignment.evidencePackRelativePath;
+      },
+    });
+
+    for (const rejectedHash of [
+      ZERO_HASH,
+      `sha256:${"e".repeat(64)}`,
+      `sha256:${"f".repeat(64)}`,
+    ]) {
+      prepared.assignment.evidencePackHash = rejectedHash;
+      await expect(writer.writeCanonicalPack(input)).rejects.toThrow(
+        /Stored Evidence Pack hash does not match/,
+      );
+    }
+    expect(workspaceWrites).toBe(0);
   });
 
   it("emits the exact minimal Action and observation projection for every role", () => {
@@ -216,7 +261,10 @@ describe("EvidencePackWriter", () => {
         querySpec,
         assignment,
         receipt: observation.receipt,
-        resourceVersion: observation.resourceVersion,
+        resourceVersion: resolveReceiptResourceVersion(
+          database,
+          observation.receipt,
+        ),
         worldHeadSeq: database.headSeq,
       });
       expect(built.payload).toMatchObject(expected[role]);
@@ -259,7 +307,10 @@ describe("EvidencePackWriter", () => {
         querySpec: prepared.querySpec,
         assignment: refreshAssignment,
         receipt: refreshObservation.receipt,
-        resourceVersion: refreshObservation.resourceVersion,
+        resourceVersion: resolveReceiptResourceVersion(
+          prepared.database,
+          refreshObservation.receipt,
+        ),
         worldHeadSeq: prepared.database.headSeq,
       };
       const refreshBuilt = writer.buildCanonicalPack(refreshInput);

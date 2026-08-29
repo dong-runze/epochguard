@@ -201,6 +201,23 @@ describe("ReceiptIssuer", () => {
     expect(version.value).toEqual({ remainingBudgetCents: 800_000 });
   });
 
+  it("fails closed when persisted value changes without a new valueHash", () => {
+    const { database, observations } = captureImpossibleWorld();
+    const budgetReceipt = observations.get("budget")?.receipt;
+    if (budgetReceipt === undefined) throw new Error("Budget Receipt is missing");
+    const stored = database.resourceVersions.find(
+      (version) =>
+        version.resourceId === "budget:campaign_42" &&
+        version.sourceRevision === 19,
+    );
+    if (stored === undefined) throw new Error("Budget version is missing");
+    stored.value = { remainingBudgetCents: 0 };
+
+    expect(() => resolveReceiptResourceVersion(database, budgetReceipt)).toThrow(
+      /valueHash does not match/,
+    );
+  });
+
   it("rejects reconstructed-query mismatches and duplicate issuance", () => {
     const { database, action, assignments } = captureImpossibleWorld();
     const original = getEpochGuardFixture("impossible-collage-v1").querySpecs.budget;

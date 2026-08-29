@@ -33,6 +33,16 @@ function cloneJson(value: JsonValue): JsonValue {
   return JSON.parse(canonicalJson(value)) as JsonValue;
 }
 
+/** Validates value integrity and returns a detached ResourceVersion copy. */
+export function parseVerifiedResourceVersion(input: unknown): ResourceVersion {
+  const parsed = ResourceVersionSchema.parse(input);
+  const expectedValueHash = sha256Digest(canonicalJson(parsed.value));
+  if (parsed.valueHash !== expectedValueHash) {
+    throw new Error("ResourceVersion valueHash does not match its canonical value");
+  }
+  return structuredClone(parsed);
+}
+
 function versionIdFor(
   resourceId: string,
   sourceRevision: number,
@@ -67,7 +77,9 @@ function openVersion(
   if (matches.length > 1) {
     throw new Error(`Resource ${resourceId} has multiple open versions`);
   }
-  return matches[0];
+  const match = matches[0];
+  if (match !== undefined) parseVerifiedResourceVersion(match);
+  return match;
 }
 
 /** Maps the frozen query source and entity key to the authoritative resource. */
@@ -95,7 +107,8 @@ export function resolveResourceVersionAt(
   if (matches.length > 1) {
     throw new Error(`Resource ${resourceId} has overlapping versions at ${seq}`);
   }
-  return matches[0];
+  const match = matches[0];
+  return match === undefined ? undefined : parseVerifiedResourceVersion(match);
 }
 
 /** Resolves the immutable version named by a Receipt's source revision. */
@@ -130,11 +143,12 @@ export function resolveResourceVersionByIdentity(
   if (!Number.isSafeInteger(sourceRevision) || sourceRevision < 0) {
     throw new Error("Source revision must be a non-negative safe integer");
   }
-  return resolveResourceVersionByResourceRevision(
+  const match = resolveResourceVersionByResourceRevision(
     database,
     resourceIdFor(source, entityKey),
     sourceRevision,
   );
+  return match === undefined ? undefined : parseVerifiedResourceVersion(match);
 }
 
 /**
