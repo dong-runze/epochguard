@@ -19,6 +19,8 @@ import {
 } from "./types.js";
 
 class MemoryStore implements StorePort {
+  private writerQueue: Promise<void> = Promise.resolve();
+
   state: RunAdapterStoreState = {
     roleAgentRegistrations: [],
     runAssignments: [],
@@ -29,13 +31,20 @@ class MemoryStore implements StorePort {
     return structuredClone(this.state);
   }
 
-  async mutate<T>(
+  mutate<T>(
     mutation: (database: RunAdapterStoreState) => T | Promise<T>,
   ): Promise<T> {
-    const next = structuredClone(this.state);
-    const result = await mutation(next);
-    this.state = next;
-    return result;
+    const write = this.writerQueue.then(async () => {
+      const next = structuredClone(this.state);
+      const result = await mutation(next);
+      this.state = next;
+      return result;
+    });
+    this.writerQueue = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    return write;
   }
 }
 

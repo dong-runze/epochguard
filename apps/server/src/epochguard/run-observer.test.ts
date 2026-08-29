@@ -13,13 +13,17 @@ import {
   RunAdapterError,
   deriveCoordinationMode,
   dispatchBindPoll,
+  fanOutDispatchBindPoll,
   joinRoleRunObservations,
+  type RoleDispatchInputs,
+  type RoleRunJoinScope,
   type RunObserverClock,
   type TerminalRunObservation,
 } from "./run-observer.js";
 import {
   AgentAttemptSchema,
   GOLDEN_ACTION_HASH,
+  ROLES,
   RoleAgentRegistrationSchema,
   RunAssignmentSchema,
   sha256Digest,
@@ -51,6 +55,7 @@ class FakeClock implements RunObserverClock {
 
 class MemoryStore implements StorePort {
   readonly history: RunAdapterStoreState[] = [];
+  private writerQueue: Promise<void> = Promise.resolve();
 
   constructor(public state: RunAdapterStoreState) {}
 
@@ -58,14 +63,21 @@ class MemoryStore implements StorePort {
     return structuredClone(this.state);
   }
 
-  async mutate<T>(
+  mutate<T>(
     mutation: (database: RunAdapterStoreState) => T | Promise<T>,
   ): Promise<T> {
-    const next = structuredClone(this.state);
-    const result = await mutation(next);
-    this.state = next;
-    this.history.push(structuredClone(next));
-    return result;
+    const write = this.writerQueue.then(async () => {
+      const next = structuredClone(this.state);
+      const result = await mutation(next);
+      this.state = next;
+      this.history.push(structuredClone(next));
+      return result;
+    });
+    this.writerQueue = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    return write;
   }
 }
 
@@ -73,7 +85,7 @@ class RunHarness implements AgentPort, WorkspacePort {
   readonly sentPrompts: string[] = [];
   readonly agents = new Map<string, Agent>();
   readonly digests = new Map<string, string>();
-  runSequence: AgentRun[] = [];
+  runSequence: Array<AgentRun | Error> = [];
   dispatchRun: AgentRun;
   onSend: (() => void | Promise<void>) | null = null;
   private lastObservedRun: AgentRun;
@@ -107,6 +119,7 @@ class RunHarness implements AgentPort, WorkspacePort {
   getRun(runId: string): AgentRun {
     if (runId !== this.dispatchRun.id) throw new Error("Run not found");
     const next = this.runSequence.shift();
+    if (next instanceof Error) throw next;
     if (next) this.lastObservedRun = structuredClone(next);
     const agent = this.agents.get(this.lastObservedRun.agentId);
     if (agent) {
@@ -143,7 +156,10 @@ function makeAgent(role: Role): Agent {
   };
 }
 
-function makeAssignment(role: Role): RunAssignment {
+function makeAssignment(
+  role: Role,
+  overrides: Partial<RunAssignment> = {},
+): RunAssignment {
   return RunAssignmentSchema.parse({
     assignmentId: `assignment_${role}`,
     sessionId: "session_run_observer",
@@ -166,6 +182,7 @@ function makeAssignment(role: Role): RunAssignment {
     createdAt,
     boundAt: null,
     consumedAt: null,
+    ...overrides,
   });
 }
 
@@ -235,6 +252,117 @@ function makeHarness(role: Role = "budget"): {
   };
 }
 
+class FanOutHarness implements AgentPort, WorkspacePort {
+  readonly agents = new Map<string, Agent>();
+  readonly digests = new Map<string, string>();
+  readonly sentAgentIds: string[] = [];
+  readonly sequences = new Map<string, Array<AgentRun | Error>>();
+  private readonly dispatchRuns = new Map<string, AgentRun>();
+  private readonly sendWaiters: Array<() => void> = [];
+  activeSends = 0;
+  maxActiveSends = 0;
+
+  constructor() {
+    for (const role of ROLES) {
+      const agent = makeAgent(role);
+      const run = makeRun(role, "queued");
+      this.agents.set(agent.id, agent);
+      this.digests.set(agent.id, profileDigest);
+      this.dispatchRuns.set(agent.id, run);
+      this.sequences.set(run.id, [makeRun(role, "completed")]);
+    }
+  }
+
+  getAgent(agentId: string): Agent {
+    const agent = this.agents.get(agentId);
+    if (!agent) throw new Error("Agent not found");
+    return structuredClone(agent);
+  }
+
+  async createAgent(_input: CreateAgentInput): Promise<Agent> {
+    throw new Error("not used by fan-out tests");
+  }
+
+  async sendMessage(agentId: string, prompt: string): Promise<{ run: AgentRun }> {
+    const run = this.dispatchRuns.get(agentId);
+    const agent = this.agents.get(agentId);
+    if (!run || !agent) throw new Error("Agent not found");
+    this.sentAgentIds.push(agentId);
+    agent.status = "busy";
+    this.activeSends += 1;
+    this.maxActiveSends = Math.max(this.maxActiveSends, this.activeSends);
+    await new Promise<void>((resolve) => {
+      this.sendWaiters.push(resolve);
+      if (this.sendWaiters.length === ROLES.length) {
+        for (const waiter of this.sendWaiters.splice(0)) waiter();
+      }
+    });
+    this.activeSends -= 1;
+    return { run: { ...structuredClone(run), prompt } };
+  }
+
+  getRun(runId: string): AgentRun {
+    const sequence = this.sequences.get(runId);
+    if (!sequence) throw new Error("Run not found");
+    const next = sequence.shift();
+    if (!next) throw new Error("Run sequence exhausted");
+    if (next instanceof Error) throw next;
+    const agent = this.agents.get(next.agentId);
+    if (agent) {
+      agent.status =
+        next.status === "queued" || next.status === "running"
+          ? "busy"
+          : next.status === "failed"
+            ? "error"
+            : "ready";
+    }
+    return structuredClone(next);
+  }
+
+  async readAgentsMdDigest(agentId: string): Promise<string> {
+    const digest = this.digests.get(agentId);
+    if (!digest) throw new Error("AGENTS.md not found");
+    return digest;
+  }
+}
+
+function makeFanOutFixture(): {
+  store: MemoryStore;
+  harness: FanOutHarness;
+  ports: RoleProfilePorts;
+  inputs: RoleDispatchInputs;
+} {
+  const assignments = ROLES.map((role) => makeAssignment(role));
+  const attempts = assignments.map((assignment) =>
+    initialAttemptForAssignment(assignment, `attempt_${assignment.role}`),
+  );
+  const registrations = assignments.map((assignment) =>
+    RoleAgentRegistrationSchema.parse({
+      role: assignment.role,
+      agentId: assignment.agentId,
+      agentNameAtRegistration: assignment.agentNameAtAssignment,
+      roleProfileVersion: assignment.roleProfileVersion,
+      agentsMdDigest: assignment.agentsMdDigest,
+      registeredAt: createdAt,
+    }),
+  );
+  const store = new MemoryStore({
+    roleAgentRegistrations: registrations,
+    runAssignments: assignments,
+    attempts,
+  });
+  const harness = new FanOutHarness();
+  return {
+    store,
+    harness,
+    ports: { agents: harness, store, workspaces: harness },
+    inputs: ROLES.map((role) => ({
+      assignmentId: `assignment_${role}`,
+      attemptId: `attempt_${role}`,
+    })) as unknown as RoleDispatchInputs,
+  };
+}
+
 function observedStatuses(store: MemoryStore, attemptId: string): string[] {
   const statuses = store.history.map(
     (state) => state.attempts.find((item) => item.attemptId === attemptId)!.status,
@@ -274,6 +402,39 @@ function observation(attempt: AgentAttempt): TerminalRunObservation {
     runId: attempt.runId!,
     attempt,
     output: `output_${attempt.role}`,
+  };
+}
+
+function makeJoinFixture(attempts: readonly AgentAttempt[]): {
+  store: MemoryStore;
+  scope: RoleRunJoinScope;
+} {
+  const assignments = attempts.map((attempt) =>
+    makeAssignment(attempt.role, {
+      assignmentId: attempt.assignmentId,
+      sessionId: attempt.sessionId,
+      actionHash: attempt.actionHash,
+      agentId: attempt.agentId,
+      agentNameAtAssignment: ROLE_PROFILES[attempt.role].agentName,
+      boundRunId: attempt.runId,
+      status: "BOUND",
+      boundAt: createdAt,
+    }),
+  );
+  const store = new MemoryStore({
+    roleAgentRegistrations: [],
+    runAssignments: assignments,
+    attempts: structuredClone(attempts),
+  });
+  return {
+    store,
+    scope: {
+      sessionId: attempts[0]!.sessionId,
+      actionHash: attempts[0]!.actionHash,
+      assignmentIds: attempts.map(
+        (attempt) => attempt.assignmentId,
+      ) as unknown as [string, string, string],
+    },
   };
 }
 
@@ -404,6 +565,8 @@ describe("EpochGuard Run Observer", () => {
       attempt: {
         status: "OUTPUT_REJECTED",
         runId: "run_budget",
+        runStartedAt: "2026-08-29T12:00:01.000Z",
+        runCompletedAt: "2026-08-29T12:00:02.000Z",
         outputDigest: sha256Digest("output_budget"),
       },
     });
@@ -439,6 +602,7 @@ describe("EpochGuard Run Observer", () => {
   it("rejects getRun evidence for any ID other than the send-bound Run", async () => {
     const { assignment, store, harness, ports, clock } = makeHarness();
     harness.runSequence = [
+      makeRun("budget", "running"),
       makeRun("budget", "completed", { id: "run_wrong_authoritative_record" }),
     ];
 
@@ -450,13 +614,42 @@ describe("EpochGuard Run Observer", () => {
       ),
     ).rejects.toMatchObject({
       code: "BINDING_MISMATCH",
-      attempt: { status: "FAILED", runId: "run_budget" },
+      attempt: {
+        status: "RUNNING",
+        runId: "run_budget",
+        runStartedAt: "2026-08-29T12:00:01.000Z",
+        runCompletedAt: null,
+      },
     });
     expect(store.state.runAssignments[0]).toMatchObject({
       boundRunId: "run_budget",
       status: "REJECTED",
     });
     expect(harness.sentPrompts).toHaveLength(1);
+  });
+
+  it("preserves mirrored start evidence when getRun throws", async () => {
+    const { assignment, store, harness, ports, clock } = makeHarness();
+    harness.runSequence = [
+      makeRun("budget", "running"),
+      new Error("controlled getRun failure"),
+    ];
+
+    await expect(
+      dispatchBindPoll(
+        { assignmentId: assignment.assignmentId, attemptId: "attempt_budget" },
+        ports,
+        { clock },
+      ),
+    ).rejects.toMatchObject({
+      code: "RUN_FAILED",
+      attempt: {
+        status: "RUNNING",
+        runStartedAt: "2026-08-29T12:00:01.000Z",
+        runCompletedAt: null,
+      },
+    });
+    expect(store.state.runAssignments[0]?.status).toBe("REJECTED");
   });
 
   it("mirrors queued cancellation and running failure with valid terminal timelines", async () => {
@@ -519,7 +712,7 @@ describe("EpochGuard Run Observer", () => {
     ]);
   });
 
-  it("fails closed on timeout while preserving a contract-valid bound timeline", async () => {
+  it("fails closed on queued timeout without fabricating completion evidence", async () => {
     const { assignment, store, harness, ports, clock } = makeHarness();
     harness.runSequence = [makeRun("budget", "queued")];
 
@@ -532,12 +725,91 @@ describe("EpochGuard Run Observer", () => {
     ).rejects.toMatchObject({
       code: "RUN_TIMEOUT",
       attempt: {
-        status: "FAILED",
+        status: "QUEUED",
         runId: "run_budget",
         runStartedAt: null,
+        runCompletedAt: null,
       },
     });
     expect(AgentAttemptSchema.safeParse(store.state.attempts[0]).success).toBe(true);
+    expect(store.state.runAssignments[0]?.status).toBe("REJECTED");
+  });
+
+  it("fails closed on running timeout and preserves the authoritative start", async () => {
+    const { assignment, store, harness, ports, clock } = makeHarness();
+    harness.runSequence = [makeRun("budget", "running")];
+
+    await expect(
+      dispatchBindPoll(
+        { assignmentId: assignment.assignmentId, attemptId: "attempt_budget" },
+        ports,
+        { clock, pollIntervalMs: 200, timeoutMs: 200 },
+      ),
+    ).rejects.toMatchObject({
+      code: "RUN_TIMEOUT",
+      attempt: {
+        status: "RUNNING",
+        runStartedAt: "2026-08-29T12:00:01.000Z",
+        runCompletedAt: null,
+      },
+    });
+    expect(store.state.runAssignments[0]?.status).toBe("REJECTED");
+  });
+
+  it("rejects missing or reversed terminal time without corrupting known evidence", async () => {
+    for (const malformedTerminal of [
+      makeRun("budget", "failed", { completedAt: null }),
+      makeRun("budget", "completed", {
+        startedAt: "2026-08-29T12:00:03.000Z",
+        completedAt: "2026-08-29T12:00:02.000Z",
+      }),
+    ]) {
+      const { assignment, store, harness, ports, clock } = makeHarness();
+      harness.runSequence = [makeRun("budget", "running"), malformedTerminal];
+
+      await expect(
+        dispatchBindPoll(
+          { assignmentId: assignment.assignmentId, attemptId: "attempt_budget" },
+          ports,
+          { clock },
+        ),
+      ).rejects.toMatchObject({
+        attempt: {
+          status: "RUNNING",
+          runStartedAt: "2026-08-29T12:00:01.000Z",
+          runCompletedAt: null,
+        },
+      });
+      expect(store.state.runAssignments[0]?.status).toBe("REJECTED");
+      expect(AgentAttemptSchema.safeParse(store.state.attempts[0]).success).toBe(
+        true,
+      );
+    }
+  });
+
+  it("rejects an attempt to rewrite an already observed start timestamp", async () => {
+    const { assignment, store, harness, ports, clock } = makeHarness();
+    harness.runSequence = [
+      makeRun("budget", "running"),
+      makeRun("budget", "running", {
+        startedAt: "2026-08-29T12:00:01.500Z",
+      }),
+    ];
+
+    await expect(
+      dispatchBindPoll(
+        { assignmentId: assignment.assignmentId, attemptId: "attempt_budget" },
+        ports,
+        { clock },
+      ),
+    ).rejects.toMatchObject({
+      code: "BINDING_MISMATCH",
+      attempt: {
+        status: "RUNNING",
+        runStartedAt: "2026-08-29T12:00:01.000Z",
+        runCompletedAt: null,
+      },
+    });
     expect(store.state.runAssignments[0]?.status).toBe("REJECTED");
   });
 });
@@ -561,12 +833,65 @@ describe("EpochGuard Role Run join and coordination evidence", () => {
     ),
   };
 
-  it("joins only three distinct Role, Agent, and authoritative Run IDs", () => {
-    const joined = joinRoleRunObservations([
-      { status: "fulfilled", value: observation(overlap.policy) },
-      { status: "fulfilled", value: observation(overlap.inventory) },
-      { status: "fulfilled", value: observation(overlap.budget) },
+  it("fans out three dispatches concurrently without Store lost updates", async () => {
+    const { store, harness, ports, inputs } = makeFanOutFixture();
+    const joined = await fanOutDispatchBindPoll(inputs, ports, {
+      clock: new FakeClock(),
+    });
+
+    expect(harness.sentAgentIds).toHaveLength(3);
+    expect(harness.maxActiveSends).toBe(3);
+    expect(joined.map((item) => item.role)).toEqual(ROLES);
+    expect(store.state.runAssignments.map((item) => item.status)).toEqual([
+      "BOUND",
+      "BOUND",
+      "BOUND",
     ]);
+    expect(store.state.attempts.map((item) => item.status)).toEqual([
+      "COMPLETED",
+      "COMPLETED",
+      "COMPLETED",
+    ]);
+    for (const role of ROLES) {
+      expect(observedStatuses(store, `attempt_${role}`).slice(-3)).toEqual([
+        "DISPATCHING",
+        "QUEUED",
+        "COMPLETED",
+      ]);
+    }
+  });
+
+  it("rejects all unconsumed siblings after one fan-out Run fails", async () => {
+    const { store, harness, ports, inputs } = makeFanOutFixture();
+    harness.sequences.set("run_budget", [makeRun("budget", "failed")]);
+
+    await expect(
+      fanOutDispatchBindPoll(inputs, ports, { clock: new FakeClock() }),
+    ).rejects.toMatchObject({ code: "RUN_FAILED" });
+    expect(store.state.runAssignments.map((item) => item.status)).toEqual([
+      "REJECTED",
+      "REJECTED",
+      "REJECTED",
+    ]);
+    expect(store.state.attempts.map((item) => item.status)).toEqual([
+      "COMPLETED",
+      "FAILED",
+      "COMPLETED",
+    ]);
+  });
+
+  it("joins only matching, distinct Role, Agent, Run, and output evidence", async () => {
+    const attempts = Object.values(overlap);
+    const { store, scope } = makeJoinFixture(attempts);
+    const joined = await joinRoleRunObservations(
+      [
+        { status: "fulfilled", value: observation(overlap.policy) },
+        { status: "fulfilled", value: observation(overlap.inventory) },
+        { status: "fulfilled", value: observation(overlap.budget) },
+      ],
+      store,
+      scope,
+    );
     expect(joined.map((item) => item.role)).toEqual([
       "inventory",
       "budget",
@@ -579,25 +904,130 @@ describe("EpochGuard Role Run join and coordination evidence", () => {
       ...overlap.policy,
       runId: overlap.budget.runId,
     });
-    expect(() =>
-      joinRoleRunObservations([
-        { status: "fulfilled", value: observation(overlap.inventory) },
-        { status: "fulfilled", value: observation(overlap.budget) },
-        { status: "fulfilled", value: duplicateRun },
-      ]),
-    ).toThrow(RunAdapterError);
+    const duplicateFixture = makeJoinFixture([
+      overlap.inventory,
+      overlap.budget,
+      duplicateRun.attempt,
+    ]);
+    await expect(
+      joinRoleRunObservations(
+        [
+          { status: "fulfilled", value: observation(overlap.inventory) },
+          { status: "fulfilled", value: observation(overlap.budget) },
+          { status: "fulfilled", value: duplicateRun },
+        ],
+        duplicateFixture.store,
+        duplicateFixture.scope,
+      ),
+    ).rejects.toBeInstanceOf(RunAdapterError);
   });
 
-  it("fails the join closed when any Role Run rejects", () => {
-    expect(() =>
-      joinRoleRunObservations([
-        { status: "fulfilled", value: observation(overlap.inventory) },
-        { status: "rejected", reason: new Error("budget failed") },
-        { status: "fulfilled", value: observation(overlap.policy) },
-      ]),
-    ).toThrowError(
-      expect.objectContaining({ code: "RUN_FAILED" }),
-    );
+  it("fails the join closed and rejects siblings without rewriting Attempts", async () => {
+    const { store, scope } = makeJoinFixture(Object.values(overlap));
+    const attemptsBefore = structuredClone(store.state.attempts);
+    await expect(
+      joinRoleRunObservations(
+        [
+          { status: "fulfilled", value: observation(overlap.inventory) },
+          { status: "rejected", reason: new Error("budget failed") },
+          { status: "fulfilled", value: observation(overlap.policy) },
+        ],
+        store,
+        scope,
+      ),
+    ).rejects.toMatchObject({ code: "RUN_FAILED" });
+    expect(store.state.runAssignments.map((item) => item.status)).toEqual([
+      "REJECTED",
+      "REJECTED",
+      "REJECTED",
+    ]);
+    expect(store.state.attempts).toEqual(attemptsBefore);
+  });
+
+  it("preserves a consumed sibling while rejecting every unconsumed sibling", async () => {
+    const { store, scope } = makeJoinFixture(Object.values(overlap));
+    const consumed = store.state.runAssignments[0]!;
+    consumed.status = "CONSUMED";
+    consumed.consumedByDecisionCertificateId = "decision_inventory";
+    consumed.consumedAt = "2026-08-29T12:00:11.000Z";
+
+    await expect(
+      joinRoleRunObservations(
+        [
+          { status: "fulfilled", value: observation(overlap.inventory) },
+          { status: "rejected", reason: new Error("budget failed") },
+          { status: "fulfilled", value: observation(overlap.policy) },
+        ],
+        store,
+        scope,
+      ),
+    ).rejects.toMatchObject({ code: "RUN_FAILED" });
+    expect(store.state.runAssignments.map((item) => item.status)).toEqual([
+      "CONSUMED",
+      "REJECTED",
+      "REJECTED",
+    ]);
+  });
+
+  it("rejects Assignment/output mismatches and all sibling Assignments", async () => {
+    for (const mutate of [
+      (candidate: TerminalRunObservation) => ({
+        ...candidate,
+        assignmentId: overlap.budget.assignmentId,
+      }),
+      (candidate: TerminalRunObservation) => ({
+        ...candidate,
+        output: "tampered output",
+      }),
+    ]) {
+      const { store, scope } = makeJoinFixture(Object.values(overlap));
+      const badPolicy = mutate(observation(overlap.policy));
+      await expect(
+        joinRoleRunObservations(
+          [
+            { status: "fulfilled", value: observation(overlap.inventory) },
+            { status: "fulfilled", value: observation(overlap.budget) },
+            { status: "fulfilled", value: badPolicy },
+          ],
+          store,
+          scope,
+        ),
+      ).rejects.toMatchObject({ code: "BINDING_MISMATCH" });
+      expect(store.state.runAssignments.map((item) => item.status)).toEqual([
+        "REJECTED",
+        "REJECTED",
+        "REJECTED",
+      ]);
+    }
+  });
+
+  it("rejects observations mixed from another Session or Action", async () => {
+    for (const attemptOverride of [
+      { sessionId: "session_other" },
+      { actionHash: sha256Digest("other action") },
+    ]) {
+      const { store, scope } = makeJoinFixture(Object.values(overlap));
+      const mixedAttempt = AgentAttemptSchema.parse({
+        ...overlap.policy,
+        ...attemptOverride,
+      });
+      await expect(
+        joinRoleRunObservations(
+          [
+            { status: "fulfilled", value: observation(overlap.inventory) },
+            { status: "fulfilled", value: observation(overlap.budget) },
+            { status: "fulfilled", value: observation(mixedAttempt) },
+          ],
+          store,
+          scope,
+        ),
+      ).rejects.toMatchObject({ code: "BINDING_MISMATCH" });
+      expect(store.state.runAssignments.map((item) => item.status)).toEqual([
+        "REJECTED",
+        "REJECTED",
+        "REJECTED",
+      ]);
+    }
   });
 
   it("reports CONCURRENT only for a real positive three-way overlap", () => {

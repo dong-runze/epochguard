@@ -16,6 +16,7 @@ import {
   verifyRoleAgentProfile,
   type AgentPort,
   type RoleProfilePorts,
+  type RunAdapterStoreState,
   type StorePort,
 } from "./role-profiles.js";
 
@@ -42,6 +43,18 @@ export interface RunObserverOptions {
 export interface DispatchBindPollInput {
   assignmentId: string;
   attemptId: string;
+}
+
+export type RoleDispatchInputs = readonly [
+  DispatchBindPollInput,
+  DispatchBindPollInput,
+  DispatchBindPollInput,
+];
+
+export interface RoleRunJoinScope {
+  sessionId: string;
+  actionHash: string;
+  assignmentIds: readonly [string, string, string];
 }
 
 export interface TerminalRunObservation {
@@ -317,7 +330,6 @@ async function bindRunOnce(
 async function failAttempt(
   store: StorePort,
   input: DispatchBindPollInput,
-  clock: RunObserverClock,
   status: "FAILED" | "INTERRUPTED",
   run: AgentRun | null,
 ): Promise<AgentAttempt> {
@@ -340,40 +352,54 @@ async function failAttempt(
       );
     }
 
+    AgentAttemptSchema.parse(attempt);
     if (attempt.runId === null) {
-      attempt.runStartedAt = null;
-      attempt.runCompletedAt = null;
-      attempt.threadId = null;
-      attempt.usage = null;
-      attempt.outputDigest = null;
-    } else {
-      if (run !== null && run.id !== attempt.runId) {
-        throw new RunAdapterError(
-          "BINDING_MISMATCH",
-          "Failure evidence refers to a different Run",
-          attempt,
-        );
-      }
-      attempt.runStartedAt =
-        run !== null && validTimestamp(run.startedAt)
+      attempt.status = status;
+    } else if (run !== null && run.id === attempt.runId) {
+      const incomingStartedAt =
+        run.startedAt !== null && validTimestamp(run.startedAt)
           ? run.startedAt
-          : attempt.runStartedAt;
-      attempt.runCompletedAt =
-        run !== null && validTimestamp(run.completedAt) && run.completedAt !== null
+          : null;
+      const incomingCompletedAt =
+        run.completedAt !== null && validTimestamp(run.completedAt)
           ? run.completedAt
-          : clock.now();
-      attempt.threadId = null;
-      const usage = run?.usage === null || run?.usage === undefined
-        ? null
-        : RunUsageSchema.safeParse(run.usage);
-      attempt.usage = usage === null || !usage.success ? null : usage.data;
-      attempt.outputDigest = null;
-      validateTimestampOrder(attempt.runStartedAt, attempt.runCompletedAt);
+          : null;
+      const startedAtConflicts =
+        attempt.runStartedAt !== null &&
+        incomingStartedAt !== null &&
+        attempt.runStartedAt !== incomingStartedAt;
+      const completedAtConflicts =
+        attempt.runCompletedAt !== null &&
+        incomingCompletedAt !== null &&
+        attempt.runCompletedAt !== incomingCompletedAt;
+      const candidateStartedAt = attempt.runStartedAt ?? incomingStartedAt;
+      const candidateCompletedAt = attempt.runCompletedAt ?? incomingCompletedAt;
+      const candidateIsOrdered =
+        candidateStartedAt === null ||
+        candidateCompletedAt === null ||
+        Date.parse(candidateStartedAt) <= Date.parse(candidateCompletedAt);
+
+      if (!startedAtConflicts && !completedAtConflicts && candidateIsOrdered) {
+        if (attempt.runStartedAt === null && incomingStartedAt !== null) {
+          attempt.runStartedAt = incomingStartedAt;
+          if (attempt.status === "QUEUED") attempt.status = "RUNNING";
+        }
+        if (attempt.runCompletedAt === null && incomingCompletedAt !== null) {
+          attempt.runCompletedAt = incomingCompletedAt;
+        }
+      }
+
+      // A bound Attempt becomes terminal only when the authoritative Run
+      // supplied a real completion timestamp. Timeouts and observer failures
+      // preserve QUEUED/RUNNING evidence rather than inventing completion.
+      if (attempt.runCompletedAt !== null) {
+        attempt.status = status;
+        const usage =
+          run.usage === null ? null : RunUsageSchema.safeParse(run.usage);
+        if (usage !== null && usage.success) attempt.usage = usage.data;
+      }
     }
-    attempt.status = status;
-    if (assignment.status === "CREATED" || assignment.status === "BOUND") {
-      assignment.status = "REJECTED";
-    }
+    assignment.status = "REJECTED";
     RunAssignmentSchema.parse(assignment);
     return cloneAttempt(attempt);
   });
@@ -444,7 +470,6 @@ function targetAttemptFromRun(run: AgentRun): {
       };
     case "completed":
       if (
-        run.startedAt === null ||
         run.completedAt === null ||
         run.output === null
       ) {
@@ -460,6 +485,12 @@ function targetAttemptFromRun(run: AgentRun): {
         outputDigest: sha256Digest(run.output),
       };
     case "failed":
+      if (run.completedAt === null) {
+        throw new RunAdapterError(
+          "RUN_FAILED",
+          "Failed Run lacks authoritative completion evidence",
+        );
+      }
       return {
         status: "FAILED",
         startedAt: run.startedAt,
@@ -467,6 +498,12 @@ function targetAttemptFromRun(run: AgentRun): {
         outputDigest: null,
       };
     case "cancelled":
+      if (run.completedAt === null) {
+        throw new RunAdapterError(
+          "RUN_FAILED",
+          "Cancelled Run lacks authoritative completion evidence",
+        );
+      }
       return {
         status: "INTERRUPTED",
         startedAt: run.startedAt,
@@ -481,7 +518,6 @@ async function mirrorRun(
   input: DispatchBindPollInput,
   assignment: RunAssignment,
   run: AgentRun,
-  clock: RunObserverClock,
 ): Promise<AgentAttempt> {
   validateRunIdentity(run, assignment);
   const target = targetAttemptFromRun(run);
@@ -516,13 +552,43 @@ async function mirrorRun(
       );
     }
 
+    if (
+      attemptStatusRank(attempt.status) === 4 &&
+      attempt.status !== target.status
+    ) {
+      throw new RunAdapterError(
+        "BINDING_MISMATCH",
+        "Observed Run terminal status changed",
+        attempt,
+      );
+    }
+    if (
+      attempt.runStartedAt !== null &&
+      target.startedAt !== null &&
+      attempt.runStartedAt !== target.startedAt
+    ) {
+      throw new RunAdapterError(
+        "BINDING_MISMATCH",
+        "Observed Run start timestamp changed",
+        attempt,
+      );
+    }
+    if (
+      attempt.runCompletedAt !== null &&
+      target.completedAt !== null &&
+      attempt.runCompletedAt !== target.completedAt
+    ) {
+      throw new RunAdapterError(
+        "BINDING_MISMATCH",
+        "Observed Run completion timestamp changed",
+        attempt,
+      );
+    }
+
     attempt.status = target.status;
-    attempt.runStartedAt = target.startedAt;
-    attempt.runCompletedAt =
-      (target.status === "FAILED" || target.status === "INTERRUPTED") &&
-      target.completedAt === null
-        ? clock.now()
-        : target.completedAt;
+    attempt.runStartedAt ??= target.startedAt;
+    attempt.runCompletedAt ??= target.completedAt;
+    validateTimestampOrder(attempt.runStartedAt, attempt.runCompletedAt);
     attempt.threadId = target.status === "COMPLETED" ? run.threadId : null;
     attempt.usage =
       run.usage === null ? null : RunUsageSchema.parse(run.usage);
@@ -570,7 +636,6 @@ export async function dispatchBindPoll(
     const failed = await failAttempt(
       ports.store,
       input,
-      clock,
       "FAILED",
       null,
     );
@@ -595,7 +660,6 @@ export async function dispatchBindPoll(
     const failed = await failAttempt(
       ports.store,
       input,
-      clock,
       "FAILED",
       null,
     );
@@ -617,7 +681,6 @@ export async function dispatchBindPoll(
     const failed = await failAttempt(
       ports.store,
       input,
-      clock,
       "FAILED",
       null,
     );
@@ -639,9 +702,8 @@ export async function dispatchBindPoll(
       const failed = await failAttempt(
         ports.store,
         input,
-        clock,
         "FAILED",
-        dispatchedRun,
+        null,
       );
       const code =
         error instanceof RunAdapterError && error.code === "BINDING_MISMATCH"
@@ -657,12 +719,11 @@ export async function dispatchBindPoll(
 
     let attempt: AgentAttempt;
     try {
-      attempt = await mirrorRun(ports.store, input, assignment, run, clock);
+      attempt = await mirrorRun(ports.store, input, assignment, run);
     } catch (error) {
       const failed = await failAttempt(
         ports.store,
         input,
-        clock,
         "FAILED",
         run,
       );
@@ -713,7 +774,6 @@ export async function dispatchBindPoll(
       const failed = await failAttempt(
         ports.store,
         input,
-        clock,
         "FAILED",
         run,
       );
@@ -727,54 +787,268 @@ export async function dispatchBindPoll(
   }
 }
 
-/** Fail-closed join used by EG-08 after Promise.allSettled(). */
-export function joinRoleRunObservations(
-  settled: readonly PromiseSettledResult<TerminalRunObservation>[],
-): JoinedRoleRunObservations {
-  if (settled.length !== ROLES.length || settled.some((item) => item.status === "rejected")) {
+function roleRunJoinScope(
+  inputs: RoleDispatchInputs,
+  store: StorePort,
+): RoleRunJoinScope {
+  const assignmentIds = inputs.map((input) => input.assignmentId);
+  const attemptIds = inputs.map((input) => input.attemptId);
+  if (
+    new Set(assignmentIds).size !== ROLES.length ||
+    new Set(attemptIds).size !== ROLES.length
+  ) {
     throw new RunAdapterError(
-      "RUN_FAILED",
-      "All three Role Runs must complete before Decision composition",
+      "BINDING_MISMATCH",
+      "Role fan-out requires three distinct Assignment and Attempt IDs",
     );
   }
-  const fulfilled = settled.map(
-    (item) => (item as PromiseFulfilledResult<TerminalRunObservation>).value,
+
+  const database = store.snapshot();
+  const assignments = inputs.map((input) =>
+    RunAssignmentSchema.parse(
+      requireSingle(
+        database.runAssignments,
+        (item) => item.assignmentId === input.assignmentId,
+        `Assignment ${input.assignmentId}`,
+      ),
+    ),
   );
-  const byRole = new Map<Role, TerminalRunObservation>();
-  const agentIds = new Set<string>();
-  const runIds = new Set<string>();
-  for (const observation of fulfilled) {
-    AgentAttemptSchema.parse(observation.attempt);
+  const first = assignments[0]!;
+  const roles = new Set<Role>();
+  for (let index = 0; index < assignments.length; index += 1) {
+    const assignment = assignments[index]!;
+    const input = inputs[index]!;
+    const attempt = AgentAttemptSchema.parse(
+      requireSingle(
+        database.attempts,
+        (item) => item.attemptId === input.attemptId,
+        `Attempt ${input.attemptId}`,
+      ),
+    );
     if (
-      observation.attempt.status !== "COMPLETED" ||
-      observation.attempt.runId !== observation.runId ||
-      observation.attempt.agentId !== observation.agentId ||
-      observation.attempt.role !== observation.role ||
-      byRole.has(observation.role) ||
-      agentIds.has(observation.agentId) ||
-      runIds.has(observation.runId)
+      assignment.sessionId !== first.sessionId ||
+      assignment.actionHash !== first.actionHash ||
+      attempt.assignmentId !== assignment.assignmentId ||
+      attempt.sessionId !== assignment.sessionId ||
+      attempt.actionHash !== assignment.actionHash ||
+      attempt.role !== assignment.role ||
+      attempt.agentId !== assignment.agentId ||
+      roles.has(assignment.role)
     ) {
       throw new RunAdapterError(
         "BINDING_MISMATCH",
-        "Role join requires distinct Role, Agent, and authoritative Run identities",
-        observation.attempt,
+        "Role fan-out cannot mix Session, Action, Role, Assignment, or Agent bindings",
+        attempt,
       );
     }
-    byRole.set(observation.role, observation);
-    agentIds.add(observation.agentId);
-    runIds.add(observation.runId);
+    roles.add(assignment.role);
   }
-  if (ROLES.some((role) => !byRole.has(role))) {
+  if (ROLES.some((role) => !roles.has(role))) {
     throw new RunAdapterError(
       "BINDING_MISMATCH",
-      "Role join is missing a required Role",
+      "Role fan-out is missing a required Role",
     );
   }
-  return [
-    byRole.get("inventory")!,
-    byRole.get("budget")!,
-    byRole.get("policy")!,
-  ];
+  return {
+    sessionId: first.sessionId,
+    actionHash: first.actionHash,
+    assignmentIds: assignmentIds as [string, string, string],
+  };
+}
+
+/** Creates all three dispatch promises before awaiting their fail-closed join. */
+export async function fanOutDispatchBindPoll(
+  inputs: RoleDispatchInputs,
+  ports: RoleProfilePorts,
+  options: RunObserverOptions = {},
+): Promise<JoinedRoleRunObservations> {
+  const scope = roleRunJoinScope(inputs, ports.store);
+  const settled = await Promise.allSettled(
+    inputs.map((input) => dispatchBindPoll(input, ports, options)),
+  );
+  return joinRoleRunObservations(settled, ports.store, scope);
+}
+
+type JoinMutationOutcome =
+  | { ok: true; value: JoinedRoleRunObservations }
+  | {
+      ok: false;
+      code: RunAdapterFailureCode;
+      message: string;
+      attempt: AgentAttempt | null;
+    };
+
+function rejectedJoinOutcome(
+  database: RunAdapterStoreState,
+  scope: RoleRunJoinScope,
+  code: RunAdapterFailureCode,
+  message: string,
+  attempt: AgentAttempt | null = null,
+): JoinMutationOutcome {
+  const siblingIds = new Set(scope.assignmentIds);
+  for (const assignment of database.runAssignments) {
+    if (
+      siblingIds.has(assignment.assignmentId) &&
+      assignment.sessionId === scope.sessionId &&
+      assignment.actionHash === scope.actionHash &&
+      assignment.status !== "CONSUMED"
+    ) {
+      assignment.status = "REJECTED";
+    }
+  }
+  return { ok: false, code, message, attempt };
+}
+
+/**
+ * Atomically validates the three observations or rejects every unconsumed
+ * sibling Assignment. Attempt records are never rewritten by the join.
+ */
+export async function joinRoleRunObservations(
+  settled: readonly PromiseSettledResult<TerminalRunObservation>[],
+  store: StorePort,
+  scope: RoleRunJoinScope,
+): Promise<JoinedRoleRunObservations> {
+  const outcome = await store.mutate((database): JoinMutationOutcome => {
+    if (
+      settled.length !== ROLES.length ||
+      settled.some((item) => item.status === "rejected")
+    ) {
+      return rejectedJoinOutcome(
+        database,
+        scope,
+        "RUN_FAILED",
+        "All three Role Runs must complete before Decision composition",
+      );
+    }
+    if (
+      scope.assignmentIds.length !== ROLES.length ||
+      new Set(scope.assignmentIds).size !== ROLES.length
+    ) {
+      return rejectedJoinOutcome(
+        database,
+        scope,
+        "BINDING_MISMATCH",
+        "Role join scope must contain three distinct sibling Assignments",
+      );
+    }
+
+    const storedAssignments = new Map<string, RunAssignment>();
+    for (const assignmentId of scope.assignmentIds) {
+      const matches = database.runAssignments.filter(
+        (item) => item.assignmentId === assignmentId,
+      );
+      const parsed =
+        matches.length === 1
+          ? RunAssignmentSchema.safeParse(matches[0])
+          : null;
+      if (
+        parsed === null ||
+        !parsed.success ||
+        parsed.data.sessionId !== scope.sessionId ||
+        parsed.data.actionHash !== scope.actionHash
+      ) {
+        return rejectedJoinOutcome(
+          database,
+          scope,
+          "BINDING_MISMATCH",
+          "Role join scope does not resolve to one Session and Action",
+        );
+      }
+      storedAssignments.set(assignmentId, parsed.data);
+    }
+
+    const fulfilled = settled.map(
+      (item) => (item as PromiseFulfilledResult<TerminalRunObservation>).value,
+    );
+    const byRole = new Map<Role, TerminalRunObservation>();
+    const agentIds = new Set<string>();
+    const runIds = new Set<string>();
+    for (const observation of fulfilled) {
+      const parsedAttempt = AgentAttemptSchema.safeParse(observation.attempt);
+      if (!parsedAttempt.success) {
+        return rejectedJoinOutcome(
+          database,
+          scope,
+          "BINDING_MISMATCH",
+          "Role join received a malformed Attempt",
+        );
+      }
+      const attempt = parsedAttempt.data;
+      const assignment = storedAssignments.get(observation.assignmentId);
+      const storedAttempts = database.attempts.filter(
+        (item) => item.attemptId === attempt.attemptId,
+      );
+      const storedAttempt =
+        storedAttempts.length === 1
+          ? AgentAttemptSchema.safeParse(storedAttempts[0])
+          : null;
+      const outputDigestMatches =
+        typeof observation.output === "string" &&
+        sha256Digest(observation.output) === attempt.outputDigest;
+      if (
+        attempt.status !== "COMPLETED" ||
+        attempt.sessionId !== scope.sessionId ||
+        attempt.actionHash !== scope.actionHash ||
+        observation.assignmentId !== attempt.assignmentId ||
+        assignment === undefined ||
+        assignment.assignmentId !== attempt.assignmentId ||
+        assignment.sessionId !== attempt.sessionId ||
+        assignment.actionHash !== attempt.actionHash ||
+        assignment.role !== attempt.role ||
+        assignment.agentId !== attempt.agentId ||
+        assignment.status !== "BOUND" ||
+        assignment.boundRunId !== observation.runId ||
+        assignment.consumedByDecisionCertificateId !== null ||
+        assignment.consumedAt !== null ||
+        storedAttempt === null ||
+        !storedAttempt.success ||
+        JSON.stringify(storedAttempt.data) !== JSON.stringify(attempt) ||
+        attempt.runId !== observation.runId ||
+        attempt.agentId !== observation.agentId ||
+        attempt.role !== observation.role ||
+        !outputDigestMatches ||
+        byRole.has(observation.role) ||
+        agentIds.has(observation.agentId) ||
+        runIds.has(observation.runId)
+      ) {
+        return rejectedJoinOutcome(
+          database,
+          scope,
+          "BINDING_MISMATCH",
+          "Role join requires matching Session, Action, Assignment, Attempt, output, Agent, and Run evidence",
+          attempt,
+        );
+      }
+      byRole.set(observation.role, observation);
+      agentIds.add(observation.agentId);
+      runIds.add(observation.runId);
+    }
+    if (ROLES.some((role) => !byRole.has(role))) {
+      return rejectedJoinOutcome(
+        database,
+        scope,
+        "BINDING_MISMATCH",
+        "Role join is missing a required Role",
+      );
+    }
+    return {
+      ok: true,
+      value: [
+        byRole.get("inventory")!,
+        byRole.get("budget")!,
+        byRole.get("policy")!,
+      ],
+    };
+  });
+
+  if (!outcome.ok) {
+    throw new RunAdapterError(
+      outcome.code,
+      outcome.message,
+      outcome.attempt,
+    );
+  }
+  return outcome.value;
 }
 
 /**
