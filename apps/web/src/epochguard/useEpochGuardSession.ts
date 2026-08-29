@@ -17,6 +17,7 @@ const FAILURE_STALE_THRESHOLD = 3;
 
 export type EpochGuardViewErrorKind =
   | "SOURCE_ERROR"
+  | "SESSION_NOT_FOUND"
   | "SESSION_MISMATCH"
   | SnapshotDecodeFailure["kind"];
 
@@ -62,6 +63,58 @@ function sourceError(error: unknown): EpochGuardViewError {
     message: error instanceof Error ? error.message : String(error),
     details: [],
   };
+}
+
+interface ImmediateSourceFailure {
+  error: EpochGuardViewError;
+  clearSnapshot: boolean;
+}
+
+function immediateSourceFailure(error: unknown): ImmediateSourceFailure | null {
+  if (!(error instanceof EpochGuardSessionSourceError) || error.body === null) {
+    return null;
+  }
+
+  const body = error.body;
+  switch (body.error) {
+    case "SESSION_NOT_FOUND":
+      return {
+        error: {
+          kind: body.error,
+          message: body.message,
+          details: [`Session: ${body.sessionId}`, "HTTP status: 404"],
+        },
+        clearSnapshot: true,
+      };
+    case "UNSUPPORTED_SCHEMA":
+      return {
+        error: {
+          kind: body.error,
+          message: body.message,
+          details: [
+            `Expected schema: ${body.expectedSchemaVersion}`,
+            `Expected contract: ${body.expectedContractVersion}`,
+            `Received schema: ${body.receivedSchemaVersion ?? "unknown"}`,
+            `Received contract: ${body.receivedContractVersion ?? "unknown"}`,
+          ],
+        },
+        clearSnapshot: false,
+      };
+    case "PROJECTION_MISMATCH":
+      return {
+        error: {
+          kind: body.error,
+          message: body.message,
+          details: [
+            `Session: ${body.sessionId}`,
+            `Snapshot revision: ${body.snapshotRevision}`,
+          ],
+        },
+        clearSnapshot: false,
+      };
+    default:
+      return null;
+  }
 }
 
 function decodeError(failure: SnapshotDecodeFailure): EpochGuardViewError {
@@ -134,6 +187,29 @@ export function useEpochGuardSession({
     for (const controller of controllersRef.current) controller.abort();
     controllersRef.current.clear();
   }, []);
+
+  const applyTypedFailClosed = useCallback(
+    (reason: unknown): boolean => {
+      const failure = immediateSourceFailure(reason);
+      if (failure === null) return false;
+
+      failureCountRef.current = FAILURE_STALE_THRESHOLD;
+      hardFailureRef.current = true;
+      staleRef.current = true;
+      setError(failure.error);
+      setIsLoading(false);
+      setIsStale(true);
+      clearStaleTimer();
+
+      if (failure.clearSnapshot) {
+        latestRevisionRef.current = -1;
+        snapshotRef.current = null;
+        setSnapshot(null);
+      }
+      return true;
+    },
+    [clearStaleTimer],
+  );
 
   const readSnapshot = useCallback(
     async (
@@ -208,6 +284,7 @@ export function useEpochGuardSession({
         ) {
           return false;
         }
+        if (applyTypedFailClosed(reason)) return false;
         failureCountRef.current += 1;
         if (failureCountRef.current >= FAILURE_STALE_THRESHOLD) {
           staleRef.current = true;
@@ -220,7 +297,7 @@ export function useEpochGuardSession({
         controllersRef.current.delete(controller);
       }
     },
-    [armStaleTimer, clearStaleTimer],
+    [applyTypedFailClosed, armStaleTimer, clearStaleTimer],
   );
 
   useEffect(() => {
@@ -344,13 +421,15 @@ export function useEpochGuardSession({
         await readSnapshot(activeSource, activeSessionId, generation);
       } catch (reason) {
         if (!isAbortError(reason) && generationRef.current === generation) {
-          setError(sourceError(reason));
-          // A 409 refreshes the view exactly once; the command is never replayed.
-          if (
-            reason instanceof EpochGuardSessionSourceError &&
-            reason.status === 409
-          ) {
-            await readSnapshot(activeSource, activeSessionId, generation);
+          if (!applyTypedFailClosed(reason)) {
+            setError(sourceError(reason));
+            // A 409 refreshes the view exactly once; the command is never replayed.
+            if (
+              reason instanceof EpochGuardSessionSourceError &&
+              reason.status === 409
+            ) {
+              await readSnapshot(activeSource, activeSessionId, generation);
+            }
           }
         }
       } finally {
@@ -361,7 +440,7 @@ export function useEpochGuardSession({
         }
       }
     },
-    [readSnapshot],
+    [applyTypedFailClosed, readSnapshot],
   );
 
   const actionsDisabled =

@@ -929,6 +929,40 @@
   background: #f9faf7;
 }
 
+.eg-refresh-owner-list {
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 5px;
+  list-style: none;
+}
+
+.eg-refresh-owner-list li {
+  min-width: 0;
+  padding: 6px 7px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid #dde3de;
+  border-radius: 5px;
+  background: #fff;
+}
+
+.eg-refresh-owner-list strong {
+  color: var(--eg-deep);
+  font-size: 8px;
+}
+
+.eg-refresh-owner-list span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--eg-muted);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .eg-action-button {
   width: 100%;
   min-height: 36px;

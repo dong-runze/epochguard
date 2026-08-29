@@ -269,6 +269,18 @@ export function EpochGuardDashboard({
   const witnessReceiptIds = new Set(
     snapshot?.jointValidity.noCutProof?.witness.map((item) => item.receiptId) ?? [],
   );
+  const refreshOwners =
+    snapshot?.refreshPlan?.agentIds.flatMap((agentId) => {
+      const agent = snapshot.agents.find((candidate) => candidate.agentId === agentId);
+      return agent === undefined ? [] : [agent];
+    }) ?? [];
+  const refreshOwnerRoles = refreshOwners
+    .map((agent) => ROLE_LABELS[agent.role])
+    .join(" + ");
+  const refreshActionLabel =
+    refreshOwners.length === 1
+      ? `Re-observe ${refreshOwnerRoles} only`
+      : `Re-observe ${refreshOwnerRoles}`;
 
   const liveMessage =
     snapshot === null
@@ -462,13 +474,26 @@ export function EpochGuardDashboard({
                   {snapshot.availableActions.length === 0
                     ? "No mutation available"
                     : snapshot.availableActions[0] === "REOBSERVE_INVALID"
-                      ? "Re-observe invalid evidence"
+                      ? `Re-observe ${refreshOwnerRoles}`
                       : "Commit protected effect"}
                 </h2>
                 {snapshot.refreshPlan !== null ? (
-                  <p>
-                    Plan <code>{shortId(snapshot.refreshPlan.refreshPlanId)}</code> · {snapshot.refreshPlan.agentIds.length} owner · {snapshot.metrics.rerunsAvoided} reruns avoided
-                  </p>
+                  <>
+                    <p>
+                      Plan <code>{shortId(snapshot.refreshPlan.refreshPlanId)}</code> · {refreshOwners.length} {refreshOwners.length === 1 ? "owner" : "owners"} · {snapshot.metrics.rerunsAvoided} reruns avoided
+                    </p>
+                    <ul
+                      className="eg-refresh-owner-list"
+                      aria-label="Server-selected re-observation owners"
+                    >
+                      {refreshOwners.map((agent) => (
+                        <li key={agent.agentId}>
+                          <strong>{ROLE_LABELS[agent.role]}</strong>
+                          <span>{agent.agentNameAtAssignment}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
                 ) : (
                   <p>Actions are supplied by the authoritative Snapshot only.</p>
                 )}
@@ -479,7 +504,7 @@ export function EpochGuardDashboard({
                     disabled={controller.actionsDisabled}
                     onClick={() => void controller.refresh()}
                   >
-                    {controller.commandPending === "REFRESH" ? "Request pending…" : "Re-observe Budget only"}
+                    {controller.commandPending === "REFRESH" ? "Request pending…" : refreshActionLabel}
                   </button>
                 ) : null}
                 {snapshot.availableActions.includes("COMMIT") ? (
