@@ -28,19 +28,19 @@ export const EPOCH_REDACTION_PLACEHOLDER = "[REDACTED]" as const;
 const SENSITIVE_LABEL_SOURCE = String.raw`(?:aws[_-]?secret[_-]?access[_-]?key|ark[_-]?api[_-]?key|database[_-]?(?:url|uri)|db[_-]?(?:url|uri)|(?:(?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|password|passwd|pwd|client[_-]?secret|secret|private[_-]?key)))`;
 
 const ESCAPED_QUOTED_LABELED_SECRET = new RegExp(
-  String.raw`((?:\\?["'])?\b${SENSITIVE_LABEL_SOURCE}\b(?:\\?["'])?[ \t]*[:=][ \t]*\\(["']))([^\r\n]*?)\\\2`,
+  String.raw`((?:\\*["'])?\b${SENSITIVE_LABEL_SOURCE}\b(?:\\*["'])?[ \t]*[:=][ \t]*)(\\+)(["'])([^\r\n]*?)\2\3`,
   "gi",
 );
 const QUOTED_LABELED_SECRET = new RegExp(
-  String.raw`((?:\\?["'])?\b${SENSITIVE_LABEL_SOURCE}\b(?:\\?["'])?[ \t]*[:=][ \t]*)(["'])((?:\\.|[^\\\r\n])*?)\2`,
+  String.raw`((?:\\*["'])?\b${SENSITIVE_LABEL_SOURCE}\b(?:\\*["'])?[ \t]*[:=][ \t]*)(["'])((?:\\.|[^\\\r\n])*?)\2`,
   "gi",
 );
 const UNQUOTED_LABELED_SECRET = new RegExp(
-  String.raw`((?:\\?["'])?\b${SENSITIVE_LABEL_SOURCE}\b(?:\\?["'])?[ \t]*[:=][ \t]*)(?!\\?["'])([^,;}"'\r\n]+)`,
+  String.raw`((?:\\*["'])?\b${SENSITIVE_LABEL_SOURCE}\b(?:\\*["'])?[ \t]*[:=][ \t]*)(?!\\*["'])([^,;}"'\r\n]+)`,
   "gi",
 );
 const SENSITIVE_LABEL_CONTINUATION = new RegExp(
-  String.raw`(?:\\?["'])?\b${SENSITIVE_LABEL_SOURCE}\b(?:\\?["'])?[ \t]*[:=][ \t]*(?:\\?["'])?[ \t]*$`,
+  String.raw`(?:\\*["'])?\b${SENSITIVE_LABEL_SOURCE}\b(?:\\*["'])?[ \t]*[:=][ \t]*(?:\\*["'])?[ \t]*$`,
   "i",
 );
 const AUTHORIZATION_CONTINUATION =
@@ -217,8 +217,14 @@ function redactCredentialLine(line: string): string {
     )
     .replace(
       ESCAPED_QUOTED_LABELED_SECRET,
-      (_match: string, prefix: string, quote: string, secret: string) =>
-        `${prefix}${maskSecretPreservingReplayStructure(secret)}\\${quote}`,
+      (
+        _match: string,
+        prefix: string,
+        slashes: string,
+        quote: string,
+        secret: string,
+      ) =>
+        `${prefix}${slashes}${quote}${maskSecretPreservingReplayStructure(secret)}${slashes}${quote}`,
     )
     .replace(
       QUOTED_LABELED_SECRET,
@@ -284,9 +290,9 @@ function redactLineBoundCredentials(rawOutput: string): string {
  */
 export function redactRejectedDecisionOutput(rawOutput: string): string {
   const privateKeyBlock =
-    /-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----/gis;
+    /-----BEGIN [^-\r\n]*PRIVATE KEY(?: BLOCK)?-----.*?-----END [^-\r\n]*PRIVATE KEY(?: BLOCK)?-----/gis;
   const unterminatedPrivateKey =
-    /-----BEGIN [^-\r\n]*PRIVATE KEY-----.*$/gis;
+    /-----BEGIN [^-\r\n]*PRIVATE KEY(?: BLOCK)?-----.*$/gis;
   const privateKeysRedacted = rawOutput
     .replace(privateKeyBlock, (block) =>
       maskPrivateKeyPreservingJsonStructure(block),

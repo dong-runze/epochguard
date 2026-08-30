@@ -413,17 +413,20 @@ describe("Decision parser and normalizer", () => {
       arkCamel: "fictitious-ark-camel-key-0123456789",
       arkSnake: "fictitious-ark-snake-key-0123456789",
       arkEscaped: "fictitious-ark-escaped-key-0123456789",
+      arkMultiEscaped: "fictitious-ark-multi-escaped-key-0123456789",
       databaseUser: "fictitious_db_user",
       databasePassword: "fictitious_db_password_0123456789",
       continuedBearer: "fictitious-cross-line-bearer-0123456789",
       continuedLabel: "fictitious-cross-line-label-0123456789",
     };
+    const multiEscapeLayer = "\\".repeat(3);
     const rawOutput = [
       `Authorization: Basic ${secrets.basic}`,
       `AWS_SECRET_ACCESS_KEY=${secrets.aws}`,
       `arkApiKey: "${secrets.arkCamel}"`,
       `{"ARK_API_KEY":"${secrets.arkSnake}"}`,
       `payload={\\"arkApiKey\\":\\"${secrets.arkEscaped}\\"}`,
+      `${multiEscapeLayer}"ARK_API_KEY${multiEscapeLayer}":${multiEscapeLayer}"${secrets.arkMultiEscaped}${multiEscapeLayer}"`,
       `connection=postgresql://${secrets.databaseUser}:${secrets.databasePassword}@db.invalid/epochguard`,
       "Authorization: Bearer",
       `  "${secrets.continuedBearer}"`,
@@ -800,6 +803,92 @@ describe("Decision parser and normalizer", () => {
     expect(committed.database.sessions[0]!.activeAttemptIds).toEqual(
       databaseBefore.sessions[0]!.activeAttemptIds,
     );
+  });
+
+  it("commits redacted artifacts for complete and unterminated PGP private-key blocks", () => {
+    const cases = [
+      {
+        name: "complete",
+        secret: "fictitious-pgp-complete-payload-0123456789",
+        render: (envelope: string, secret: string) =>
+          [
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+            secret,
+            "-----END PGP PRIVATE KEY BLOCK-----",
+            envelope,
+          ].join("\n"),
+      },
+      {
+        name: "unterminated",
+        secret: "fictitious-pgp-unterminated-payload-0123456789",
+        render: (envelope: string, secret: string) =>
+          [
+            envelope,
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----",
+            secret,
+          ].join("\n"),
+      },
+    ];
+
+    for (const [index, testCase] of cases.entries()) {
+      const fixture = makeFixture();
+      const rawOutput = testCase.render(fixture.rawOutput, testCase.secret);
+      replaceRawOutput(fixture, rawOutput);
+      const originalFailure = parserFailure(rawOutput);
+      expect(originalFailure.message, testCase.name).toBe(
+        "Decision envelope cannot have leading or trailing free text",
+      );
+
+      const committed = commitMutation(fixture.database, (draft) =>
+        normalizeAndConsumeDecision(draft, fixture.attemptId, rawOutput, {
+          rejectedOutputArtifactId: `artifact_pgp_${index}`,
+          createdAt: COMPLETED,
+        }),
+      );
+      expect(committed.result.status, testCase.name).toBe("OUTPUT_REJECTED");
+      if (committed.result.status !== "OUTPUT_REJECTED") {
+        throw new Error(`Expected ${testCase.name} PGP rejection`);
+      }
+      const artifact = committed.result.rejectedOutputArtifact;
+      const sanitizedContent = artifact.sanitizedContent!;
+      expect(sanitizedContent, testCase.name).not.toContain(testCase.secret);
+      expect(Buffer.byteLength(sanitizedContent, "utf8"), testCase.name).toBe(
+        Buffer.byteLength(rawOutput, "utf8"),
+      );
+      expect(sanitizedContent.split("\n").length, testCase.name).toBe(
+        rawOutput.split("\n").length,
+      );
+      expect(
+        sanitizedContent.split(EPOCH_DECISION_OPEN_MARKER).length - 1,
+        testCase.name,
+      ).toBe(1);
+      expect(
+        sanitizedContent.split(EPOCH_DECISION_CLOSE_MARKER).length - 1,
+        testCase.name,
+      ).toBe(1);
+      expect(redactRejectedDecisionOutput(sanitizedContent), testCase.name).toBe(
+        sanitizedContent,
+      );
+      const replayFailure = parserFailure(sanitizedContent);
+      expect(
+        {
+          reasonCode: replayFailure.reasonCode,
+          message: replayFailure.message,
+        },
+        testCase.name,
+      ).toEqual({
+        reasonCode: originalFailure.reasonCode,
+        message: originalFailure.message,
+      });
+      expect(committed.database.rejectedOutputArtifacts).toEqual([artifact]);
+      expect(committed.database.runAssignments[0]).toMatchObject({
+        status: "REJECTED",
+        consumedByDecisionCertificateId: null,
+        consumedAt: null,
+      });
+      expect(committed.database.attempts[0]!.status).toBe("OUTPUT_REJECTED");
+      expect(committed.database.decisions).toEqual([]);
+    }
   });
 
   it("stores no rejected content or fragment when authoritative output exceeds 16 KiB", () => {
