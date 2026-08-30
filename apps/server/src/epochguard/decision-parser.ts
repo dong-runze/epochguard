@@ -116,6 +116,46 @@ function maskSecretPreservingReplayStructure(secret: string): string {
     .join("");
 }
 
+function maskPrivateKeyPreservingJsonStructure(privateKeyBlock: string): string {
+  return privateKeyBlock
+    .split(/(<\/?EPOCH_DECISION>)/g)
+    .map((segment) => {
+      if (
+        segment === EPOCH_DECISION_OPEN_MARKER ||
+        segment === EPOCH_DECISION_CLOSE_MARKER
+      ) {
+        return segment;
+      }
+
+      let masked = "";
+      for (let index = 0; index < segment.length; index += 1) {
+        const character = segment[index] as string;
+        if (character === "\\") {
+          const escaped = segment[index + 1];
+          const unicodeDigits = segment.slice(index + 2, index + 6);
+          if (escaped === "u" && /^[0-9a-f]{4}$/i.test(unicodeDigits)) {
+            masked += "\\u002a";
+            index += 5;
+          } else if (
+            escaped !== undefined &&
+            ['"', "\\", "/", "b", "f", "n", "r", "t"].includes(escaped)
+          ) {
+            masked += character + escaped;
+            index += 1;
+          } else {
+            masked += character;
+          }
+        } else if ('{}[],:"/\r\n\t '.includes(character)) {
+          masked += character;
+        } else {
+          masked += "*";
+        }
+      }
+      return masked;
+    })
+    .join("");
+}
+
 function redactContinuedSecretLine(line: string): string {
   const escapedQuoted = /^([ \t]*\\(["']))([^\r\n]*?)\\\2/;
   const quoted = /^([ \t]*)(["'])((?:\\.|[^\\\r\n])*?)\2/;
@@ -205,7 +245,7 @@ function redactCredentialLine(line: string): string {
 
 function redactLineBoundCredentials(rawOutput: string): string {
   const parts = rawOutput.split(/(\r\n|\n|\r)/);
-  let redactNextLine = false;
+  let continuation: "AUTHORIZATION" | "LABELED_SECRET" | null = null;
 
   for (let index = 0; index < parts.length; index += 1) {
     const part = parts[index] as string;
@@ -214,15 +254,23 @@ function redactLineBoundCredentials(rawOutput: string): string {
     }
 
     let line = part;
-    if (redactNextLine) {
+    const hasLabeledContinuationSignal =
+      /^[ \t]+/.test(line) || /^[ \t]*\\?["']/.test(line);
+    if (
+      continuation === "AUTHORIZATION" ||
+      (continuation === "LABELED_SECRET" && hasLabeledContinuationSignal)
+    ) {
       line = redactContinuedSecretLine(line);
-      redactNextLine = false;
     }
-    const continuesSensitiveValue =
-      AUTHORIZATION_CONTINUATION.test(line) ||
-      SENSITIVE_LABEL_CONTINUATION.test(line);
+    continuation = null;
+    const continuesAuthorization = AUTHORIZATION_CONTINUATION.test(line);
+    const continuesLabeledSecret = SENSITIVE_LABEL_CONTINUATION.test(line);
     parts[index] = redactCredentialLine(line);
-    redactNextLine = continuesSensitiveValue;
+    continuation = continuesAuthorization
+      ? "AUTHORIZATION"
+      : continuesLabeledSecret
+        ? "LABELED_SECRET"
+        : null;
   }
 
   return parts.join("");
@@ -241,10 +289,10 @@ export function redactRejectedDecisionOutput(rawOutput: string): string {
     /-----BEGIN [^-\r\n]*PRIVATE KEY-----.*$/gis;
   const privateKeysRedacted = rawOutput
     .replace(privateKeyBlock, (block) =>
-      maskSecretPreservingReplayStructure(block),
+      maskPrivateKeyPreservingJsonStructure(block),
     )
     .replace(unterminatedPrivateKey, (block) =>
-      maskSecretPreservingReplayStructure(block),
+      maskPrivateKeyPreservingJsonStructure(block),
     );
 
   return redactLineBoundCredentials(privateKeysRedacted);

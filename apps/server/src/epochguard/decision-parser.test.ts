@@ -475,6 +475,36 @@ describe("Decision parser and normalizer", () => {
     expect(fixture.database.decisions).toEqual([]);
   });
 
+  it("does not consume an ordinary unindented line after an empty secret label", () => {
+    const fixture = makeFixture();
+    const rawOutput = "client-secret=\nvisible_line=must_stay";
+    replaceRawOutput(fixture, rawOutput);
+
+    const committed = commitMutation(fixture.database, (draft) =>
+      normalizeAndConsumeDecision(draft, fixture.attemptId, rawOutput, {
+        rejectedOutputArtifactId: "artifact_empty_label_boundary",
+        createdAt: COMPLETED,
+      }),
+    );
+    expect(committed.result.status).toBe("OUTPUT_REJECTED");
+    if (committed.result.status !== "OUTPUT_REJECTED") {
+      throw new Error("Expected empty-label rejection");
+    }
+    expect(
+      committed.result.rejectedOutputArtifact.sanitizedContent,
+    ).toBe(rawOutput);
+    expect(committed.database.rejectedOutputArtifacts).toEqual([
+      committed.result.rejectedOutputArtifact,
+    ]);
+    expect(committed.database.runAssignments[0]).toMatchObject({
+      status: "REJECTED",
+      consumedByDecisionCertificateId: null,
+      consumedAt: null,
+    });
+    expect(committed.database.attempts[0]!.status).toBe("OUTPUT_REJECTED");
+    expect(committed.database.decisions).toEqual([]);
+  });
+
   it("preserves schema and JSON parser failures while masking necessary length and newlines", () => {
     const source = makeFixture();
     const schemaSecret = "fictitious-schema-ark-key-0123456789";
@@ -705,6 +735,70 @@ describe("Decision parser and normalizer", () => {
     ).toEqual(decisionPointersBefore);
     expect(fixture.database.sessions[0]!.activeAttemptIds).toEqual(
       attemptPointersBefore,
+    );
+  });
+
+  it("commits a replay-equivalent artifact for private-key text with an unescaped quote", () => {
+    const fixture = makeFixture();
+    const privateSecret = "fictitious-unescaped-private-secret-0123456789";
+    const malformedJson = JSON.stringify({
+      ...fixture.envelope,
+      reason: "private-key-placeholder",
+    }).replace(
+      '"reason":"private-key-placeholder"',
+      `"reason":"-----BEGIN PRIVATE KEY-----${privateSecret}\\\\segment"unescaped"-----END PRIVATE KEY-----"`,
+    );
+    const rawOutput =
+      `${EPOCH_DECISION_OPEN_MARKER}\n${malformedJson}\n` +
+      EPOCH_DECISION_CLOSE_MARKER;
+    replaceRawOutput(fixture, rawOutput);
+    const originalFailure = parserFailure(rawOutput);
+    expect(originalFailure.message).toBe(
+      "Decision envelope contains invalid JSON",
+    );
+    const databaseBefore = structuredClone(fixture.database);
+
+    const committed = commitMutation(fixture.database, (draft) =>
+      normalizeAndConsumeDecision(draft, fixture.attemptId, rawOutput, {
+        rejectedOutputArtifactId: "artifact_private_key_quote",
+        createdAt: COMPLETED,
+      }),
+    );
+    expect(committed.result.status).toBe("OUTPUT_REJECTED");
+    if (committed.result.status !== "OUTPUT_REJECTED") {
+      throw new Error("Expected private-key quote rejection");
+    }
+    const artifact = committed.result.rejectedOutputArtifact;
+    const sanitizedContent = artifact.sanitizedContent!;
+    expect(sanitizedContent).not.toContain(privateSecret);
+    expect(sanitizedContent).toContain("\\\\");
+    expect(Buffer.byteLength(sanitizedContent, "utf8")).toBe(
+      Buffer.byteLength(rawOutput, "utf8"),
+    );
+    expect(redactRejectedDecisionOutput(sanitizedContent)).toBe(
+      sanitizedContent,
+    );
+    const replayFailure = parserFailure(sanitizedContent);
+    expect({
+      reasonCode: replayFailure.reasonCode,
+      message: replayFailure.message,
+    }).toEqual({
+      reasonCode: originalFailure.reasonCode,
+      message: originalFailure.message,
+    });
+    expect(committed.database.rejectedOutputArtifacts).toEqual([artifact]);
+    expect(committed.database.runAssignments[0]).toMatchObject({
+      status: "REJECTED",
+      consumedByDecisionCertificateId: null,
+      consumedAt: null,
+    });
+    expect(committed.database.attempts[0]!.status).toBe("OUTPUT_REJECTED");
+    expect(committed.database.decisions).toEqual([]);
+    expect(
+      committed.database.sessions[0]!.activeDecisionCertificateIds,
+    ).toEqual(databaseBefore.sessions[0]!.activeDecisionCertificateIds);
+    expect(committed.database.sessions[0]!.activeAttemptIds).toEqual(
+      databaseBefore.sessions[0]!.activeAttemptIds,
     );
   });
 
