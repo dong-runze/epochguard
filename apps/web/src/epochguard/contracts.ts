@@ -1,9 +1,9 @@
 import { z } from "zod";
 
-export const CONTRACT_VERSION = "epochguard-contract-v6" as const;
+export const CONTRACT_VERSION = "epochguard-contract-v7" as const;
 export const CONTRACT_SCHEMA_VERSION = 1 as const;
 export const CONTRACT_DIGEST =
-  "sha256:5bdce49d3daa3764bbc67dcafb26c231b328d92b184e59e56d01a90eddc59dbf" as const;
+  "sha256:4dfbeb9e55de7ca17a19f5fb8f99494b17e441af0f877767027284d3ae646361" as const;
 
 export const ROLES = ["inventory", "budget", "policy"] as const;
 export const SCENARIO_IDS = ["normal-world-v1", "impossible-collage-v1"] as const;
@@ -1600,6 +1600,10 @@ export const UNSUPPORTED_SCHEMA_MESSAGE =
   "EpochGuard schema or contract version is unsupported." as const;
 export const PROJECTION_MISMATCH_MESSAGE =
   "EpochGuard projection failed safety reconciliation." as const;
+export const UNSTABLE_WORLD_MESSAGE =
+  "World state changed during re-observation; start a new session." as const;
+export const ROLE_PROFILE_MISMATCH_MESSAGE =
+  "The assigned Agent does not match the required Role profile." as const;
 
 export const API_ERROR_STATUS = {
   STALE_VIEW: 409,
@@ -1609,6 +1613,8 @@ export const API_ERROR_STATUS = {
   SESSION_NOT_FOUND: 404,
   UNSUPPORTED_SCHEMA: 422,
   PROJECTION_MISMATCH: 500,
+  UNSTABLE_WORLD: 409,
+  ROLE_PROFILE_MISMATCH: 409,
 } as const;
 
 export const StaleViewErrorBodySchema = z
@@ -1704,10 +1710,34 @@ export const ProjectionMismatchErrorBodySchema = z
 export type ProjectionMismatchErrorBody = z.infer<
   typeof ProjectionMismatchErrorBodySchema
 >;
+export const UnstableWorldErrorBodySchema = z
+  .object({
+    error: z.literal("UNSTABLE_WORLD"),
+    message: z.literal(UNSTABLE_WORLD_MESSAGE),
+    sessionId: OpaqueIdSchema.nullable(),
+    actualWorldHead: z.number().int().nonnegative(),
+  })
+  .strict();
+export type UnstableWorldErrorBody = z.infer<
+  typeof UnstableWorldErrorBodySchema
+>;
+export const RoleProfileMismatchErrorBodySchema = z
+  .object({
+    error: z.literal("ROLE_PROFILE_MISMATCH"),
+    message: z.literal(ROLE_PROFILE_MISMATCH_MESSAGE),
+    role: RoleSchema,
+    agentId: OpaqueIdSchema,
+  })
+  .strict();
+export type RoleProfileMismatchErrorBody = z.infer<
+  typeof RoleProfileMismatchErrorBodySchema
+>;
 export const ConflictErrorBodySchema = z.discriminatedUnion("error", [
   StaleViewErrorBodySchema,
   AlreadyReobservingErrorBodySchema,
   AgentsBusyErrorBodySchema,
+  UnstableWorldErrorBodySchema,
+  RoleProfileMismatchErrorBodySchema,
 ]);
 export type ConflictErrorBody = z.infer<typeof ConflictErrorBodySchema>;
 
@@ -1719,6 +1749,8 @@ export const ApiErrorBodySchema = z.discriminatedUnion("error", [
   SessionNotFoundErrorBodySchema,
   UnsupportedSchemaErrorBodySchema,
   ProjectionMismatchErrorBodySchema,
+  UnstableWorldErrorBodySchema,
+  RoleProfileMismatchErrorBodySchema,
 ]);
 export type ApiErrorBody = z.infer<typeof ApiErrorBodySchema>;
 
@@ -1728,6 +1760,8 @@ export const CONTRACT_SEMANTIC_INVARIANTS = [
   "RoleQuerySpec is reconstructed by role and queryHash excludes only queryHash itself",
   "CreateSessionRequest assignments contain three distinct Agents",
   "same Role-Agent triple conflicts with 409 AGENTS_BUSY before dispatch",
+  "UNSTABLE_WORLD is exactly HTTP 409 with a fixed message, nullable Opaque sessionId, and nonnegative integer actualWorldHead",
+  "ROLE_PROFILE_MISMATCH is exactly HTTP 409 with a fixed message, Role, and Opaque Agent identity",
   "ResourceVersion.validUntilSeq is null or strictly greater than validFromSeq",
   "PARSE_REJECTED byte length is <=16384, sanitizedContent may be empty, its non-null digest equals sha256(content), and truncated=false",
   "OUTPUT_TOO_LARGE byte length is >16384, content/digest are null, truncated=true",
@@ -1778,6 +1812,8 @@ export const WEB_CONTRACT_SCHEMA_REGISTRY = {
   SessionNotFoundErrorBody: SessionNotFoundErrorBodySchema,
   UnsupportedSchemaErrorBody: UnsupportedSchemaErrorBodySchema,
   ProjectionMismatchErrorBody: ProjectionMismatchErrorBodySchema,
+  UnstableWorldErrorBody: UnstableWorldErrorBodySchema,
+  RoleProfileMismatchErrorBody: RoleProfileMismatchErrorBodySchema,
   ConflictErrorBody: ConflictErrorBodySchema,
   ApiErrorBody: ApiErrorBodySchema,
 } as const satisfies Record<string, z.ZodType>;

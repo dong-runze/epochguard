@@ -14,6 +14,7 @@ import {
   ApiErrorBodySchema,
   ArtifactRefSchema,
   CommitSessionRequestSchema,
+  ConflictErrorBodySchema,
   CONTRACT_DIGEST,
   CONTRACT_DIGEST_ALGORITHM,
   CONTRACT_DIGEST_PLACEHOLDER,
@@ -37,7 +38,9 @@ import {
   PROJECTION_MISMATCH_MESSAGE,
   RECOVERED_GOLDEN_SNAPSHOT,
   REFRESH_PLAN_REASON_CODES,
+  ROLE_PROFILE_MISMATCH_MESSAGE,
   RejectedOutputArtifactSchema,
+  RoleProfileMismatchErrorBodySchema,
   RefreshSessionRequestSchema,
   ROLES,
   SESSION_NOT_FOUND_MESSAGE,
@@ -47,7 +50,9 @@ import {
   ScenarioFixtureManifestEntrySchema,
   SessionDashboardSnapshotSchema,
   SNAPSHOT_UNIVERSAL_SAFETY_RULES,
+  UNSTABLE_WORLD_MESSAGE,
   UNSUPPORTED_SCHEMA_MESSAGE,
+  UnstableWorldErrorBodySchema,
   actionHash,
   buildContractDigestDocument,
   buildRoleQuerySpec,
@@ -60,8 +65,10 @@ import {
   makeAlreadyReobservingError,
   makeMissingActionFieldsError,
   makeProjectionMismatchError,
+  makeRoleProfileMismatchError,
   makeSessionNotFoundError,
   makeStaleViewError,
+  makeUnstableWorldError,
   makeUnsupportedSchemaError,
   normalizeContractDigestReferences,
   sha256Digest,
@@ -456,10 +463,10 @@ function makePersistedAttempt(status: string): any {
 }
 
 describe("EpochGuard frozen contract", () => {
-  it("freezes v6 over complete JSON Schemas, invariants, fixtures, and Snapshots", () => {
-    expect(CONTRACT_VERSION).toBe("epochguard-contract-v6");
+  it("freezes v7 over complete JSON Schemas, invariants, fixtures, and Snapshots", () => {
+    expect(CONTRACT_VERSION).toBe("epochguard-contract-v7");
     expect(CONTRACT_DIGEST).toBe(
-      "sha256:5bdce49d3daa3764bbc67dcafb26c231b328d92b184e59e56d01a90eddc59dbf",
+      "sha256:4dfbeb9e55de7ca17a19f5fb8f99494b17e441af0f877767027284d3ae646361",
     );
     expect(computeContractDigest()).toBe(CONTRACT_DIGEST);
     expect(computeContractDigest(CONTRACT_MANIFEST)).toBe(CONTRACT_DIGEST);
@@ -476,13 +483,29 @@ describe("EpochGuard frozen contract", () => {
     expect(document.schemas.RefreshPlanReasonCode.enum).toEqual(
       REFRESH_PLAN_REASON_CODES,
     );
-    expect(CONTRACT_SEMANTIC_INVARIANTS).toHaveLength(32);
+    expect(CONTRACT_SEMANTIC_INVARIANTS).toHaveLength(34);
     expect(document.semanticInvariants).toEqual(CONTRACT_SEMANTIC_INVARIANTS);
     expect(document.authoritativeSnapshotProjectionRules).toEqual(
       AUTHORITATIVE_SNAPSHOT_PROJECTION_RULES,
     );
     expect(document.snapshotUniversalSafetyRules).toEqual(
       SNAPSHOT_UNIVERSAL_SAFETY_RULES,
+    );
+    expect(document.errorFieldManifest.unstableWorld).toEqual({
+      error: "UNSTABLE_WORLD",
+      message: UNSTABLE_WORLD_MESSAGE,
+      fields: ["error", "message", "sessionId", "actualWorldHead"],
+    });
+    expect(document.errorFieldManifest.roleProfileMismatch).toEqual({
+      error: "ROLE_PROFILE_MISMATCH",
+      message: ROLE_PROFILE_MISMATCH_MESSAGE,
+      fields: ["error", "message", "role", "agentId"],
+    });
+    expect(document.exactErrorBodies.unstableWorld).toEqual(
+      makeUnstableWorldError(null, 22),
+    );
+    expect(document.exactErrorBodies.roleProfileMismatch).toEqual(
+      makeRoleProfileMismatchError("budget", "agent_budget"),
     );
     expect(document.fixtures).toEqual(GOLDEN_FIXTURE_MANIFEST);
     expect(document.goldenSnapshots.normalReady.contractDigest).toBe(
@@ -515,6 +538,12 @@ describe("EpochGuard frozen contract", () => {
     safetyRule.snapshotUniversalSafetyRules.receiptTemporal.pop();
     const fixture = mutableClone(CONTRACT_MANIFEST);
     fixture.fixtures[0].expected.initialEffectsInSession = 1;
+    const errorFieldManifest = mutableClone(CONTRACT_MANIFEST);
+    errorFieldManifest.errorFieldManifest.unstableWorld.fields.pop();
+    const errorStatus = mutableClone(CONTRACT_MANIFEST);
+    errorStatus.errorStatuses.ROLE_PROFILE_MISMATCH = 422;
+    const errorVector = mutableClone(CONTRACT_MANIFEST);
+    errorVector.exactErrorBodies.unstableWorld.actualWorldHead = 23;
 
     for (const tampered of [
       nestedNullability,
@@ -524,6 +553,9 @@ describe("EpochGuard frozen contract", () => {
       projectionRule,
       safetyRule,
       fixture,
+      errorFieldManifest,
+      errorStatus,
+      errorVector,
     ]) {
       expect(computeContractDigest(tampered)).not.toBe(CONTRACT_DIGEST);
     }
@@ -829,7 +861,7 @@ describe("EpochGuard frozen contract", () => {
     ).toBe(false);
   });
 
-  it("freezes exact conflict, 422, 404, Schema, and projection error bodies", () => {
+  it("freezes exact conflict, 422, 404, Schema, projection, and v7 public error bodies", () => {
     const stale = makeStaleViewError("session_1", 4, 5);
     expect(stale).toEqual({
       error: "STALE_VIEW",
@@ -893,6 +925,27 @@ describe("EpochGuard frozen contract", () => {
       sessionId: "session_1",
       snapshotRevision: 8,
     });
+    const unstable = makeUnstableWorldError(null, 22);
+    expect(unstable).toEqual({
+      error: "UNSTABLE_WORLD",
+      message: UNSTABLE_WORLD_MESSAGE,
+      sessionId: null,
+      actualWorldHead: 22,
+    });
+    const roleProfileMismatch = makeRoleProfileMismatchError(
+      "policy",
+      "agent_policy",
+    );
+    expect(roleProfileMismatch).toEqual({
+      error: "ROLE_PROFILE_MISMATCH",
+      message: ROLE_PROFILE_MISMATCH_MESSAGE,
+      role: "policy",
+      agentId: "agent_policy",
+    });
+    expect(webContracts.UNSTABLE_WORLD_MESSAGE).toBe(UNSTABLE_WORLD_MESSAGE);
+    expect(webContracts.ROLE_PROFILE_MISMATCH_MESSAGE).toBe(
+      ROLE_PROFILE_MISMATCH_MESSAGE,
+    );
     expect(API_ERROR_STATUS).toEqual({
       STALE_VIEW: 409,
       ALREADY_REOBSERVING: 409,
@@ -901,6 +954,8 @@ describe("EpochGuard frozen contract", () => {
       SESSION_NOT_FOUND: 404,
       UNSUPPORTED_SCHEMA: 422,
       PROJECTION_MISMATCH: 500,
+      UNSTABLE_WORLD: 409,
+      ROLE_PROFILE_MISMATCH: 409,
     });
     for (const body of [
       stale,
@@ -910,9 +965,88 @@ describe("EpochGuard frozen contract", () => {
       notFound,
       unsupported,
       projection,
+      unstable,
+      roleProfileMismatch,
     ]) {
-      expect(ApiErrorBodySchema.parse(body)).toEqual(body);
-      expect(webContracts.ApiErrorBodySchema.parse(body)).toEqual(body);
+      const serverDecoded = ApiErrorBodySchema.parse(body);
+      const webDecoded = webContracts.ApiErrorBodySchema.parse(body);
+      expect(webDecoded).toEqual(serverDecoded);
+      expect(serverDecoded).toEqual(body);
+    }
+    for (const body of [
+      stale,
+      reobserving,
+      busy,
+      unstable,
+      roleProfileMismatch,
+    ]) {
+      expect(ConflictErrorBodySchema.parse(body)).toEqual(body);
+      expect(webContracts.ConflictErrorBodySchema.parse(body)).toEqual(body);
+    }
+  });
+
+  it("rejects malformed v7 public errors symmetrically while accepting nullable session identity", () => {
+    const unstable = makeUnstableWorldError(null, 0);
+    const unstableWithSession = makeUnstableWorldError("session_1", 7);
+    const mismatch = makeRoleProfileMismatchError("budget", "agent_budget");
+    for (const body of [unstable, unstableWithSession]) {
+      expect(UnstableWorldErrorBodySchema.parse(body)).toEqual(body);
+      expect(webContracts.UnstableWorldErrorBodySchema.parse(body)).toEqual(
+        body,
+      );
+    }
+    expect(RoleProfileMismatchErrorBodySchema.parse(mismatch)).toEqual(mismatch);
+    expect(webContracts.RoleProfileMismatchErrorBodySchema.parse(mismatch)).toEqual(
+      mismatch,
+    );
+
+    const malformedUnstable = [
+      { ...unstable, actualWorldHead: undefined },
+      {
+        error: "UNSTABLE_WORLD",
+        message: UNSTABLE_WORLD_MESSAGE,
+        actualWorldHead: 0,
+      },
+      { ...unstable, unexpected: true },
+      { ...unstable, error: "ROLE_PROFILE_MISMATCH" },
+      { ...unstable, message: "World changed." },
+      { ...unstable, sessionId: "invalid session id" },
+      { ...unstable, actualWorldHead: -1 },
+      { ...unstable, actualWorldHead: 1.5 },
+      { ...unstable, actualWorldHead: "1" },
+    ];
+    for (const body of malformedUnstable) {
+      expect(UnstableWorldErrorBodySchema.safeParse(body).success).toBe(false);
+      expect(
+        webContracts.UnstableWorldErrorBodySchema.safeParse(body).success,
+      ).toBe(false);
+      expect(ApiErrorBodySchema.safeParse(body).success).toBe(false);
+      expect(webContracts.ApiErrorBodySchema.safeParse(body).success).toBe(false);
+    }
+
+    const malformedMismatch = [
+      { ...mismatch, role: undefined },
+      {
+        error: "ROLE_PROFILE_MISMATCH",
+        message: ROLE_PROFILE_MISMATCH_MESSAGE,
+        role: "budget",
+      },
+      { ...mismatch, unexpected: true },
+      { ...mismatch, error: "UNSTABLE_WORLD" },
+      { ...mismatch, message: "Profile mismatch." },
+      { ...mismatch, role: "pricing" },
+      { ...mismatch, agentId: "invalid agent id" },
+      { ...mismatch, agentId: null },
+    ];
+    for (const body of malformedMismatch) {
+      expect(RoleProfileMismatchErrorBodySchema.safeParse(body).success).toBe(
+        false,
+      );
+      expect(
+        webContracts.RoleProfileMismatchErrorBodySchema.safeParse(body).success,
+      ).toBe(false);
+      expect(ApiErrorBodySchema.safeParse(body).success).toBe(false);
+      expect(webContracts.ApiErrorBodySchema.safeParse(body).success).toBe(false);
     }
   });
 

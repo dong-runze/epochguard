@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-export const CONTRACT_VERSION = "epochguard-contract-v6" as const;
+export const CONTRACT_VERSION = "epochguard-contract-v7" as const;
 export const CONTRACT_SCHEMA_VERSION = 1 as const;
 export const CONTRACT_DIGEST =
-  "sha256:5bdce49d3daa3764bbc67dcafb26c231b328d92b184e59e56d01a90eddc59dbf" as const;
+  "sha256:4dfbeb9e55de7ca17a19f5fb8f99494b17e441af0f877767027284d3ae646361" as const;
 
 export const ROLES = ["inventory", "budget", "policy"] as const;
 export const SOURCES = ["inventory", "budget", "policy"] as const;
@@ -2155,6 +2155,10 @@ export const UNSUPPORTED_SCHEMA_MESSAGE =
   "EpochGuard schema or contract version is unsupported." as const;
 export const PROJECTION_MISMATCH_MESSAGE =
   "EpochGuard projection failed safety reconciliation." as const;
+export const UNSTABLE_WORLD_MESSAGE =
+  "World state changed during re-observation; start a new session." as const;
+export const ROLE_PROFILE_MISMATCH_MESSAGE =
+  "The assigned Agent does not match the required Role profile." as const;
 
 export const API_ERROR_STATUS = {
   STALE_VIEW: 409,
@@ -2164,6 +2168,8 @@ export const API_ERROR_STATUS = {
   SESSION_NOT_FOUND: 404,
   UNSUPPORTED_SCHEMA: 422,
   PROJECTION_MISMATCH: 500,
+  UNSTABLE_WORLD: 409,
+  ROLE_PROFILE_MISMATCH: 409,
 } as const;
 
 export const StaleViewErrorBodySchema = z
@@ -2266,10 +2272,36 @@ export type ProjectionMismatchErrorBody = z.infer<
   typeof ProjectionMismatchErrorBodySchema
 >;
 
+export const UnstableWorldErrorBodySchema = z
+  .object({
+    error: z.literal("UNSTABLE_WORLD"),
+    message: z.literal(UNSTABLE_WORLD_MESSAGE),
+    sessionId: OpaqueIdSchema.nullable(),
+    actualWorldHead: z.number().int().nonnegative(),
+  })
+  .strict();
+export type UnstableWorldErrorBody = z.infer<
+  typeof UnstableWorldErrorBodySchema
+>;
+
+export const RoleProfileMismatchErrorBodySchema = z
+  .object({
+    error: z.literal("ROLE_PROFILE_MISMATCH"),
+    message: z.literal(ROLE_PROFILE_MISMATCH_MESSAGE),
+    role: RoleSchema,
+    agentId: OpaqueIdSchema,
+  })
+  .strict();
+export type RoleProfileMismatchErrorBody = z.infer<
+  typeof RoleProfileMismatchErrorBodySchema
+>;
+
 export const ConflictErrorBodySchema = z.discriminatedUnion("error", [
   StaleViewErrorBodySchema,
   AlreadyReobservingErrorBodySchema,
   AgentsBusyErrorBodySchema,
+  UnstableWorldErrorBodySchema,
+  RoleProfileMismatchErrorBodySchema,
 ]);
 export type ConflictErrorBody = z.infer<typeof ConflictErrorBodySchema>;
 
@@ -2281,6 +2313,8 @@ export const ApiErrorBodySchema = z.discriminatedUnion("error", [
   SessionNotFoundErrorBodySchema,
   UnsupportedSchemaErrorBodySchema,
   ProjectionMismatchErrorBodySchema,
+  UnstableWorldErrorBodySchema,
+  RoleProfileMismatchErrorBodySchema,
 ]);
 export type ApiErrorBody = z.infer<typeof ApiErrorBodySchema>;
 
@@ -2361,6 +2395,28 @@ export const makeProjectionMismatchError = (
     message: PROJECTION_MISMATCH_MESSAGE,
     sessionId,
     snapshotRevision,
+  });
+
+export const makeUnstableWorldError = (
+  sessionId: string | null,
+  actualWorldHead: number,
+): UnstableWorldErrorBody =>
+  UnstableWorldErrorBodySchema.parse({
+    error: "UNSTABLE_WORLD",
+    message: UNSTABLE_WORLD_MESSAGE,
+    sessionId,
+    actualWorldHead,
+  });
+
+export const makeRoleProfileMismatchError = (
+  role: Role,
+  agentId: string,
+): RoleProfileMismatchErrorBody =>
+  RoleProfileMismatchErrorBodySchema.parse({
+    error: "ROLE_PROFILE_MISMATCH",
+    message: ROLE_PROFILE_MISMATCH_MESSAGE,
+    role,
+    agentId,
   });
 
 export const ScenarioFixtureManifestEntrySchema = z
@@ -2916,6 +2972,16 @@ const CONTRACT_FIELD_MANIFEST = {
       message: AGENTS_BUSY_MESSAGE,
       fields: ["error", "message", "activeSessionId", "assignments"],
     },
+    unstableWorld: {
+      error: "UNSTABLE_WORLD",
+      message: UNSTABLE_WORLD_MESSAGE,
+      fields: ["error", "message", "sessionId", "actualWorldHead"],
+    },
+    roleProfileMismatch: {
+      error: "ROLE_PROFILE_MISMATCH",
+      message: ROLE_PROFILE_MISMATCH_MESSAGE,
+      fields: ["error", "message", "role", "agentId"],
+    },
   },
   canonicalization: {
     algorithm: "epochguard-canonical-json-v1:recursive-lexicographic-keys",
@@ -3271,6 +3337,8 @@ export const CONTRACT_SCHEMA_REGISTRY = {
   SessionNotFoundErrorBody: SessionNotFoundErrorBodySchema,
   UnsupportedSchemaErrorBody: UnsupportedSchemaErrorBodySchema,
   ProjectionMismatchErrorBody: ProjectionMismatchErrorBodySchema,
+  UnstableWorldErrorBody: UnstableWorldErrorBodySchema,
+  RoleProfileMismatchErrorBody: RoleProfileMismatchErrorBodySchema,
   ConflictErrorBody: ConflictErrorBodySchema,
   ApiErrorBody: ApiErrorBodySchema,
   ScenarioFixtureManifestEntry: ScenarioFixtureManifestEntrySchema,
@@ -3297,6 +3365,8 @@ export const SHARED_CONTRACT_SCHEMA_NAMES = [
   "SessionNotFoundErrorBody",
   "UnsupportedSchemaErrorBody",
   "ProjectionMismatchErrorBody",
+  "UnstableWorldErrorBody",
+  "RoleProfileMismatchErrorBody",
   "ConflictErrorBody",
   "ApiErrorBody",
 ] as const;
@@ -3307,6 +3377,8 @@ export const CONTRACT_SEMANTIC_INVARIANTS = [
   "RoleQuerySpec is reconstructed by role and queryHash excludes only queryHash itself",
   "CreateSessionRequest assignments contain three distinct Agents",
   "same Role-Agent triple conflicts with 409 AGENTS_BUSY before dispatch",
+  "UNSTABLE_WORLD is exactly HTTP 409 with a fixed message, nullable Opaque sessionId, and nonnegative integer actualWorldHead",
+  "ROLE_PROFILE_MISMATCH is exactly HTTP 409 with a fixed message, Role, and Opaque Agent identity",
   "ResourceVersion.validUntilSeq is null or strictly greater than validFromSeq",
   "PARSE_REJECTED byte length is <=16384, sanitizedContent may be empty, its non-null digest equals sha256(content), and truncated=false",
   "OUTPUT_TOO_LARGE byte length is >16384, content/digest are null, truncated=true",
@@ -3382,13 +3454,13 @@ export function normalizeContractDigestReferences(
 
 export const GOLDEN_SNAPSHOT_HASHES = {
   normalReady:
-    "sha256:b492c1a50b7149f9bc0d4d1edf00923f0b02d250019cbd09218c85b05c7c4bea",
+    "sha256:b65ccde30c84bd9b36772971face79d5d42608b1817869a60c88e23ba5e9f631",
   normalReleased:
-    "sha256:4f0f575f2e16f71d29d3d5752ec1052284fe6fa85f34877f8911a4284b626de5",
+    "sha256:24af496b6d3dd884a862f06554c29ee0bf48a0375c4aa0937bd15a388621f4ab",
   impossible:
-    "sha256:2d4c26c1ccf8fa57277be7f30e566e3c288f6781c31d9f724f6f08819e10b563",
+    "sha256:f6fb69ea55fda2a4423e81a23f89aaaa3b4d6688d82608ae6f33e2c20eb09f0d",
   recovered:
-    "sha256:ca2f379f8c7e6f0657fb0f743bbfac6e79a34585c8352d0c5bc96a336192d8a8",
+    "sha256:fe13811acfe4314452d694b99be1569df041208c2296866ee395a3608a2db30c",
 } as const;
 
 function contractJsonSchema(schema: z.ZodType): JsonValue {
@@ -3451,6 +3523,7 @@ export function buildContractDigestDocument(): JsonValue {
     },
     artifactRefTargets: ARTIFACT_REF_TARGETS,
     errorStatuses: API_ERROR_STATUS,
+    errorFieldManifest: CONTRACT_FIELD_MANIFEST.errors,
     exactErrorBodies: {
       staleView: makeStaleViewError("session_example", 4, 5),
       alreadyReobserving: makeAlreadyReobservingError(
@@ -3467,6 +3540,11 @@ export function buildContractDigestDocument(): JsonValue {
       sessionNotFound: makeSessionNotFoundError("session_missing"),
       unsupportedSchema: makeUnsupportedSchemaError(2, "epochguard-contract-v1"),
       projectionMismatch: makeProjectionMismatchError("session_example", 7),
+      unstableWorld: makeUnstableWorldError(null, 22),
+      roleProfileMismatch: makeRoleProfileMismatchError(
+        "budget",
+        "agent_budget",
+      ),
     },
     fixtures: GOLDEN_FIXTURE_MANIFEST,
     goldenSnapshots: snapshots,
