@@ -429,31 +429,9 @@ export function validateJointValidity(
     };
   }
 
-  if (decisions.some((decision) => decision.verdict === "DENY")) {
-    const validationRecord = makeValidationRecord({
-      validationId,
-      sessionId: session.sessionId,
-      actionHash: session.actionHash,
-      baseSessionRevision: session.sessionRevision,
-      decisionCertificateIds: ids,
-      dependencySetHash,
-      validatedHead: head,
-      outcome: "CONSISTENT_DENY",
-      lowerBound,
-      upperBound,
-      jointValidityCertificateId: null,
-      noCutProofId: null,
-      verificationLatencyMs,
-      createdAt,
-    });
-    return {
-      validationRecord,
-      jointValidityCertificate: null,
-      noCutProof: null,
-      currentInvalidAgentIds,
-    };
-  }
-
+  const outcome = decisions.some((decision) => decision.verdict === "DENY")
+    ? "CONSISTENT_DENY"
+    : "VALID_CURRENT_ALLOW";
   const jointValidityCertificateId =
     options.jointValidityCertificateId ?? randomUUID();
   const jointValidityCertificate = JointValidityCertificateSchema.parse({
@@ -484,7 +462,7 @@ export function validateJointValidity(
     decisionCertificateIds: ids,
     dependencySetHash,
     validatedHead: head,
-    outcome: "VALID_CURRENT_ALLOW",
+    outcome,
     lowerBound,
     upperBound,
     jointValidityCertificateId,

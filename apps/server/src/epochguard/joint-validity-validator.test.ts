@@ -433,12 +433,79 @@ describe("Joint validity validator", () => {
     });
   });
 
-  it("returns CONSISTENT_DENY without a JVC when current evidence denies", () => {
+  it("returns CONSISTENT_DENY with a bound current-head JVC and no Permit", () => {
     const fixture = makeFixture({ verdicts: { policy: "DENY" } });
+    const before = structuredClone(fixture.database);
     const result = runValidation(fixture);
-    expect(result.validationRecord.outcome).toBe("CONSISTENT_DENY");
-    expect(result.jointValidityCertificate).toBeNull();
+    const decisionCertificateIds = [
+      "decision_inventory",
+      "decision_budget",
+      "decision_policy",
+    ] as const;
+    const dependencySetHash = jointValidityDependencySetHash([
+      "receipt_inventory",
+      "receipt_budget",
+      "receipt_policy",
+    ]);
+
+    expect(result.validationRecord).toEqual({
+      validationId: "validation_1",
+      sessionId: fixture.sessionId,
+      actionHash: GOLDEN_ACTION_HASH,
+      baseSessionRevision: 7,
+      decisionCertificateIds,
+      dependencySetHash,
+      validatedHead: 10,
+      outcome: "CONSISTENT_DENY",
+      lowerBound: 10,
+      upperBound: 11,
+      jointValidityCertificateId: "jvc_1",
+      noCutProofId: null,
+      refreshPlanId: null,
+      verificationLatencyMs: 7,
+      createdAt: COMPLETED,
+    });
+    expect(result.jointValidityCertificate).toEqual({
+      certificateId: "jvc_1",
+      validationId: "validation_1",
+      sessionId: fixture.sessionId,
+      actionHash: GOLDEN_ACTION_HASH,
+      dependencySetHash,
+      validatedAtHead: 10,
+      selectedCutSeq: 10,
+      currentHeadCovered: true,
+      decisionCertificateIds,
+      intervals: [
+        {
+          receiptId: "receipt_inventory",
+          source: "inventory",
+          sourceRevision: 10,
+          from: 10,
+          until: null,
+        },
+        {
+          receiptId: "receipt_budget",
+          source: "budget",
+          sourceRevision: 10,
+          from: 10,
+          until: null,
+        },
+        {
+          receiptId: "receipt_policy",
+          source: "policy",
+          sourceRevision: 10,
+          from: 10,
+          until: null,
+        },
+      ],
+      validatorVersion: "epochguard-jv-v1",
+      createdAt: COMPLETED,
+    });
     expect(result.noCutProof).toBeNull();
+    expect(result.currentInvalidAgentIds).toEqual([]);
+    expect(fixture.database.permits).toEqual([]);
+    expect(fixture.database.effects).toEqual([]);
+    expect(fixture.database).toEqual(before);
   });
 
   it("fails closed for unknown, truncated, future, and mismatched history", () => {
