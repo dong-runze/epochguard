@@ -194,15 +194,54 @@ const SYSTEM_ID_CONTEXT: SensitiveTextContext = {
 const BARE_RANDOM_HEX_SECRET_PATTERN =
   /(?:^|[^0-9A-Fa-f])(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{40}|[0-9A-Fa-f]{32})(?=$|[^0-9A-Fa-f])/;
 
+const RFC4122_UUID_PATTERN =
+  /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}$/;
+const CROCKFORD_ULID_PATTERN = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+const STRUCTURED_HEX_SYSTEM_ID_PATTERN =
+  /^(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{40}|[0-9A-Fa-f]{32})$/;
+const UUID_SYSTEM_ID_PREFIXES = new Set([
+  "session",
+  "action",
+  "attempt",
+  "effect",
+  "assignment",
+  "receipt",
+  "decision",
+  "rejected",
+  "validation",
+  "jvc",
+  "proof",
+  "permit",
+  "refresh",
+  "event",
+  "diagnostic",
+  "run",
+]);
+
+function isAllowedHighEntropySystemId(value: string): boolean {
+  if (
+    RFC4122_UUID_PATTERN.test(value) ||
+    CROCKFORD_ULID_PATTERN.test(value) ||
+    STRUCTURED_HEX_SYSTEM_ID_PATTERN.test(value)
+  ) {
+    return true;
+  }
+  const separator = value.indexOf("_");
+  return (
+    separator > 0 &&
+    UUID_SYSTEM_ID_PREFIXES.has(value.slice(0, separator)) &&
+    RFC4122_UUID_PATTERN.test(value.slice(separator + 1))
+  );
+}
+
 function containsHighEntropySecret(
   value: string,
   context: SensitiveTextContext,
 ): boolean {
-  if (context.allowSystemId) return false;
+  if (context.allowSystemId && isAllowedHighEntropySystemId(value)) return false;
   const isAllowedSha256Digest =
     context.allowSha256Digest && /^sha256:[0-9a-f]{64}$/.test(value);
   if (
-    !context.allowSystemId &&
     !isAllowedSha256Digest &&
     BARE_RANDOM_HEX_SECRET_PATTERN.test(value)
   ) {
@@ -211,10 +250,7 @@ function containsHighEntropySecret(
   for (const match of value.matchAll(/[A-Za-z0-9+_=-]{24,}/g)) {
     const token = match[0];
     const offset = match.index ?? 0;
-    if (/^[0-9A-HJKMNP-TV-Z]{26}$/.test(token)) {
-      if (context.allowSystemId) continue;
-      return true;
-    }
+    if (CROCKFORD_ULID_PATTERN.test(token)) return true;
     if (
       /^[0-9a-f]{64}$/i.test(token) &&
       value.slice(Math.max(0, offset - 7), offset) === "sha256:"

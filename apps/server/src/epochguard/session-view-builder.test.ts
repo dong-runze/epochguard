@@ -30,6 +30,24 @@ const SESSION_ID = "session_eg05";
 const HEAD = 21;
 const NOW = "2026-08-29T12:00:00.000Z";
 const LATER = "2026-08-29T12:01:00.000Z";
+const PRODUCTION_UUID_ID_PREFIXES = [
+  "session",
+  "action",
+  "attempt",
+  "effect",
+  "assignment",
+  "receipt",
+  "decision",
+  "rejected",
+  "validation",
+  "jvc",
+  "proof",
+  "permit",
+  "refresh",
+  "event",
+  "diagnostic",
+  "run",
+] as const;
 
 const roleAgentId = (role: Role): string => `agent_${role}`;
 const roleTitle = (role: Role): string =>
@@ -1615,7 +1633,8 @@ describe("fixed redaction boundary", () => {
     >();
     for (const role of ROLES) {
       const ids = {
-        assignmentId: `assignment_${randomUUID()}`,
+        assignmentId:
+          role === "inventory" ? randomUUID() : `assignment_${randomUUID()}`,
         attemptId: `attempt_${randomUUID()}`,
         runId: `run_${randomUUID()}`,
       };
@@ -1660,6 +1679,18 @@ describe("fixed redaction boundary", () => {
       });
     }
 
+    const structuredIds = [
+      randomUUID(),
+      ...PRODUCTION_UUID_ID_PREFIXES.map(
+        (prefix) => `${prefix}_${randomUUID()}`,
+      ),
+    ];
+    for (const structuredId of structuredIds) {
+      const eventDatabase = makeDatabase();
+      eventDatabase.auditEvents[0]!.eventId = structuredId;
+      expect(snapshot(eventDatabase).events[0]!.eventId).toBe(structuredId);
+    }
+
     const collecting = makeCollectingDatabase();
     const prefixedAttemptId = `attempt_${randomUUID()}`;
     collecting.attempts[0]!.attemptId = prefixedAttemptId;
@@ -1683,16 +1714,50 @@ describe("fixed redaction boundary", () => {
     expect(() => snapshot(keyDatabase)).toThrowError(SessionViewBuilderError);
   });
 
-  it("still redacts a prefixed UUID when it appears in free display text", () => {
-    const database = makeDatabase();
-    const freeTextId = `session_${randomUUID()}`;
-    database.runAssignments[0]!.agentNameAtAssignment = freeTextId;
-    database.auditEvents[0]!.status = freeTextId;
+  it("still redacts bare and prefixed UUIDs in free display text", () => {
+    const freeTextIds = [
+      randomUUID(),
+      ...PRODUCTION_UUID_ID_PREFIXES.map(
+        (prefix) => `${prefix}_${randomUUID()}`,
+      ),
+    ];
+    for (const freeTextId of freeTextIds) {
+      const database = makeDatabase();
+      database.runAssignments[0]!.agentNameAtAssignment = freeTextId;
+      database.auditEvents[0]!.status = freeTextId;
 
-    const result = snapshot(database);
-    expect(JSON.stringify(result)).not.toContain(freeTextId);
-    expect(result.agents[0]!.agentNameAtAssignment).toBe("inventory Agent");
-    expect(result.events[0]!.status).toBe("REDACTED");
+      const result = snapshot(database);
+      expect(JSON.stringify(result)).not.toContain(freeTextId);
+      expect(result.agents[0]!.agentNameAtAssignment).toBe("inventory Agent");
+      expect(result.events[0]!.status).toBe("REDACTED");
+    }
+  });
+
+  it("rejects unknown mixed high-entropy opaque IDs", () => {
+    const eventDatabase = makeDatabase();
+    eventDatabase.auditEvents[0]!.eventId =
+      "opaque_Ab3Cd5Ef7Gh9Jk2Mn4Pq6Rs8Tu0Vw1Xy9Za7Bc";
+    expect(() => snapshot(eventDatabase)).toThrowError(SessionViewBuilderError);
+
+    const runDatabase = makeDatabase();
+    const opaqueRunId =
+      "opaque_Za9Yx7Wv5Ut3Sr1Qp8Nm6Kj4Hg2Fe0Dc9Ba7Xw5V";
+    runDatabase.runAssignments[0]!.boundRunId = opaqueRunId;
+    runDatabase.attempts[0]!.runId = opaqueRunId;
+    runDatabase.decisions[0]!.runId = opaqueRunId;
+    expect(() => snapshot(runDatabase)).toThrowError(SessionViewBuilderError);
+  });
+
+  it("rejects a sha256 digest reused as a system ID", () => {
+    const database = makeDatabase();
+    database.auditEvents[0]!.eventId = sha256Digest("not-an-opaque-id");
+    expect(() => snapshot(database)).toThrowError(SessionViewBuilderError);
+
+    const valid = snapshot(makeDatabase());
+    expect(valid.actionHash).toBe(GOLDEN_ACTION_HASH);
+    expect(valid.agents[0]!.activeDecision?.runtimeProof.outputDigest).toMatch(
+      /^sha256:[0-9a-f]{64}$/,
+    );
   });
 
   it("redacts bare lowercase 64-hex while preserving typed digest and ID fields", () => {
