@@ -10,7 +10,11 @@ import {
   EpochGuardServiceError,
 } from "./epochguard-service.js";
 import {
+  API_ERROR_STATUS,
   ROLES,
+  makeAgentsBusyError,
+  makeRoleProfileMismatchError,
+  makeUnstableWorldError,
   sha256Digest,
   type CreateSessionRequest,
   type Role,
@@ -34,9 +38,16 @@ afterEach(async () => {
 
 class TestWorkspace {
   readonly packs = new Map<string, Uint8Array>();
+  private readonly digestOverrides = new Map<string, string>();
 
   async readAgentsMdDigest(agentId: string): Promise<string> {
-    return sha256Digest(`AGENTS.md:${agentId}`);
+    return (
+      this.digestOverrides.get(agentId) ?? sha256Digest(`AGENTS.md:${agentId}`)
+    );
+  }
+
+  driftAgentsMd(agentId: string): void {
+    this.digestOverrides.set(agentId, sha256Digest(`drifted:${agentId}`));
   }
 
   async writeEvidencePackAtomic(
@@ -445,12 +456,26 @@ async function waitForSessionState(
   return snapshot!;
 }
 
+async function captureServiceError(
+  operation: () => Promise<unknown>,
+): Promise<EpochGuardServiceError> {
+  let caught: unknown = null;
+  try {
+    await operation();
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(EpochGuardServiceError);
+  return caught as EpochGuardServiceError;
+}
+
 describe("EpochGuardService", () => {
   it("runs the Normal chain and makes concurrent/lost Commit responses exactly-once", async () => {
     const { service, store, requestFor, agents, workspaces } =
       await createHarness();
+    const createRequest = requestFor("normal-world-v1");
     agents.holdInitialRun("budget");
-    const created = await service.createSession(requestFor("normal-world-v1"));
+    const created = await service.createSession(createRequest);
     expect(created.sessionState).toBe("DISPATCHING");
     expect(created.sessionId).toMatch(/^session_/);
     expect(workspaces.packs.size).toBe(0);
@@ -482,9 +507,10 @@ describe("EpochGuardService", () => {
         collecting.agents.find((agent) => agent.role === "budget")!
           .inFlightAttempt?.status,
       ).toMatch(/QUEUED|RUNNING/);
-      await expect(service.resetDemo()).rejects.toMatchObject({
-        statusCode: 409,
-        body: { error: "AGENTS_BUSY" },
+      const resetError = await captureServiceError(() => service.resetDemo());
+      expect({ statusCode: resetError.statusCode, body: resetError.body }).toEqual({
+        statusCode: API_ERROR_STATUS.AGENTS_BUSY,
+        body: makeAgentsBusyError(created.sessionId, createRequest.assignments),
       });
     } finally {
       agents.releaseInitialRuns();
@@ -541,8 +567,120 @@ describe("EpochGuardService", () => {
     expect(service.getSnapshot(ready!.sessionId).gate.effectsInSession).toBe(1);
   });
 
-  it("fails a stale-head Commit as COMMIT_RACE with an exact transient diagnostic", async () => {
+  it("returns canonical UNSTABLE_WORLD when Create finds a non-empty demo World", async () => {
     const { service, store, requestFor } = await createHarness();
+    const request = requestFor("normal-world-v1");
+    const created = await service.createSession(request);
+    const ready = await waitForSessionState(service, created.sessionId, [
+      "READY_AT_CURRENT_HEAD",
+    ]);
+    await service.commit(ready.sessionId, {
+      expectedSessionRevision: ready.sessionRevision,
+    });
+    const actualWorldHead = store.snapshot().headSeq;
+
+    const error = await captureServiceError(() => service.createSession(request));
+
+    expect({ statusCode: error.statusCode, body: error.body }).toEqual({
+      statusCode: API_ERROR_STATUS.UNSTABLE_WORLD,
+      body: makeUnstableWorldError(null, actualWorldHead),
+    });
+  });
+
+  it("returns canonical UNSTABLE_WORLD when Refresh has no allowed fixture capture", async () => {
+    const { service, store, requestFor } = await createHarness();
+    const created = await service.createSession(requestFor("normal-world-v1"));
+    const ready = await waitForSessionState(service, created.sessionId, [
+      "READY_AT_CURRENT_HEAD",
+    ]);
+    const actualWorldHead = store.snapshot().headSeq;
+
+    const error = await captureServiceError(() =>
+      service.refresh(ready.sessionId, {
+        expectedSessionRevision: ready.sessionRevision,
+        refreshPlanId: "refresh_not_available",
+      }),
+    );
+
+    expect({ statusCode: error.statusCode, body: error.body }).toEqual({
+      statusCode: API_ERROR_STATUS.UNSTABLE_WORLD,
+      body: makeUnstableWorldError(ready.sessionId, actualWorldHead),
+    });
+  });
+
+  it("returns the requested Agent in a canonical ROLE_PROFILE_MISMATCH", async () => {
+    const { service, requestFor } = await createHarness();
+    const request = requestFor("normal-world-v1");
+    request.assignments.inventory = "agent_wrong_inventory";
+
+    const error = await captureServiceError(() => service.createSession(request));
+
+    expect({ statusCode: error.statusCode, body: error.body }).toEqual({
+      statusCode: API_ERROR_STATUS.ROLE_PROFILE_MISMATCH,
+      body: makeRoleProfileMismatchError(
+        "inventory",
+        request.assignments.inventory,
+      ),
+    });
+  });
+
+  it("translates real Create profile drift into the canonical registered Agent error", async () => {
+    const { requestFor, restartService, workspaces } = await createHarness();
+    const request = requestFor("normal-world-v1");
+    workspaces.driftAgentsMd(request.assignments.policy);
+    const restarted = restartService();
+
+    const error = await captureServiceError(() =>
+      restarted.createSession(request),
+    );
+
+    expect({ statusCode: error.statusCode, body: error.body }).toEqual({
+      statusCode: API_ERROR_STATUS.ROLE_PROFILE_MISMATCH,
+      body: makeRoleProfileMismatchError("policy", request.assignments.policy),
+    });
+  });
+
+  it("translates real Refresh profile drift into the canonical frozen Agent error", async () => {
+    const { service, requestFor, workspaces } = await createHarness();
+    const request = requestFor("impossible-collage-v1");
+    const created = await service.createSession(request);
+    const blocked = await waitForSessionState(service, created.sessionId, [
+      "BLOCKED_NO_CUT",
+    ]);
+    workspaces.driftAgentsMd(request.assignments.budget);
+
+    const error = await captureServiceError(() =>
+      service.refresh(blocked.sessionId, {
+        expectedSessionRevision: blocked.sessionRevision,
+        refreshPlanId: blocked.refreshPlan!.refreshPlanId,
+      }),
+    );
+
+    expect({ statusCode: error.statusCode, body: error.body }).toEqual({
+      statusCode: API_ERROR_STATUS.ROLE_PROFILE_MISMATCH,
+      body: makeRoleProfileMismatchError("budget", request.assignments.budget),
+    });
+  });
+
+  it("uses canonical AGENTS_BUSY when reset targets a stable Session", async () => {
+    const { service, requestFor } = await createHarness();
+    const request = requestFor("normal-world-v1");
+    const created = await service.createSession(request);
+    const ready = await waitForSessionState(service, created.sessionId, [
+      "READY_AT_CURRENT_HEAD",
+    ]);
+
+    const error = await captureServiceError(() => service.resetDemo());
+
+    expect({ statusCode: error.statusCode, body: error.body }).toEqual({
+      statusCode: API_ERROR_STATUS.AGENTS_BUSY,
+      body: makeAgentsBusyError(ready.sessionId, request.assignments),
+    });
+  });
+
+  it("fails a stale-head Commit as COMMIT_RACE with an exact transient diagnostic", async () => {
+    const { forkPersistedService, service, store, requestFor } =
+      await createHarness();
     const created = await service.createSession(requestFor("normal-world-v1"));
     const ready = await waitForSessionState(service, created.sessionId, [
       "READY_AT_CURRENT_HEAD",
@@ -611,6 +749,36 @@ describe("EpochGuardService", () => {
     expect(raceEvents[0]!.artifactRefs).toEqual(
       raceDiagnostics[0]!.artifactRefs,
     );
+
+    const restarted = await forkPersistedService();
+    await restarted.service.initialize();
+    expect(restarted.service.getSnapshot(ready.sessionId).sessionState).toBe(
+      "COMMIT_RACE",
+    );
+
+    await service.resetDemo();
+    const resetDatabase = store.snapshot();
+    expect(resetDatabase.sessions).toHaveLength(0);
+    expect(resetDatabase.effects).toHaveLength(0);
+    expect(resetDatabase.permits).toHaveLength(0);
+
+    const replacement = await service.createSession(
+      requestFor("normal-world-v1"),
+    );
+    expect(replacement.sessionState).toBe("DISPATCHING");
+    const replacementReady = await waitForSessionState(
+      service,
+      replacement.sessionId,
+      ["READY_AT_CURRENT_HEAD"],
+    );
+    expect(replacementReady.gate.effectsInSession).toBe(0);
+    const replacementDatabase = store.snapshot();
+    expect(replacementDatabase.effects).toHaveLength(0);
+    expect(
+      replacementDatabase.permits.filter(
+        (permit) => permit.sessionId === replacement.sessionId,
+      ),
+    ).toEqual([expect.objectContaining({ status: "ISSUED" })]);
   });
 
   it("blocks the Impossible first cut, refreshes only Budget, and ends DENY with no Effect", async () => {

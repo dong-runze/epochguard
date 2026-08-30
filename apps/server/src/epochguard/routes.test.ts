@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { EpochGuardServiceError } from "./epochguard-service.js";
 import { epochGuardRoutes, type EpochGuardRouteServicePort } from "./routes.js";
 import {
@@ -11,6 +12,9 @@ import {
   STALE_VIEW_MESSAGE,
   SessionDashboardSnapshotSchema,
   UNSUPPORTED_SCHEMA_MESSAGE,
+  makeAgentsBusyError,
+  makeRoleProfileMismatchError,
+  makeUnstableWorldError,
   type EffectRecord,
   type EpochDatabase,
 } from "./types.js";
@@ -308,6 +312,123 @@ describe("EpochGuard routes", () => {
     });
     expect(mismatchResponse.statusCode).toBe(500);
     expect(mismatchResponse.json()).toEqual(projectionMismatch);
+  });
+
+  it("derives canonical v7 conflict statuses from parsed bodies rather than constructor status", async () => {
+    const service = makeService();
+    const app = await buildApp("test", service);
+
+    const unstable = makeUnstableWorldError(null, 12);
+    service.createSession.mockImplementationOnce(async () => {
+      throw new EpochGuardServiceError(418, unstable);
+    });
+    const unstableResponse = await app.inject({
+      method: "POST",
+      url: `${PREFIX}/sessions`,
+      payload: createRequest,
+    });
+    expect(unstableResponse.statusCode).toBe(409);
+    expect(unstableResponse.json()).toEqual(unstable);
+
+    const mismatch = makeRoleProfileMismatchError(
+      "inventory",
+      createRequest.assignments.inventory,
+    );
+    service.createSession.mockImplementationOnce(async () => {
+      throw new EpochGuardServiceError(418, mismatch);
+    });
+    const mismatchResponse = await app.inject({
+      method: "POST",
+      url: `${PREFIX}/sessions`,
+      payload: createRequest,
+    });
+    expect(mismatchResponse.statusCode).toBe(409);
+    expect(mismatchResponse.json()).toEqual(mismatch);
+
+    const busy = makeAgentsBusyError(SESSION_ID, createRequest.assignments);
+    service.resetDemo.mockImplementationOnce(async () => {
+      throw new EpochGuardServiceError(418, busy);
+    });
+    const busyResponse = await app.inject({
+      method: "POST",
+      url: `${PREFIX}/demo/reset`,
+    });
+    expect(busyResponse.statusCode).toBe(409);
+    expect(busyResponse.json()).toEqual(busy);
+  });
+
+  it("rejects arbitrary Service error bodies at construction and the HTTP boundary", async () => {
+    const arbitraryBody = {
+      error: "INVENTED_PUBLIC_ERROR",
+      message: "This body must never be sent.",
+      arbitrary: true,
+    };
+    expect(
+      () => new EpochGuardServiceError(200, arbitraryBody as never),
+    ).toThrow();
+
+    const service = makeService();
+    const app = await buildApp("test", service);
+    const forged = new EpochGuardServiceError(
+      200,
+      makeUnstableWorldError(null, 0),
+    );
+    Object.defineProperty(forged, "body", { value: arbitraryBody });
+    service.createSession.mockImplementationOnce(async () => {
+      throw forged;
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `${PREFIX}/sessions`,
+      payload: createRequest,
+    });
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).not.toEqual(arbitraryBody);
+    expect(response.json().error).not.toBe(arbitraryBody.error);
+    expect(JSON.stringify(response.json())).not.toContain(arbitraryBody.error);
+    expect(JSON.stringify(response.json())).not.toContain(arbitraryBody.message);
+  });
+
+  it("treats internal Service Zod failures as a redacted 500 rather than client input", async () => {
+    const service = makeService();
+    const app = await buildApp("test", service);
+    service.createSession.mockImplementationOnce(async () => {
+      z.object({ internalPersistenceField: z.string() }).parse({
+        internalPersistenceField: 42,
+      });
+      throw new Error("unreachable");
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `${PREFIX}/sessions`,
+      payload: createRequest,
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).not.toHaveProperty("issues");
+    expect(JSON.stringify(response.json())).not.toContain(
+      "internalPersistenceField",
+    );
+    expect(JSON.stringify(response.json())).not.toContain("expected string");
+  });
+
+  it("redacts ordinary internal Service failures as generic 500 responses", async () => {
+    const service = makeService();
+    const app = await buildApp("test", service);
+    service.getSnapshot.mockImplementationOnce(() => {
+      throw new Error("sensitive persistence path C:/private/epochguard.json");
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: `${PREFIX}/sessions/${SESSION_ID}`,
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(JSON.stringify(response.json())).not.toContain("sensitive");
+    expect(JSON.stringify(response.json())).not.toContain("epochguard.json");
   });
 
   it.each(["test", "development"] as const)(

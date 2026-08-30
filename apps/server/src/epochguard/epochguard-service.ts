@@ -32,6 +32,7 @@ import {
 } from "./refresh-planner.js";
 import {
   ROLE_PROFILES,
+  RoleProfileMismatchError,
   initialAttemptForAssignment,
   initializeRoleAgents,
   verifyRoleAgentProfile,
@@ -56,6 +57,7 @@ import {
 import {
   API_ERROR_STATUS,
   AgentAttemptSchema,
+  ApiErrorBodySchema,
   AuditEventSchema,
   CommitSessionRequestSchema,
   CreateSessionRequestSchema,
@@ -71,8 +73,10 @@ import {
   makeAgentsBusyError,
   makeAlreadyReobservingError,
   makeProjectionMismatchError,
+  makeRoleProfileMismatchError,
   makeSessionNotFoundError,
   makeStaleViewError,
+  makeUnstableWorldError,
   makeUnsupportedSchemaError,
   sha256Digest,
   type ApiErrorBody,
@@ -104,6 +108,7 @@ const EMPTY_PACK_HASH = sha256Digest("");
 const TERMINAL_SESSION_STATES = new Set<EpochSession["state"]>([
   "UNSTABLE_WORLD",
   "CONSISTENT_DENY",
+  "COMMIT_RACE",
   "COMMITTED",
   "FAILED",
   "INTERRUPTED",
@@ -138,17 +143,15 @@ export interface EpochGuardServiceOptions {
 }
 
 export class EpochGuardServiceError extends Error {
+  readonly body: ApiErrorBody;
+
   constructor(
     readonly statusCode: number,
-    readonly body: ApiErrorBody | Readonly<Record<string, unknown>>,
+    body: ApiErrorBody,
   ) {
-    super(
-      typeof body.message === "string"
-        ? body.message
-        : typeof body.error === "string"
-          ? body.error
-          : "EpochGuard request failed",
-    );
+    const parsed = ApiErrorBodySchema.parse(body);
+    super(parsed.message);
+    this.body = Object.freeze(parsed);
     this.name = "EpochGuardServiceError";
   }
 }
@@ -201,6 +204,16 @@ function sameAssignments(
     session.frozenAssignments.budgetAgentId === assignments.budget &&
     session.frozenAssignments.policyAgentId === assignments.policy
   );
+}
+
+function frozenAssignments(
+  session: EpochSession,
+): CreateSessionRequest["assignments"] {
+  return {
+    inventory: session.frozenAssignments.inventoryAgentId,
+    budget: session.frozenAssignments.budgetAgentId,
+    policy: session.frozenAssignments.policyAgentId,
+  };
 }
 
 function nextAuditSeq(database: Readonly<EpochDatabase>, sessionId: string): number {
@@ -318,7 +331,22 @@ export class EpochGuardService {
         }
       });
     }
-    await initializeRoleAgents(this.rolePorts, this.now);
+    try {
+      await initializeRoleAgents(this.rolePorts, this.now);
+    } catch (error) {
+      if (error instanceof RoleProfileMismatchError) {
+        const registrations = this.ports.store.snapshot().roleAgentRegistrations;
+        for (const role of ROLES) {
+          const matches = registrations.filter(
+            (registration) => registration.role === role,
+          );
+          if (matches.length === 1) {
+            await this.verifyRegisteredRoleProfile(role, matches[0]!);
+          }
+        }
+      }
+      throw error;
+    }
     this.initialized = true;
   }
 
@@ -345,7 +373,10 @@ export class EpochGuardService {
         if (conflicting !== undefined) {
           throw new EpochGuardServiceError(
             API_ERROR_STATUS.AGENTS_BUSY,
-            makeAgentsBusyError(conflicting.sessionId, request.assignments),
+            makeAgentsBusyError(
+              conflicting.sessionId,
+              frozenAssignments(conflicting),
+            ),
           );
         }
         if (
@@ -353,10 +384,10 @@ export class EpochGuardService {
           database.worldCommits.length !== 0 ||
           database.resourceVersions.length !== 0
         ) {
-          throw new EpochGuardServiceError(409, {
-            error: "UNSTABLE_WORLD",
-            message: "The deterministic demo World must be reset before another scenario.",
-          });
+          throw new EpochGuardServiceError(
+            API_ERROR_STATUS.UNSTABLE_WORLD,
+            makeUnstableWorldError(null, database.headSeq),
+          );
         }
 
         initializeFixtureWorld(database, fixture);
@@ -505,21 +536,16 @@ export class EpochGuardService {
     const before = this.requireSession(sessionId);
     const fixture = getEpochGuardFixture(before.scenarioId);
     if (fixture.refreshCapture === null) {
-      throw new EpochGuardServiceError(409, {
-        error: "UNSTABLE_WORLD",
-        message: "The selected fixture has no P0 re-observation step.",
-      });
+      throw new EpochGuardServiceError(
+        API_ERROR_STATUS.UNSTABLE_WORLD,
+        makeUnstableWorldError(sessionId, this.ports.store.snapshot().headSeq),
+      );
     }
     const registration = roleRegistration(this.ports.store.snapshot(), "budget");
-    await verifyRoleAgentProfile(
-      {
-        role: "budget",
-        agentId: registration.agentId,
-        agentName: registration.agentNameAtRegistration,
-        roleProfileVersion: registration.roleProfileVersion,
-        agentsMdDigest: registration.agentsMdDigest,
-      },
-      this.rolePorts,
+    await this.verifyRegisteredRoleProfile(
+      "budget",
+      registration,
+      before.frozenAssignments.budgetAgentId,
     );
     const runtimeLabel = await this.runtimeLabel();
     const timestamp = TimestampSchema.parse(this.now());
@@ -613,16 +639,19 @@ export class EpochGuardService {
   async resetDemo(): Promise<void> {
     await this.initialize();
     await this.ports.store.mutate((database) => {
-      if (
-        this.backgroundTasks.size > 0 ||
-        database.sessions.some(
-          (session) => !TERMINAL_SESSION_STATES.has(session.state),
+      const backgroundSessionIds = new Set(this.backgroundTasks.keys());
+      const active = database.sessions
+        .filter(
+          (session) =>
+            backgroundSessionIds.has(session.sessionId) ||
+            !TERMINAL_SESSION_STATES.has(session.state),
         )
-      ) {
-        throw new EpochGuardServiceError(409, {
-          error: "AGENTS_BUSY",
-          message: "An active EpochGuard Session cannot be reset.",
-        });
+        .sort((left, right) => left.sessionId.localeCompare(right.sessionId))[0];
+      if (active !== undefined) {
+        throw new EpochGuardServiceError(
+          API_ERROR_STATUS.AGENTS_BUSY,
+          makeAgentsBusyError(active.sessionId, frozenAssignments(active)),
+        );
       }
       database.headSeq = 0;
       database.worldCommits = [];
@@ -687,28 +716,44 @@ export class EpochGuardService {
     for (const role of ROLES) {
       const registration = registrations[role];
       if (request.assignments[role] !== registration.agentId) {
-        throw new EpochGuardServiceError(409, {
-          error: "ROLE_PROFILE_MISMATCH",
-          message: `Assignment for ${role} does not use its registered Role Agent.`,
-        });
+        throw new EpochGuardServiceError(
+          API_ERROR_STATUS.ROLE_PROFILE_MISMATCH,
+          makeRoleProfileMismatchError(role, request.assignments[role]),
+        );
       }
     }
     await Promise.all(
       ROLES.map((role) => {
         const registration = registrations[role];
-        return verifyRoleAgentProfile(
-          {
-            role,
-            agentId: registration.agentId,
-            agentName: registration.agentNameAtRegistration,
-            roleProfileVersion: registration.roleProfileVersion,
-            agentsMdDigest: registration.agentsMdDigest,
-          },
-          this.rolePorts,
-        );
+        return this.verifyRegisteredRoleProfile(role, registration);
       }),
     );
     return registrations;
+  }
+
+  private async verifyRegisteredRoleProfile(
+    role: Role,
+    registration: RoleAgentRegistration,
+    expectedAgentId = registration.agentId,
+  ): Promise<void> {
+    try {
+      await verifyRoleAgentProfile(
+        {
+          role,
+          agentId: expectedAgentId,
+          agentName: registration.agentNameAtRegistration,
+          roleProfileVersion: registration.roleProfileVersion,
+          agentsMdDigest: registration.agentsMdDigest,
+        },
+        this.rolePorts,
+      );
+    } catch (error) {
+      if (!(error instanceof RoleProfileMismatchError)) throw error;
+      throw new EpochGuardServiceError(
+        API_ERROR_STATUS.ROLE_PROFILE_MISMATCH,
+        makeRoleProfileMismatchError(role, expectedAgentId),
+      );
+    }
   }
 
   private newAssignment(input: {
