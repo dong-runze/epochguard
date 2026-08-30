@@ -843,6 +843,71 @@ describe("Refresh Planner", () => {
 
   it.each([
     {
+      name: "recovered DENY",
+      sessionState: "CONSISTENT_DENY",
+      planStatus: "COMPLETED",
+      claimedAttemptId: "attempt_budget_refresh_1",
+    },
+    {
+      name: "recovered READY",
+      sessionState: "READY_AT_CURRENT_HEAD",
+      planStatus: "COMPLETED",
+      claimedAttemptId: "attempt_budget_refresh_1",
+    },
+    {
+      name: "invalidated terminal Plan",
+      sessionState: "UNSTABLE_WORLD",
+      planStatus: "INVALIDATED",
+      claimedAttemptId: null,
+    },
+  ] as const)(
+    "returns frozen 409 without mutating a $name replay",
+    async ({ sessionState, planStatus, claimedAttemptId }) => {
+      const fixture = blockedFixture();
+      const session = fixture.database.sessions[0]!;
+      const plan = fixture.database.refreshPlans[0]!;
+      session.state = sessionState;
+      session.sessionRevision += 3;
+      plan.status = planStatus;
+      plan.claimedAttemptId = claimedAttemptId;
+      const before = structuredClone(fixture.database);
+      const beforeBytes = JSON.stringify(before);
+      const store = new MemoryRefreshStore(fixture.database);
+      const artifactFactory = vi.fn(createArtifacts);
+
+      const result = await claimRefreshPlan(store, {
+        sessionId: session.sessionId,
+        request: {
+          expectedSessionRevision: session.sessionRevision,
+          refreshPlanId: plan.refreshPlanId,
+        },
+        now: NOW,
+        world: plannerWorld,
+        createArtifacts: artifactFactory,
+      });
+
+      expect(result).toMatchObject({
+        status: "STALE_VIEW",
+        error: {
+          error: "STALE_VIEW",
+          expectedSessionRevision: session.sessionRevision,
+          actualSessionRevision: session.sessionRevision,
+        },
+      });
+      expect(artifactFactory).not.toHaveBeenCalled();
+      expect(JSON.stringify(store.snapshot())).toBe(beforeBytes);
+      expect(store.snapshot()).toEqual(before);
+      expect(store.snapshot().sessions[0]!.state).toBe(sessionState);
+      expect(store.snapshot().refreshPlans[0]).toMatchObject({
+        status: planStatus,
+        claimedAttemptId,
+      });
+      expect(store.snapshot().effects).toHaveLength(before.effects.length);
+    },
+  );
+
+  it.each([
+    {
       name: "World head",
       mutate(database: EpochDatabase) {
         database.headSeq = 22;

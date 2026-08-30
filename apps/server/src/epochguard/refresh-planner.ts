@@ -738,6 +738,16 @@ export async function claimRefreshPlan(
         );
       }
       const plan = matchingPlans[0]!;
+      if (plan.status === "COMPLETED" || plan.status === "INVALIDATED") {
+        throw new AbortRefreshClaim({
+          status: "STALE_VIEW",
+          error: makeStaleViewError(
+            session.sessionId,
+            request.expectedSessionRevision,
+            session.sessionRevision,
+          ),
+        });
+      }
       const agentId = requireP0BudgetOwner(session, plan.agentIds);
 
       if (plan.status === "CLAIMED") {

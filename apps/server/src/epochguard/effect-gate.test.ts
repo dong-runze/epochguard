@@ -355,6 +355,7 @@ function withCompletedRefreshPlan(database: EpochDatabase): EpochDatabase {
     claimedAttemptId: "attempt_budget_1",
   });
   validation.refreshPlanId = "refresh_normal_completed";
+  session.activeRefreshPlanId = "refresh_normal_completed";
   return database;
 }
 
@@ -430,7 +431,7 @@ describe("Effect Gate", () => {
     });
   });
 
-  it("commits a READY Session with a fully closed completed RefreshPlan", async () => {
+  it("commits recovered ALLOW with its completed RefreshPlan and retains the pointer", async () => {
     const store = new MemoryEffectStore(readyDatabaseWithCompletedRefreshPlan());
     const result = await commit(makePorts(store));
 
@@ -439,7 +440,18 @@ describe("Effect Gate", () => {
       created: true,
       effectsInSession: 1,
     });
-    expect(store.snapshot().effects).toHaveLength(1);
+    const database = store.snapshot();
+    expect(database.effects).toHaveLength(1);
+    expect(database.sessions[0]).toMatchObject({
+      state: "COMMITTED",
+      activeRefreshPlanId: "refresh_normal_completed",
+    });
+    expect(database.refreshPlans).toEqual([
+      expect.objectContaining({
+        refreshPlanId: "refresh_normal_completed",
+        status: "COMPLETED",
+      }),
+    ]);
   });
 
   it.each([
@@ -453,6 +465,24 @@ describe("Effect Gate", () => {
       name: "wrong Plan Session",
       mutate(database: EpochDatabase) {
         database.refreshPlans[0]!.sessionId = "session_other";
+      },
+    },
+    {
+      name: "missing active Plan pointer",
+      mutate(database: EpochDatabase) {
+        database.sessions[0]!.activeRefreshPlanId = null;
+      },
+    },
+    {
+      name: "unrelated active Plan pointer",
+      mutate(database: EpochDatabase) {
+        database.sessions[0]!.activeRefreshPlanId = "refresh_unrelated";
+      },
+    },
+    {
+      name: "non-completed active Plan",
+      mutate(database: EpochDatabase) {
+        database.refreshPlans[0]!.status = "INVALIDATED";
       },
     },
     {
@@ -546,6 +576,13 @@ describe("Effect Gate", () => {
           status: "CLAIMED",
           claimedAttemptId: "attempt_budget_refresh_inflight",
         });
+      },
+      reasonCode: "BINDING_MISMATCH",
+    },
+    {
+      name: "initial READY unrelated RefreshPlan pointer",
+      mutate(database: EpochDatabase) {
+        database.sessions[0]!.activeRefreshPlanId = "refresh_ghost";
       },
       reasonCode: "BINDING_MISMATCH",
     },
@@ -859,6 +896,9 @@ describe("Effect Gate", () => {
       effectsInSession: 1,
     });
     expect(ports.createEffectId).not.toHaveBeenCalled();
+    expect(store.snapshot().sessions[0]!.activeRefreshPlanId).toBe(
+      "refresh_normal_completed",
+    );
   });
 
   it.each([
