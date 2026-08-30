@@ -1009,59 +1009,70 @@ describe("EpochGuardService", () => {
     expect(restarted.getSnapshot(ready.sessionId)).toEqual(interrupted);
   });
 
-  it("recovers BLOCKED_NO_CUT without deleting its historical evidence chain", async () => {
-    const { service, restartService, store, requestFor } = await createHarness();
+  it("preserves BLOCKED_NO_CUT across restart and can still refresh to DENY", async () => {
+    const { agents, forkPersistedService, service, requestFor } =
+      await createHarness();
     const blocked = await service.createSession(
       requestFor("impossible-collage-v1"),
     );
-    const beforeRestart = store.snapshot();
-    const historicalCounts = {
-      attempts: beforeRestart.attempts.length,
-      decisions: beforeRestart.decisions.length,
-      validations: beforeRestart.validations.length,
-      noCutProofs: beforeRestart.noCutProofs.length,
-      refreshPlans: beforeRestart.refreshPlans.length,
-    };
+    const restarted = await forkPersistedService();
+    await restarted.service.initialize();
 
-    const restarted = restartService();
-    await restarted.initialize();
-    const interrupted = restarted.getSnapshot(blocked.sessionId);
-    expect(interrupted.sessionState).toBe("INTERRUPTED");
-    expect(interrupted.gate).toMatchObject({
-      state: "FAILED",
-      reasonCode: "RUN_FAILED",
-      effectsInSession: 0,
+    expect(restarted.service.getSnapshot(blocked.sessionId)).toEqual(blocked);
+    const denied = await restarted.service.refresh(blocked.sessionId, {
+      expectedSessionRevision: blocked.sessionRevision,
+      refreshPlanId: blocked.refreshPlan!.refreshPlanId,
     });
-    expect(interrupted.latestDiagnostics).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          kind: "SYSTEM_FAILURE",
-          stage: "DISPATCH",
-          reasonCode: "RUN_FAILED",
-        }),
-      ]),
-    );
-    const recoveredDatabase = store.snapshot();
-    const recoveredSession = recoveredDatabase.sessions.find(
-      (session) => session.sessionId === blocked.sessionId,
-    )!;
-    expect(recoveredSession.activeAttemptIds).toEqual({
-      inventory: null,
-      budget: null,
-      policy: null,
+    expect(denied.sessionState).toBe("CONSISTENT_DENY");
+    expect(denied.refreshPlan?.status).toBe("COMPLETED");
+    expect(denied.gate.effectsInSession).toBe(0);
+    expect(restarted.store.snapshot().effects).toHaveLength(0);
+    expect(restarted.store.snapshot().permits).toHaveLength(0);
+    expect(agents.dispatchCounts).toEqual({
+      inventory: 1,
+      budget: 2,
+      policy: 1,
     });
-    expect(recoveredSession.activeValidationId).toBeNull();
-    expect(recoveredSession.activeRefreshPlanId).toBeNull();
-    expect(recoveredSession.activePermitId).toBeNull();
-    expect({
-      attempts: recoveredDatabase.attempts.length,
-      decisions: recoveredDatabase.decisions.length,
-      validations: recoveredDatabase.validations.length,
-      noCutProofs: recoveredDatabase.noCutProofs.length,
-      refreshPlans: recoveredDatabase.refreshPlans.length,
-    }).toEqual(historicalCounts);
-    expect(recoveredDatabase.effects).toHaveLength(0);
-    expect(recoveredDatabase.permits).toHaveLength(0);
+  });
+
+  it("preserves READY_AT_CURRENT_HEAD across restart and commits exactly once", async () => {
+    const { forkPersistedService, service, requestFor } = await createHarness();
+    const ready = await service.createSession(requestFor("normal-world-v1"));
+    const restarted = await forkPersistedService();
+    await restarted.service.initialize();
+
+    expect(restarted.service.getSnapshot(ready.sessionId)).toEqual(ready);
+    const committed = await restarted.service.commit(ready.sessionId, {
+      expectedSessionRevision: ready.sessionRevision,
+    });
+    expect(committed).toMatchObject({
+      status: "COMMITTED",
+      created: true,
+      effectsInSession: 1,
+    });
+    const duplicate = await restarted.service.commit(ready.sessionId, {
+      expectedSessionRevision: ready.sessionRevision,
+    });
+    expect(duplicate).toMatchObject({
+      status: "COMMITTED",
+      created: false,
+      effectsInSession: 1,
+    });
+    expect(
+      duplicate.status === "COMMITTED" ? duplicate.effect.effectId : null,
+    ).toBe(committed.status === "COMMITTED" ? committed.effect.effectId : null);
+    const committedDatabase = restarted.store.snapshot();
+    expect(committedDatabase.effects).toHaveLength(1);
+    expect(
+      committedDatabase.permits.filter(
+        (permit) => permit.sessionId === ready.sessionId,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        status: "CONSUMED",
+        consumedAt: expect.any(String),
+      }),
+    ]);
   });
 
   it("recovers a persisted REOBSERVING claim while preserving its historical Plan and Attempt", async () => {

@@ -109,6 +109,15 @@ const TERMINAL_SESSION_STATES = new Set<EpochSession["state"]>([
   "INTERRUPTED",
 ]);
 
+const IN_FLIGHT_SESSION_STATES = new Set<EpochSession["state"]>([
+  "CREATED",
+  "DISPATCHING",
+  "COLLECTING",
+  "VALIDATING",
+  "REOBSERVING",
+  "COMMITTING",
+]);
+
 type RuntimeAgentPort = AgentPort &
   Pick<AgentService, "systemInfo">;
 type RuntimeWorkspacePort = WorkspacePort &
@@ -264,14 +273,14 @@ export class EpochGuardService {
 
   private async initializeUnlocked(): Promise<void> {
     await this.ports.store.initialize();
-    const active = this.ports.store
+    const inFlight = this.ports.store
       .snapshot()
-      .sessions.some((session) => !TERMINAL_SESSION_STATES.has(session.state));
-    if (active) {
+      .sessions.some((session) => IN_FLIGHT_SESSION_STATES.has(session.state));
+    if (inFlight) {
       const timestamp = TimestampSchema.parse(this.now());
       await this.ports.store.mutate((database) => {
         for (const session of database.sessions) {
-          if (TERMINAL_SESSION_STATES.has(session.state)) continue;
+          if (!IN_FLIGHT_SESSION_STATES.has(session.state)) continue;
           session.state = "INTERRUPTED";
           session.sessionRevision += 1;
           session.stateUpdatedAt = timestamp;
