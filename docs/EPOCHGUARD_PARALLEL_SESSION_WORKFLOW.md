@@ -1,10 +1,8 @@
 # EpochGuard 并行 Session 执行与验收流程
 
-> 状态：执行中——阶段 8/9 已完成，阶段 9/9 Release Verification 进行中
-> 当前集成基线：`epochguard/staging`；本次文档同步前的产品/发布基线为 `140edd5`，文档同步不改变运行代码
-> 冻结合同：`epochguard-contract-v7`，`schemaVersion=1`
+> 冻结合同：`epochguard-contract-v8`，`schemaVersion=1`
 > 产品设计来源：[`EPOCHGUARD_FINAL_DESIGN.md`](./EPOCHGUARD_FINAL_DESIGN.md)  
-> 本文档范围：定义任务编排、审核、校验、测试和合并流程，并记录实际执行证据。当前已具备双场景生产 Service、正式 HTTP 接线、嵌入式 Session Safety Dashboard、权威运行证据带、发布文档与一页架构图；`140edd5` 的 Windows/WSL 干净克隆和依赖审计已通过，旧候选的 controlled-HTTP 浏览器门是历史证据。最终候选浏览器回归、真实 Ark 生命周期、视频、Devpost 最终提交与默认分支发布完成前仍不是最终端到端比赛演示。
+> 本文档范围：团队内部的中文任务编排、审核、校验、测试和历史执行证据；不作为英文提交材料，不存储会随发布变化的 active candidate/GO 状态。评委路径以 [`README.md`](../README.md)、[`ARCHITECTURE.md`](./ARCHITECTURE.md) 和 [`EPOCHGUARD_DEMO.md`](./EPOCHGUARD_DEMO.md) 为准；精确 public SHA 与门禁结果仅记入仓库外的脱敏 release manifest。
 
 ---
 
@@ -94,7 +92,7 @@ Gate 0 已完成：
 - WSL2 使用 Node `v22.22.3`、npm `10.9.8` 和独立 Linux `codex-cli 0.111.0`，没有复用 Windows `node_modules` 或 Windows Codex；
 - `e11619d` 旧候选的 controlled-HTTP 浏览器门已通过：生产无 Mock/Preview 接线、会话连续、busy 恢复、clear fail-closed、pending 防重入、localStorage 降级以及 390px/长文本布局均通过；`140edd5` 的最终浏览器回归仍待执行；
 - Dashboard 运行证据带、英文 README/演示 Runbook 和响应式 1920×1080 架构资产已集成并完成浏览器/链接检查；
-- 真实 `ARK_API_KEY` / `ARK_MODEL` 的模型生命周期仍是最终发布前 Go/No-Go，不能由 controlled HTTP 证据替代。
+- 2026-08-30 当前 WSL 工作树候选已用真实 BytePlus Key、`seed-2-0-lite-260428` 和 Codex Runtime 完成一次 scratch preflight 与七 Run API 主链；由于补丁尚未形成 reviewed clean SHA，最终候选复跑仍是发布前 Go/No-Go，且不能由 controlled HTTP 证据替代。
 
 ### 4.3 EG-00 必须冻结的合同
 
@@ -110,6 +108,8 @@ Gate 0 已完成：
 10. 新旧 Store 记录的 nullable/default 兼容行为。
 
 v7 只在既有七种公开错误之外新增两种 canonical 409：`UNSTABLE_WORLD` 精确携带 opaque-or-null `sessionId` 与非负整数 `actualWorldHead`；`ROLE_PROFILE_MISMATCH` 精确携带 `role` 与 `agentId`。原七种错误的字段、状态码和固定消息保持不变。
+
+v8 保留 v7 的错误合同，并冻结一条窄取证投影：只有当权威裁决与 Agent 输出不一致、Session 以 `VALIDATE / DECISION_INVALID` 失败，且最新 Diagnostic 的 Role 及 `ATTEMPT`、`ASSIGNMENT`、`RUN` 引用精确绑定 claimed refresh owner 时，公开 Snapshot 才允许 `CLAIMED + COMPLETED Attempt + REJECTED Assignment`。其他验证失败仍必须把公开 Attempt 闭合为终态失败；真实 Run 状态不得被改写。
 
 ### 4.4 已批准并冻结的 P0 语义
 
@@ -514,6 +514,61 @@ apps/web/src/main.tsx（仅确有必要时）
 - 真实后端 Snapshot 是 Dashboard 唯一数据源；
 - Web/Server typecheck 和 build 通过。
 
+### 6.11 EG-16 —— Formal Demo & Submission Release
+
+EG-16 不再增加产品功能。它把已经合入的能力冻结为可复现候选，并将官方验收项映射到真实浏览器证据、成片和提交材料。Dashboard 只作为 evidence surface，正式声明仍由 backend/Runtime/data/Effect 路径支撑。
+
+**顺序硬门**
+
+```text
+FD-00 Official UI Acceptance Seam
+  → FD-01 Candidate Freeze
+    → FD-02 Fresh-clone Offline + Live Preflight
+      → FD-03 Real Browser Seven-Run Rehearsals
+        → FD-04 Final Capture + Evidence Manifest
+          → FD-05 Video / Devpost / Anonymous Link QA
+            → CONTROL Final GO
+```
+
+Architecture、英文文案和字幕草稿可在 FD-01～FD-03 期间并行；任何录屏事实、Run ID、指标或 pass 状态都必须等对应硬门通过后填写。FD-03 之前不得把 API-only 成功称为 browser pass，FD-04 之前不得把 rehearsal 素材称为 final candidate evidence。
+
+| 包 | 执行 Session 范围 | 可修改/产生的资产 | 验收与禁止项 |
+| --- | --- | --- | --- |
+| FD-00 | 给 Launcher 固定 Role 卡增加 read-only focus/inspection，显示真实固定 Agent 名称、完整 ID、lifecycle、expected profile/evidence scope；Run 后聚焦同 ID 的 Run-bound evidence；补 Web 合同测试 | `apps/web/src/App.tsx`、最小关联样式/测试、对应文档 | 正式旅程点击 Budget；focus 仅改变本地 inspection 与同身份 evidence 展示，不进入 create payload，不改变三名服务端冻结 owner 的 ID、顺序或 assignment；不得开放 protected Agent 的 stop/delete/manual prompt |
+| FD-01 | 审核 working diff、形成 reviewed commit、推送候选、修正公开默认入口/tag | 代码/文档由原 Owner 完成；候选 SHA 记录 | clean；local=remote；最新修复已包含；不能从 dirty tree 录屏 |
+| FD-02 | WSL Linux 使用 `git clone --branch epochguard/staging --single-branch ...` 建立 clean public clone，然后 `npm ci`、`npm run check`、scratch Codex preflight | 私有脱敏 check/preflight 记录 | 当前分支必须是 `epochguard/staging`，clean，且 `HEAD = origin/epochguard/staging`；offline/preflight 同一 SHA；凭据仅从仓库外隐蔽注入；不输出 Key、Token、绝对用户路径 |
+| FD-03 | FD-02 已验证的同一 `epochguard/staging` public fresh clone 内，五个 fresh product root 的 production single-port 真实浏览器七 Run 彩排 | 私有 rehearsal ledger、关键截图 | 每轮启动前 fetch 公开 staging ref，再重验分支为 `epochguard/staging`、tree clean、`HEAD = origin/epochguard/staging = FD-02 candidate SHA`；FD-02 只做一次同 SHA `npm run check` + scratch preflight；随后保持 checkout 不变，每轮换 fresh data/workspace/Codex root，并在独立 origin/port `3101`–`3105` 上以 `NODE_ENV=production HOST=127.0.0.1 PORT=310N RUNTIME_PROVIDER=local-process npm start`；至少 4/5 无人工救场；不用 `npm run dev` 代替正式门 |
+| FD-04 | 最后一轮正式 capture、manifest、截图、架构导出 | master 视频、sanitized manifest、SVG/PNG/PDF | 真实 Run-bound Evidence 可读；同一候选；无 secret；所有 cut/加速标注 |
+| FD-05 | 2:50–2:55 剪辑、英文字幕、YouTube、Devpost 草稿与匿名 QA | 最终 MP4/hash、公开 URL、英文提交文案 | 不使用未授权素材；所有链接无登录可访问；12:00 SGT 前提交 |
+
+**并行写入边界**
+
+- FD-02/03 只执行和记录，不修改仓库；遇到产品缺陷返回原代码 Owner，不能现场补丁后继续沿用旧 evidence。
+- FD-04 只更新既有架构/提交资产与仓库外媒体，不改运行时代码。
+- FD-05 可以编辑提交文案和字幕，但不能改程序或测试；任何代码改变都回到 FD-01 并使后续证据失效。
+- Devpost 创建、YouTube 上传和最终 Submit 是外部写入，必须由用户明确执行或授权；执行 Session 不得擅自提交。
+- CONTROL 只依据同一候选的 manifest、raw/master 素材、测试和匿名链接给 GO，不凭口头报告放行。
+
+**脱敏 release manifest 必须满足的 GO 条件（本文不预先声明结果）**
+
+```text
+candidate.publicAndClean = true
+frontend.literalAgentFocusSelection = PASS
+offline.check = PASS
+live.preflight = PASS
+browser.fullTake = PASS
+browser.rehearsalPasses >= 4 / 5
+normal.effectCount = 1
+impossible.effectCount = 0
+recovery.runCounts = 1 / 2 / 1
+recovery.effectCount = 0
+video.duration < 180 seconds
+privacy.secretExposure = 0
+submission.anonymousLinks = PASS
+```
+
+唯一操作和录制细节见 `docs/EPOCHGUARD_DEMO.md` 第 7 节；本流程只定义分工、依赖与放行责任，不维护第二套脚本。
+
 ---
 
 ## 7. 当前 Session 的责任
@@ -531,7 +586,8 @@ apps/web/src/main.tsx（仅确有必要时）
 7. 在 WSL 运行最终全量检查；
 8. 持有真实凭据并运行 Ark Gate；
 9. 使用合并后前后端进行 Dashboard 浏览器验收；
-10. 决定接受、退回、重开原 Owner 或暂停依赖模块。
+10. 审核 candidate manifest、raw capture、成片、公开链接和官方验收映射；
+11. 决定接受、退回、重开原 Owner、暂停依赖模块或给出 Formal Demo GO。
 
 ### 7.2 不负责
 
@@ -812,9 +868,11 @@ npm run check
 
 ---
 
-## 15. 状态表
+## 15. 历史执行记录与持久发布门
 
-### 15.0 九阶段进度
+### 15.0 2026-08-30 pre-freeze 历史快照
+
+下表保留当时的实现沿革，不表示文件被阅读时的 candidate 或外部提交状态。发布只按第 6.11 节的持久门和仓库外脱敏 manifest 判定。
 
 | 阶段 | 状态 | 证据 |
 | --- | --- | --- |
@@ -826,11 +884,11 @@ npm run check
 | 6 Diagnostics / Snapshot / Run Adapter | COMPLETE | `c49fc7f`、`6df7feb` / `82a4f8e`、`7b81d68` |
 | 7 Coordinator / Routes | COMPLETE | `c091886` / `e6e58ba`，EpochGuard 286/286 |
 | 8 Dashboard + Production Integration | COMPLETE | `f096edd` 已合入；双场景生产接线、正式四 API、Dashboard 与 controlled-HTTP 浏览器门通过 |
-| 9 WSL / Real Ark / Browser / Release | IN_PROGRESS | `140edd5` 的 Windows/WSL 干净克隆均通过 Server 361/361 + Web 6/6、typecheck/build、audit=0；Runtime 真实性、未就绪禁用 Run 与发布预检入口已 fail-closed。真实 Ark（API Key 暂缺）、最终浏览器/视频、Devpost 提交和 `submission/main` 晋升待完成 |
+| 9 WSL / Real Ark / Browser / Formal Demo / Release | IN_PROGRESS *(historical checkpoint)* | 2026-08-30 pre-freeze WSL 快照通过其当时的全部测试、typecheck/build，并以 BytePlus `seed-2-0-lite-260428` 完成 scratch preflight 与一次真实七 Run API 主链。这些不认证后续 candidate；后续发布必须按第 6.11 节从头满足同 SHA 门 |
 
 | ID | 名称 | 状态 | Base SHA | Commit SHA | 中央门 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
-| CONTROL | 规划/审核/测试 | ACTIVE | `f096edd` | `140edd5` | — | 阶段 8/9 COMPLETE；阶段 9/9 IN_PROGRESS；新候选双平台确定性门已通过，负责真实 Ark、最终浏览器、视频与仓库放行 |
+| CONTROL | 规划/审核/测试/正式演示放行 | N/A（持久职责） | 历史 `f096edd` | 仓库外 manifest | Release gate | 只负责审核 candidate、验收浏览器证据、核对 manifest/视频/提交包并给出最终 GO；执行 Session 不得自行宣布 release ready |
 | EG-CANARY | 可视化 Session 只读灰度 | ACCEPTED | `475cb93` | — | Visibility / Read-only | 可视化机制通过；worktree 隔离未通过 |
 | EG-00 | Contracts & Starter Seams | MERGED | `7b81d68` | `0d677a2` | Gate A **PASS** | v7 合同已由 `c4927e4` 合入 |
 | EG-01 | EpochStore | MERGED | `e5f0b3a` | `a7ba259` | Gate B Store **PASS** | 已合入 `epochguard/staging@b5576dc` |
@@ -847,6 +905,7 @@ npm run check
 | EG-12 | Dependency Audit Patch | MERGED | `00bf1bd` | `a192b1f` / `8453eae` | Supply-chain **PASS** | lockfile 最小补丁，`npm audit --audit-level=low` 为 0 |
 | EG-14 | Architecture & Brand | MERGED | `a4b5c25` | `049894d`、`3a48ad5` / `fb9311b`、`e11619d` | SVG/Browser **PASS** | 一页架构资产、信任边界、并发和响应式拓扑完成 |
 | EG-15 | Runtime Evidence | MERGED | `a4b5c25` | `1d05784` / `6350aaa` | UI/Contract **PASS** | Snapshot 驱动的 fan-out、Run/Thread、overlap 与 usage 证据带完成 |
+| EG-16 | Formal Demo & Submission Release | N/A（持久门） | reviewed public candidate | 仓库外 manifest | Release Go/Fail | 顺序执行 FD-00–FD-05；任一代码变更都回到 FD-01 并使旧证据失效。只有同一冻结 SHA 的全部门证据可放行 |
 
 状态只使用：
 
@@ -912,9 +971,9 @@ BLOCKED
 | 合同版本 | `epochguard-contract-v7`，`schemaVersion=1` |
 | 合同摘要 | `sha256:4dfbeb9e55de7ca17a19f5fb8f99494b17e441af0f877767027284d3ae646361` |
 | 合同测试 | **28/28 PASS** |
-| 当前中央候选 | `140edd543e1244b27538fe74d7a80d144aec8c0a`；Server **23 files / 361 PASS**，Web **1 file / 6 PASS** |
-| 当前 Windows | 精确 SHA 干净克隆、`npm ci` 后 Server **361/361** + Web **6/6 PASS** |
-| 当前 WSL2 | Ubuntu 24.04 Linux 文件系统精确 SHA 干净克隆、`npm ci` 后 Server **361/361** + Web **6/6 PASS** |
+| 已提交历史候选 | `140edd543e1244b27538fe74d7a80d144aec8c0a`；Server **23 files / 361 PASS**，Web **1 file / 6 PASS** |
+| 该历史候选 Windows | 精确 SHA 干净克隆、`npm ci` 后 Server **361/361** + Web **6/6 PASS** |
+| 该历史候选 WSL2 | Ubuntu 24.04 Linux 文件系统精确 SHA 干净克隆、`npm ci` 后 Server **361/361** + Web **6/6 PASS** |
 | 构建门 | 全工作区 typecheck、Web/Server production build **PASS** |
 | 依赖门 | Windows/WSL `npm audit --audit-level=low` 均为 **0 vulnerabilities** |
 | v7 独立审核 | Server/Web 版本、digest、九种错误、strict schema、状态码、四个 Golden Snapshot hash 完全对称；三路 digest 复算一致 |
@@ -1076,8 +1135,8 @@ v6 的 8,118 个 mutation candidates、479 个标注 snapshots、17,356 次 deco
 | Production HTTP | 仅 `POST sessions`、`GET session`、`POST refresh`、`POST commit` 四条正式 API；均在 Bearer 边界内，debug/dev 路由为 canonical 404 |
 | Web | 使用真实 HTTP Source；跨 Chat/Safety 与 reload 保持 Session；busy 恢复只 GET 不重放 mutation；clear、Abort、pending 与 localStorage 均 fail closed |
 | 自动化门 | Dual + App **45/45**；EpochGuard **330/330**；App + EpochGuard **336/336**；typecheck/build **PASS** |
-| 平台门 | 本行保留 EG-09 当时证据：`f096edd` 的 Windows 为 359/360、WSL2 为 360/360；该平台缺口随后由 EG-11 `ce52af8` / `a4b5c25` 关闭；当前 `140edd5` 的 Windows 与 WSL 干净克隆均为 Server 361/361 + Web 6/6 |
-| 浏览器门 | EG-09/旧候选 controlled-HTTP 验收通过：390×844、1000 字符文本、单纵向滚动、生产无 Mock/Preview、无 P0/P1；`140edd5` 最终浏览器回归待执行 |
+| 平台门 | 本行保留历史证据：`f096edd` 的 Windows 为 359/360、WSL2 为 360/360；该平台缺口随后由 EG-11 `ce52af8` / `a4b5c25` 关闭；`140edd5` 当时的 Windows 与 WSL 干净克隆通过其当时发现的全部 Server/Web 测试 |
+| 浏览器门 | EG-09/旧候选 controlled-HTTP 验收的历史记录：390×844、1000 字符文本、单纵向滚动、生产无 Mock/Preview、无 P0/P1；不认证后续 final candidate |
 | 独立终审 | Server、测试矩阵、Web 三路 **ACCEPT**；P0=0，P1=0；Web 记录一个非阻断 P2：极端永久挂起请求需刷新恢复 |
 | Gate B/D/F | **PASS / MERGED**；真实 Ark 模型生命周期归阶段 9 单独放行 |
 
@@ -1112,5 +1171,6 @@ v6 的 8,118 个 mutation candidates、479 个标注 snapshots、17,356 次 deco
 9. [x] EG-07/08 稳定并合入后，以 `e6e58ba` 激活 EG-09；
 10. [x] EG-09 候选已合入，Gate B～F 与 controlled-HTTP 浏览器门已通过；
 11. [x] EG-10/11/12/14/15 已合入，`e11619d` 当时的 Windows/WSL 干净克隆、audit=0、Server 360/360、typecheck/build、运行证据、README/Runbook 与架构资产均通过；
-12. [x] 当前产品候选 `140edd5` 的 Windows/WSL 精确 SHA 干净克隆、audit=0、Server 361/361 + Web 6/6、typecheck/build、Runtime fail-closed 与发布入口加固均通过；
-13. [ ] 同一最终候选完成真实 Ark 七次 Run、真实浏览器录屏、`≤ 3:00` 视频、认证态 Devpost 检查后，才将 staging 晋升至 `submission/main`。
+12. [x] 历史候选 `140edd5` 的 Windows/WSL 精确 SHA 干净克隆、audit=0、当时发现的全部 Server/Web 测试、typecheck/build、Runtime fail-closed 与发布入口加固均通过；
+13. [x] 2026-08-30 pre-freeze WSL 快照通过其当时全部测试、typecheck/build，并完成真实 ModelArk scratch preflight 与七次 Agent Run API 主链；这是历史证据，不认证后续 candidate；
+14. [ ] 持久发布门：形成 reviewed clean public candidate，按 FD-00–FD-05 从头复跑必要门，并把真实浏览器录屏、`≤ 3:00` 视频、认证态 Devpost 检查结果写入仓库外脱敏 manifest 后，才可晋升公开提交入口。

@@ -4,9 +4,16 @@
 > **一句话：** Every Agent can be locally right, while the team acts on an observed world that never jointly existed.  
 > **中文：** 每个 Agent 都可能局部正确，但团队仍可能依据一个从未共同成立过的“拼接世界”执行动作。
 
+> [!NOTE]
+> 本文是团队内部的中文设计与历史决策记录，不是英文提交材料，也不存储
+> 会随发布变化的 candidate GO 状态。评委实际复现以英文
+> [`README.md`](../README.md)、[`ARCHITECTURE.md`](./ARCHITECTURE.md) 和
+> [`EPOCHGUARD_DEMO.md`](./EPOCHGUARD_DEMO.md) 为准；精确 SHA 与测量结果仅记入
+> 仓库外的脱敏 release manifest。
+
 ## 0. 最终结论
 
-**条件 GO：EpochGuard 的合同、后端状态机、双场景生产接线、Dashboard、Windows/WSL 自动化门和 controlled-HTTP 浏览器门均已通过；只有最终候选再通过真实 Ark/Codex Run 与完整录屏链路，才升级为正式 Demo GO。任一真实运行硬门失败就立即降级或停止，不能用 FakeRunner 或受控 HTTP 冒充完成。**
+**发布原则：仓库内不预先声明正式 Demo GO。只有一个 reviewed clean public SHA 在一个 public fresh clone 中通过无秘密的 `npm run check` 和同 SHA scratch preflight，再以五个 fresh product root 与独立 port/origin 完成正式浏览器七 Run 彩排且至少四次无人工救场，同时验证 Budget read-only focus 到同一 Agent ID 的 Run-bound evidence 连续性、录屏、隐私和公开链接门，仓库外的脱敏 manifest 才能记录 GO。任一硬门失败就降级或停止，不能用 FakeRunner 或受控 HTTP 冒充完成。**
 
 它不是聊天机器人、工作流编排器或区块链项目，而是一个执行在后端副作用边界的 Multi-Agent 协调中间件；产品形态是“后端 Effect Gate + 嵌入现有 Playground 的 Session Safety Dashboard”，其中 Dashboard 只展示和操作权威状态，不承担安全判断：
 
@@ -46,11 +53,11 @@ failure_session.effectsInSession = 0
 - 最新公开页面复核时间：2026-08-30 约 15:15 SGT，距离截止约 **44 小时 45 分**；
 - 这是 72 小时赛，不再采用“五天实施计划”。
 
-### 1.2 Devpost 当前状态
+### 1.2 Devpost 历史核对点
 
-- 官方公开页面仍显示提交期处于开放状态，截止时间为 **2026-09-01 12:00 SGT**；
-- 匿名、只读访问无法判断参赛者账号内是否已经创建或保存提交草稿，因此不再把 `Start project` 或“尚未创建草稿”写成已验证事实；
-- 参赛者应立即登录 Devpost，创建并保存草稿，核对公开仓库、`≤ 3:00` YouTube 视频和书面说明字段；
+- 2026-08-30 公开页面核对时显示截止时间为 **2026-09-01 12:00 SGT**；
+- 同日的已登录提交管理页当时显示 `My hackathon projects — Start a Project`；这只是当次只读核对的历史证据，不描述后续草稿状态；
+- 参赛者应立即创建并保存草稿，核对真实的公开仓库、`≤ 3:00` YouTube 视频、书面说明、图片和 testing 字段；公开页面没有展示的字符或尺寸限制不能凭经验猜测；
 - 截止前可以修改草稿，但最终提交与公开页面检查必须由参赛者本人完成。
 
 官方入口：
@@ -100,17 +107,19 @@ implementation changes: none
 design artifact: docs/EPOCHGUARD_FINAL_DESIGN.md
 ```
 
-当前已完成阶段 8/9，阶段 9/9 Release Verification 正在收口。此次权威文档同步前的最新产品/发布基线为 `epochguard/staging@140edd543e1244b27538fe74d7a80d144aec8c0a`：冻结合同 v7、Store、World/Evidence、Decision/JV、Refresh/Effect、Diagnostics/Snapshot/Run Adapter、Coordinator/Routes、双场景 Production Integration、Session Safety Dashboard、运行证据带、英文 README/演示手册、一页品牌架构图、跨平台测试修复、依赖补丁，以及 Runtime 真实性/未就绪禁用 Run/凭据预检 fail-closed 加固均已合入并推送 staging。该精确 SHA 已在 Windows 与 WSL2 Ubuntu 24.04 两个干净克隆中分别完成 `npm ci`（196 packages）、`npm audit --audit-level=low`（0 vulnerabilities）、Server 23 files / 361 tests、Web 1 file / 6 tests、全工作区 typecheck 和 Web/Server production build。此前生产无 Mock 的 controlled-HTTP 浏览器门已经通过，但 `140edd5` 的最终浏览器回归仍与真实 Ark 演示一起保留为发布门。当前候选可以做确定性和受控演示，但仍不等于真实模型端到端比赛演示；真实 Ark、录屏和默认分支发布尚未完成。
+历史证据：2026-08-30 的一个 pre-freeze WSL2 working-tree snapshot 通过了其当时的全部 Server/Web 测试、typecheck 和 production build，并使用 BytePlus ModelArk `seed-2-0-lite-260428` 完成 scratch Responses/Codex preflight 和一次真实七 Run API 主链。Normal World 得到 `3 ALLOW`、head 10 上的有效联合验证窗口 `[10,11)` 和一次幂等 Effect；Impossible World 首轮得到 `3 ALLOW`、no-cut bounds `L=21/U=20` 和零 Effect，随后只刷新 Budget，最终为 `2 ALLOW + 1 DENY`、Run 计数 `1/2/1`、零 Effect。这些是特定快照的历史证据，不认证后续 public candidate，也不能把一次通过夸大成长期模型稳定性。
 
 正式实现应把赛段开始后的新增代码、测试、README 和演示材料保留为清晰的 Git 历史；不要把赛前概念文档冒充实现成果。
 
-当前运行硬阻塞必须显式记录：**`ARK_API_KEY` / `ARK_MODEL` 尚未完成最终候选的真实 Agent Run 验证；按用户决定暂时跳过 Key，若演示选择 container Runtime，Docker daemon 也仍需单独验证。** Windows 与 WSL2 Ubuntu 24.04 的精确 SHA 干净克隆已完成 audit=0、Server 361/361、Web 6/6、typecheck 和 build，但确定性测试与受控 HTTP 都不能替代真实模型 Runtime；真实运行仍是发布前 Go/No-Go。
+发布边界始终是：历史 API 成功只证明当时配置和链路可用，不证明远程模型长期稳定，也不能替代最终候选 Git SHA 的同 SHA 复跑证据。发布结果只写入仓库外的脱敏 manifest，本文不随每次候选更新活状态。
 
 ### 1.6 资格和提交可用性自检
 
 官方规则还要求参赛者年满 18 岁、当前居住在新加坡、就读于新加坡大学且预计毕业时间不早于 2026 年 12 月；团队最多五名 Eligible Individuals，并由一名代表提交。每位成员应完成官方 Registration Form 和 Devpost 两处注册。本文不替参赛者判断个人资格，提交前必须自行核对。
 
-公开仓库、测试说明和 working project / demo 必须免费、无障碍地供评委测试，至少保持至 **2026-09-07 15:00 SGT** 评审期结束；若入口私有，测试说明必须提供可用凭据。视频、图片、音乐和第三方素材应为自有、开源或已获授权内容。
+公开仓库、无秘密的 `npm ci && npm run check`、视频和提交素材必须免费、无障碍地供评委测试，至少保持至 **2026-09-07 15:00 SGT** 评审期结束。本项目不声称已托管可公开调用的 live ModelArk 服务；live 复现需评委自有的合资格 BytePlus 账户、同区域已激活模型与有权限的 Key，或由主办方/团队安排限时的 app-level 访问。永远不向评委分享 ModelArk API Key；免费 token 优惠只能按资格条件描述，不能保证。视频、图片、音乐和第三方素材应为自有、开源或已获授权内容；逐项归属见英文 README。
+
+比赛完成后按官方规则执行数据清理：撤销 demo Key 和 app token，删除 scratch preflight root、彩排/demo Store、Agent workspace、临时 `CODEX_HOME`、raw model output/log 和不安全录屏；只保留公开源码/提交素材以及规则允许的脱敏哈希与证据。
 
 ### 1.7 Dashboard 的官方边界
 
@@ -207,11 +216,11 @@ current head = 20
 
 ### 3.1 对外不变量
 
-> For effects routed exclusively through EpochGuard, no effect is released unless every server-issued, assignment-bound observation receipt is authentic, bound to the same intent and its actual run, valid at one current observed-world head, every domain verdict allows that exact intent, and the protected sink’s freshness and idempotency checks pass.
+> For effects routed exclusively through EpochGuard, no effect is released unless every server-issued, assignment-bound observation receipt is authentic, bound to the same intent and its actual run, valid at one current observed-world head, every submitted domain verdict equals the backend's fixed authoritative-rule result, all three results allow that exact intent, and the protected sink’s freshness and idempotency checks pass.
 
 中文版：
 
-> 对所有只能通过 EpochGuard 释放的动作，只有当服务端签发、绑定一次性 Assignment 的全部观察 Receipt 真实有效，且它们绑定同一意图及各自实际 Run、在同一个当前受观测世界版本中成立、所有领域决定都允许该精确动作，并且 Sink 的新鲜度和幂等检查通过时，副作用才会发生。
+> 对所有只能通过 EpochGuard 释放的动作，只有当服务端签发、绑定一次性 Assignment 的全部观察 Receipt 在权威 Store 中存在且绑定有效，它们绑定同一意图及各自实际 Run、在同一个当前受观测世界版本中成立，每个模型 Verdict 都等于后端根据 canonical ActionIntent 与对应权威 ResourceVersion 重算的固定 Role 结果，三项结果均为 `ALLOW`，并且 Sink 的新鲜度和幂等检查通过时，副作用才会发生。
 
 ### 3.2 这不是区块链
 
@@ -225,6 +234,7 @@ current head = 20
 强保证只覆盖：
 
 - 三个注册的 Versioned Source Fixture；
+- 三条由可信代码实现、针对这些 Fixture 的固定 typed Role predicate；
 - 由服务端捕获、签发 Receipt 并通过一次性 Assignment 交付给 Agent 的动态证据；
 - 通过 EpochGuard 唯一 Effect Gate 执行的本地 Mock Publish Effect；
 - 一个单进程、单控制面的逻辑时钟和事件存储。
@@ -234,7 +244,7 @@ current head = 20
 不保证：
 
 - 真实世界绝对正确；
-- Agent 的语义推理一定正确；
+- Agent 的内部推理过程、`reason` 文本或任意开放领域语义一定正确；P0 只强制三条固定 Role predicate 的结果一致性；
 - Agent 没有使用训练记忆或未声明的隐藏知识；
 - 任意第三方 API 能映射到同一时钟；
 - 任意远程 API exactly-once；
@@ -256,7 +266,7 @@ EpochGuard 的 Hackathon 创新应准确落在以下系统组合上。
 
 传统 Agent 输出成功文本后即可由 Coordinator 发布。EpochGuard 把多 Agent 证据的共同有效性提升为后端硬门：没有 `READY_AT_CURRENT_HEAD`，Publisher 根本没有可用调用路径。
 
-### 4.2 三个隔离 Runtime 决定与可信观察进行 Run 级绑定
+### 4.2 三个独立 Role-Agent Run / Workspace 与可信观察进行 Run 级绑定
 
 每个决定不是只携带答案，而是绑定：
 
@@ -315,7 +325,7 @@ Session Safety Dashboard 把以下后端事实压缩成评委能在数秒内理�
 
 更安全的英文定位：
 
-> EpochGuard is a decision-layer joint-validity gate for asynchronous Agent teams. It binds trusted, versioned observation receipts to isolated Agent decisions, blocks protected effects when those receipts cannot coexist at one admissible observed-world revision, and directs refresh only to invalid evidence owners.
+> EpochGuard is a decision-layer joint-validity gate for asynchronous Agent teams. It binds server-issued, versioned observation receipts to isolated Agent decisions, independently recomputes three fixed Role results, blocks protected effects when those receipts cannot coexist at one admissible observed-world revision, and directs refresh only to invalid evidence owners.
 
 ### 4.7 与相邻工作的关系
 
@@ -484,7 +494,7 @@ Policy    ─┘
 | 系统持久状态 | EpochStore 中的 Session、Assignment、Receipt、active Decision、Validation、Effect、Event | 可作为审计和验证输入 |
 | 长期语义记忆 | 不做向量库、embedding、自动摘要或用户画像 | 不适用 |
 
-库存、预算或政策即使曾出现在历史对话中，也必须由当前 Assignment 的服务端 Receipt、nonce 和可确定性重建的 Evidence Pack 重新证明。P0 不修改官方 Runner 来强制 fresh thread，因此不能宣称上下文完全隔离；它使用三个专用、版本锁定的 Role Agent，并把旧线程当作可能污染模型输出的不可信输入。旧 Receipt/nonce/Role/Profile 引用会在 Normalizer fail closed；但如果旧指令诱导模型在正确回传当前绑定字段的同时给出错误 Verdict，协议会把它视为合法但语义错误的候选决定。该风险属于第 3.4 节明确排除的 Agent 推理正确性，由 Role oracle 评测暴露，不能伪称 Receipt 绑定已经解决。
+库存、预算或政策即使曾出现在历史对话中，也必须由当前 Assignment 的服务端 Receipt、nonce 和可确定性重建的 Evidence Pack 重新证明。P0 不修改官方 Runner 来强制 fresh thread，因此不能宣称上下文完全隔离；它使用三个专用、版本锁定的 Role Agent，并把旧线程当作可能污染模型输出的不可信输入。旧 Receipt/nonce/Role/Profile 引用会在 Normalizer fail closed。若旧指令诱导模型在正确回传当前绑定字段的同时给出错误 Verdict，Normalizer 只会在事务内完成结构与绑定解析；JointValidityValidator 随后根据权威 Action 与 ResourceVersion 重算固定 Role 结果，任何不一致都以 `DECISION_INVALID` fail closed，本次候选 Decision 不会持久化，也不会生成 JVC、Permit 或 Effect。该机制验证三条固定规则的结果一致性，不证明模型内部推理或 `reason` 文本正确。
 
 P0 也不实现通用 Skills Registry。Starter Kit 通过各 workspace 的 `AGENTS.md` 提供身份和静态指令，EpochGuard 再用固定 Role Profile 版本与 digest、独立 workspace / Runtime、领域 Evidence Pack、严格输出 Schema 和无 Publish 权限形成最小 capability boundary。真正的 `skill id/version + input/output schema + allowed tools + permission scope + timeout + audit policy` 只能列入后续工作，不能冒充当前能力。
 
@@ -736,7 +746,7 @@ interface ObservationReceipt {
     "actionHash": "sha256:...",
     "queryHash": "sha256:...",
     "roleProfileVersion": "budget-v1",
-    "promptTemplateVersion": "epoch-prompt-v1"
+    "promptTemplateVersion": "epoch-prompt-v2"
   },
   "action": {
     "campaignId": "campaign_42",
@@ -761,9 +771,11 @@ interface ObservationReceipt {
 | Budget | `campaignId, estimatedCostCents` | `remainingBudgetCents` | `remainingBudgetCents >= estimatedCostCents` |
 | Policy | `campaignId, market` | `permitted` | `permitted === true` |
 
+Evidence Pack 中的自然语言 `decisionRule` 是给模型的说明，不是服务器解释执行的 DSL。可信代码通过固定的 `evaluateAuthoritativeVerdict(role, action, resourceValue)` 实现上述三条 predicate；扩展到新 Role 时必须显式增加 typed evaluator 和测试，不能仅修改规则文本。
+
 `EvidencePackWriter.buildCanonicalPack()` 是纯函数：只从 EpochStore 中的 frozen ActionIntent、RoleQuerySpec、Assignment、Receipt 和对应 ResourceVersion 重建固定字段顺序的 canonical bytes，再计算 hash 并写 workspace。EpochStore 保存全部重建原料与 expected `evidencePackHash`，因此“服务器副本”指可确定性重建的权威内容，不是假设 workspace 里另有一份可信文件；Normalizer 可重建并核 hash，Dashboard 也只显示 expected hash。
 
-动态观察值只存在 Pack，不复制进 Prompt。给 Agent 的 Prompt 只提供 Assignment-scoped 相对文件路径、Assignment ID 和输出格式，也不复制 `receiptId` 或 nonce；返回当前高熵 nonce 能证明模型接触过该 Pack 的内容，但不能证明具体文件读取路径、没有使用旧记忆或语义推理一定正确。Agent 修改 workspace 副本不会改变服务器 Receipt、ResourceVersion 或 expected Pack hash；这类修改最多影响未可信候选 Verdict，不能直接改变 Gate 输入或发布参数。
+动态观察值只存在 Pack，不复制进 Prompt。给 Agent 的 Prompt 只提供 Assignment-scoped 相对文件路径、Assignment ID 和输出格式，也不复制 `receiptId` 或 nonce；返回当前高熵 nonce 能证明模型接触过该 Pack 的内容，但不能证明具体文件读取路径、没有使用旧记忆或内部推理正确。Agent 修改 workspace 副本不会改变服务器 Receipt、ResourceVersion 或 expected Pack hash；Pack/绑定不一致会 fail closed，结构与绑定正确但规则结果错误的 Verdict 也会被权威重算拒绝，不能直接改变 Gate 输入或发布参数。
 
 静态角色边界写在 workspace 的 `AGENTS.md`；每次 Run 的动态 Prompt 保持极薄：
 
@@ -772,10 +784,12 @@ You are the Budget Agent for assignment assignment_....
 Read .epochguard/sessions/<sessionId>/budget/<assignmentId>.json.
 Use only the immutable action and evidence in that file.
 Do not infer missing facts or claim a publish action.
-Return exactly one <EPOCH_DECISION>{...}</EPOCH_DECISION> envelope.
+Return exactly one <EPOCH_DECISION> envelope containing only the nine required
+keys: schemaVersion, sessionId, actionHash, runAssignmentId, role, receiptId,
+nonce, verdict, reason. Do not use aliases, placeholders, Markdown, or free text.
 ```
 
-Prompt 不复述业务值、Receipt ID 或 nonce，也不要求模型创建 Todo List。单 Agent 只有“读证据 → 领域判断 → 严格输出”一个收敛任务；可靠的 Todo 已外置为服务端状态机。这样减少 Token、跑题和格式漂移，并提供可复现的 `model + file/data action` 证据，但不夸称能够证明模型内部推理过程。
+当前生产模板为 `epoch-prompt-v2`，显式冻结上述九字段、Marker、禁止 alias/extra key/占位符和静默自检；`epoch-prompt-v1` 只保留给历史 Assignment 精确回放。Prompt 不复述业务值、Receipt ID 或 nonce，也不要求模型创建 Todo List。单 Agent 只有“读证据 → 领域判断 → 严格输出”一个收敛任务；可靠的 Todo 已外置为服务端状态机。这样减少 Token、跑题和格式漂移，并提供可复现的 `model + file/data action` 证据，但不夸称能够证明模型内部推理过程。
 
 ### 7.5 Agent Decision Envelope
 
@@ -797,11 +811,11 @@ Agent 最后必须输出：
 </EPOCH_DECISION>
 ```
 
-Parser 要求恰好一个 Marker envelope、无尾随自由文本，并使用 Zod `.strict()` 拒绝额外动作或工具参数。Envelope 不接受自报 `runId`；Normalizer 从完成该消息的权威 Run Evidence 注入它。重复/缺失 Marker、JSON 非法、额外字段、错误 nonce、Receipt/Assignment 不存在、跨 Role/Action 重放、Assignment 未绑定该 Run、已消费，或任一绑定错误时，状态为 `DECISION_INVALID`，且副作用为零。生产 Sink 参数永远由服务器 canonical ActionIntent 构造，不从模型 reason 或任意工具参数提取。
+Parser 要求恰好一个 Marker envelope、无尾随自由文本，并使用 Zod `.strict()` 拒绝额外动作或工具参数。Envelope 不接受自报 `runId`；Normalizer 从完成该消息的权威 Run Evidence 注入它。重复/缺失 Marker、JSON 非法、额外字段、错误 nonce、Receipt/Assignment 不存在、跨 Role/Action 重放、Assignment 未绑定该 Run、已消费，或任一绑定错误均 fail closed，且副作用为零。结构和绑定通过后得到的 Verdict 仍是不可信候选值；Validator 会从权威 Action + ResourceVersion 独立重算固定 Role 结果，不一致时返回 `DECISION_INVALID` 并回滚本次候选 Decision。生产 Sink 参数永远由服务器 canonical ActionIntent 构造，不从模型 reason 或任意工具参数提取。
 
 ### 7.6 Dependency Certificate
 
-它由中间件根据合法 Envelope 和服务器 Receipt 构造，不由 LLM 自己签发：
+它由中间件根据结构合法且绑定有效的 Envelope 和服务器 Receipt 临时构造，不由 LLM 自己签发；只有后续权威规则与联合有效性验证成功，该事务才会发布它：
 
 ```ts
 interface DependencyCertificate {
@@ -1287,7 +1301,7 @@ World Observation
 
 详细步骤：
 
-1. 用户在 Playground 选择场景和三个注册、Profile digest 匹配的专用 Role Agent；
+1. 用户在 Playground 选择场景并只读聚焦查看一个 Agent；前端自动解析三个已注册、Profile digest 匹配的专用 Role Agent，服务端验证并冻结 owner 三元组；
 2. Coordinator 固定 `ActionIntent`，计算 `actionHash`；
 3. World Simulator 按确定性脚本**交错执行 World Commit 与 Observation Capture**，不是先推进到终点再一次性读取；
 4. 每次捕获时，服务端原子创建一次性 Assignment、记录当时 head、签发权威 Receipt，并生成对应 Evidence Pack；
@@ -1296,12 +1310,12 @@ World Observation
 7. Agent 读取文件、作领域判断、回传 Assignment ID、Receipt ID、nonce 和结构化 Envelope；
 8. Normalizer 从 EpochStore 中已镜像的权威 Run Evidence 取得真实 `runId`，验证 Envelope、Assignment、Run、Agent、Role/Profile、Action/query、Pack hash、Receipt 全绑定，并单次消费 Assignment；
 9. Composer 要求 Inventory、Budget、Policy 恰好各一个决定，每个决定恰好一条本领域动态 Receipt；
-10. Validator 从 Ledger 解析三个 Receipt 的权威区间和 exact dependency-set hash；
+10. Validator 从 Ledger 解析三个 Receipt 的权威 ResourceVersion、区间和 exact dependency-set hash，并对每个 Role 执行固定 `evaluateAuthoritativeVerdict`；模型 Verdict 与权威结果不一致时以 `DECISION_INVALID` 回滚本次事务，不发布 Decision/JVC/Permit/Effect；
 11. 无交集时返回绑定该依赖集合的 No-Cut Proof，Effect Gate 保持关闭；
 12. 有历史交集但未覆盖当前 head 时返回 `HISTORICAL_BUT_STALE_NOW`；
-13. 当前 head 被全部覆盖但任一 Agent 为 `DENY` 时返回 `CONSISTENT_DENY`；
-14. 当前 head 被全部覆盖且三者都 `ALLOW` 时签发一次性 Permit；
-15. Effect Gate 在同一个 `EpochStore.mutate()` 中重验完整 Assignment / Run / Action / Receipt / 区间 / head / 幂等绑定，再原子写入 Mock Effect 并消费 Permit；
+13. 当前 head 被全部覆盖、模型 Verdict 均匹配权威结果且任一权威结果为 `DENY` 时返回 `CONSISTENT_DENY`；
+14. 当前 head 被全部覆盖、模型 Verdict 均匹配且三项权威结果都为 `ALLOW` 时签发一次性 Permit；
+15. Effect Gate 在同一个 `EpochStore.mutate()` 中重验完整 Assignment / Run / Action / Receipt / 区间 / head / 幂等绑定，并再次从 Action + ResourceVersion 计算三项权威结果、要求它们与活动 Decision 均为 `ALLOW`，再原子写入 Mock Effect 并消费 Permit；
 16. 无切面时，Refresh Planner 只启动当前 head 下证据无效的 owner；
 17. 新 Agent 决定返回后，全部 Receipt 重新组合、重新验证，旧 Permit 不能复用；
 18. `SessionViewBuilder` 只从单次 EpochStore snapshot 构造同 revision 的 Dashboard Snapshot，不在 GET 时跨 Store 查询；前端只负责展示和发命令。
@@ -1391,6 +1405,12 @@ validate(sessionId, actionHash, decisionCertificates):
         require version.validFromSeq <= receipt.observedAtSeq
         require receipt.observedAtSeq < effectiveUntil
         require receipt.observedAtSeq <= H
+
+        authoritativeVerdict = evaluateAuthoritativeVerdict(
+            decision.role, currentAction, version.value
+        )
+        require decision.verdict == authoritativeVerdict
+            else DECISION_INVALID
 
         intervals.push({
             receiptId,
@@ -1489,6 +1509,8 @@ capture head
 → load Permit.jointValidityCertificateId and require its session / action / dependency set / validated head match
 → load exactly the Session's three active Decision IDs; reject superseded Decisions
 → revalidate every Assignment / Run / Decision / Receipt / dependency hash / interval
+→ recompute each fixed authoritative Role result from Action + ResourceVersion
+→ require every active Decision and every authoritative result to be ALLOW
 → require current head == permit.validatedHead
 → lookup idempotencyKey again inside this critical section
 → if absent, append exactly one Effect and mark Permit CONSUMED
@@ -1854,12 +1876,15 @@ Session Safety Dashboard 不是额外装饰或独立 BI 页面，而是同一 Se
 `Session Safety` 只替换现有消息区和 Composer，不创建新首页。用户流程：
 
 1. 用户按现有认证流程粘贴 Bearer token 并打开 Playground，再从 `Agent Chat` 切到 `Session Safety`；
-2. Dashboard 自动解析后端注册并冻结的 Inventory / Budget / Policy 三个专用 Role Agent，不要求用户在侧栏手工挑选；普通 Chat Agent 不进入安全三元组；
-3. 选择 `Normal World` 或 `Impossible World`；
-4. 点击与场景对应的 `Run Normal World` 或 `Run Impossible World`；后端再次验证三个 ID 不同、状态可运行、Role/Profile 版本匹配且全局没有 active Session，然后冻结 assignments 并并发派发初始三条 Run；
-5. `BLOCKED_NO_CUT` 时只显示服务端授权的 `Re-observe Budget only`；
-6. `READY_AT_CURRENT_HEAD` 时显示 `Commit protected effect`，点击后后端仍在串行临界区完整重验；
-7. `Clear saved session` 先通过 production GET 严格验证 Session 已终态或得到精确匹配的 canonical 404，随后只删除浏览器保存的指针；它不调用 mutation/reset API、不删除后端 Store，也不重置世界。在同一录制 take 内可清除 Normal 指针后切换到尚未使用的 Impossible 分区。重新录制或重跑同一场景必须使用全新的 `APP_DATA_DIR`。
+2. Dashboard 自动解析后端注册并冻结的 Inventory / Budget / Policy 三个专用 Role Agent；普通 Chat Agent 不进入安全三元组；
+3. 用户在 Launcher 点击 Budget Role 卡，只读聚焦这个已注册 runnable Agent，查看真实固定名称、完整 Agent ID、Role、lifecycle status、expected profile 和 evidence scope；该 focus 是官方 create/select journey 的 inspection 选择，不进入 command payload，不能改变 owner、assignment、顺序或 Role；
+4. 选择 `Normal World` 或 `Impossible World`；
+5. 点击与场景对应的 `Run Normal World` 或 `Run Impossible World`；后端再次验证三个 ID 不同、状态可运行、Role/Profile 版本匹配且全局没有 active Session，然后冻结 assignments 并并发派发初始三条 Run；
+6. `BLOCKED_NO_CUT` 时只显示服务端授权的 `Re-observe Budget only`；
+7. `READY_AT_CURRENT_HEAD` 时显示 `Commit protected effect`，点击后后端仍在串行临界区完整重验；
+8. `Clear saved session` 先通过 production GET 严格验证 Session 已终态或得到精确匹配的 canonical 404，随后只删除浏览器保存的指针；它不调用 mutation/reset API、不删除后端 Store，也不重置世界。在同一录制 take 内可清除 Normal 指针后切换到尚未使用的 Impossible 分区。重新录制或重跑同一场景必须使用全新的 `APP_DATA_DIR`。
+
+Launcher focus 使用原生 button 与 `aria-pressed`，默认聚焦 Inventory；正式旅程明确点击 Budget。`createSession()` 仍从完整、精确名称解析结果构造三元组，绝不从 `focusedRole` 构造 assignments；发起 Run 时只保留被聚焦 Agent ID 用于展示连续性，后续自动高亮并展开同一 Budget Agent 的 `Run-bound evidence`，其权威 Snapshot 仍由服务端核对冻结的 ID/profile。候选验收必须同时证明：单元 contract 中 `buildCreateSessionRequest` 不含 focus，生产创建路径只使用完整 assignments，真实浏览器彩排中 Budget 全 ID 跨 Run 前后相同，且 protected Agent 的 stop/delete/manual message 仍被后端拒绝。
 
 绝不提供 `Force release`、`Ignore proof`、手工编辑 interval/head/effect count 或任意选择 refresh Agent 的能力。
 
@@ -1923,13 +1948,13 @@ Budget evidence ended at v20.
 Policy permission began at v21.
 ```
 
-失败时直接依据 Snapshot 突出 Budget 与 Policy witness，Inventory 降低视觉权重但不隐藏；点击 Agent 卡联动高亮属于 Stretch，不改变后端状态。`Raw proof` 只用原生 `<details>` 展示后端 No-Cut Proof JSON，不实现复杂 Proof Explorer。
+正式 Run 前 Launcher 的只读 Agent focus selection 是 P0 官方旅程接缝；Session 建立后，点击 Decision 卡联动 World Inspector 高亮仍属于 Stretch，二者不能混为同一交互。失败时直接依据 Snapshot 突出 Budget 与 Policy witness，Inventory 降低视觉权重但不隐藏。`Raw server proof` 只用原生 `<details>` 展示后端 No-Cut Proof JSON，不实现复杂 Proof Explorer。
 
 Gate 状态必须同时使用文字、图标和颜色：`WAITING`、`CHECKING`、`LOCKED`、`READY`、`RELEASED`、`FAILED`。恢复为安全 `DENY` 时显示中性 `RESOLVED SAFELY / NOT RELEASED`，不能用绿色暗示动作已发布。按钮是否可见来自 Snapshot `availableActions`，但后端不信任按钮状态。
 
 ### 14.5 Run-bound Evidence Details 与 Badcase 定位
 
-三张卡默认显示冻结的 Agent 名称/Role、active Decision 的短 Run ID、Fact、Verdict、Receipt 区间、证据状态和 run count；若 refresh 正在进行，在同一卡片独立显示 `inFlightAttempt`，绝不把新 Run 与旧 Verdict 混成一个状态。当前 Dashboard 已实现权威运行证据带：直接读取 Snapshot 的 `coordinationMode`，统计不同 active Run、已记录 Thread 的覆盖数、初始 Run 当前可证实的共同活跃重叠区间，以及 input/cached-input/output 三类 usage 字段覆盖；只有存在可比较的时间区间时才显示 overlap，刷新后不可比较就明确显示 unavailable，cached input 明示为 input 的子集。Run-bound Evidence `<details>` 当前展示短 Run/Assignment、source/observed revision、Runtime、短 Thread、Evidence Pack 相对路径与短 hash；Receipt 的短 ID 和区间显示在同一卡片，Agent 只显示名称/Role，公开 ActiveDecision Snapshot 不投影 `validationId`。Run/Assignment/Thread 的完整 opaque 值可通过标题属性用于审计，但任何层级都不显示本机绝对用户名路径、API Key、完整环境变量或未脱敏 Prompt，也不扩展成通用 Agent observability / token 成本产品。
+三张卡默认显示冻结的 Agent 名称/Role、Fact、Verdict、Receipt 短 ID/区间、证据状态和 run count；具体短 Run ID 位于展开的 `Run-bound evidence`，不能在视频脚本中假定三条 ID 默认同时可见。若 refresh 正在进行，在同一卡片独立显示 `inFlightAttempt`，绝不把新 Run 与旧 Verdict 混成一个状态。当前 Dashboard 已实现权威运行证据带：直接读取 Snapshot 的 `coordinationMode`，统计不同 active Run、已记录 Thread 的覆盖数、初始 Run 当前可证实的共同活跃重叠区间，以及 input/cached-input/output 三类 usage 字段覆盖；只有存在可比较的时间区间时才显示 overlap，刷新后不可比较就明确显示 unavailable，cached input 明示为 input 的子集。Run-bound Evidence `<details>` 当前展示短 Run/Assignment、source/observed revision、Runtime、短 Thread、Evidence Pack 相对路径与短 hash；Receipt 的短 ID 和区间显示在 `<details>` 上方的同一卡片 strip，Agent 只显示名称/Role，公开 ActiveDecision Snapshot 不投影 `validationId`。Run/Assignment/Thread 的完整 opaque 值可通过标题属性用于审计，但任何层级都不显示本机绝对用户名路径、API Key、完整环境变量或未脱敏 Prompt，也不扩展成通用 Agent observability / token 成本产品。
 
 Dashboard 的诊断链直接复用权威工件：
 
@@ -1968,25 +1993,38 @@ Normal 和 Failure 位于两个物理独立 Store，各自创建不可预测的 
 
 ## 15. 三分钟视频脚本
 
+正式视频不是 Dashboard 功能巡礼，而是一个完整的 campaign-publish 安全故事：Normal 是健康对照，Impossible 是同一业务决定的受控时间冲突与恢复分支。两者属于同一 take 下两个独立 Fixture Store，不能说成同一个 Store 的连续修复。Dashboard 只是证据观察面；middleware 必须由真实 frontend-to-Agent、Runtime、服务端验证、数据与 Effect Gate 链路证明。
+
+按[官方 Track 1 信息文档](https://bytedance.larkoffice.com/wiki/GdYFwzWNLiREsSkuIjZcDznInWc)逐项覆盖：
+
+| 官方验收项 | 正式画面 |
+| --- | --- |
+| 前端创建/选择 runnable Agent 与 lifecycle | Session Safety Launcher 显示三个精确 Role Agent 与 `ready`；用户点击 Budget 卡查看其真实名称、完整 ID、lifecycle/profile，Run 后同一 ID 继续到自动展开的 Budget `Run-bound evidence`；该 focus 不改变服务端冻结的 owner ID |
+| Playground 真实任务 | `Playground · Inspect and operate one protected Session` 中点击真实 Scenario Run |
+| 至少一个真实 model/file/tool/sandbox/data/infrastructure action | 真实 Codex/ModelArk Run，加一张展开的 Run-bound Evidence：Run、Thread、Assignment、Receipt、Pack 路径/哈希、Runtime、source revision |
+| middleware 行为与证据 | 权威固定规则重算、Observed-World Cut、No-Cut witness、Permit/Effect Gate |
+| 选择一个合适的 failure/denial/recovery/degraded/abuse 路径 | 本项目选择 temporal conflict + denial + recovery：Impossible 三个 `ALLOW` 仍无共同切面；只刷新 Budget；最终 current `DENY` 且 effect=0 |
+| 结束后 understandable / controllable | 画面显示 Gate `LOCKED`、`RESOLVED SAFELY · NOT RELEASED`、三卡 `1 run / 2 runs / 1 run`、effect=0；权威 Session state 为 `CONSISTENT_DENY` |
+
+正式候选的不变验收门是：在真实浏览器中点击 Budget read-only focus，展示完整真实 Agent ID/profile/lifecycle；Run 后高亮同一 Budget Agent 并展开其真实 Run-bound evidence；同时自动测试和请求证据确认 focus 不进入 create payload、不改变三个 assignment ID/owner 顺序、不开放 protected Agent mutation。任一条未证明，脱敏 manifest 必须记 FAIL，视频不能把自动解析解说成用户选择。
+
 | 时间 | 画面 | 解说重点 |
 | ---: | --- | --- |
-| 0:00–0:07 | 黑底 Hook，随后进入现有 Playground | “The most dangerous multi-agent failure is when every agent is right.” |
-| 0:07–0:18 | 主区从 `Agent Chat` 切到 `Session Safety`，Dashboard 自动显示固定三名 Role Agent | 没有另做演示壳或手工挑 Agent；三个独立 Runtime 分别负责库存、预算、政策 |
-| 0:18–0:38 | 点击 `Run Normal World`；三张卡从 queued/running 到真实 Run 完成，运行证据带同步显示 fan-out、不同 Run、Thread、overlap 与 usage 覆盖 | 展示短 Run ID、Receipt、区间和可核验的并行运行证据 |
-| 0:38–0:49 | 同一 Snapshot 上先显示 `READY`；点击 `Commit protected effect` 后变为 `RELEASED · 1` | 服务端在原子临界区重验当前 head，后端 Gate 只释放一次 Effect |
-| 0:49–0:58 | 点击 `Clear saved session`，选择 Impossible 并点击 `Run Impossible World`，四个摘要回到 `WAITING/—/0` | 清除的只是终态浏览器指针；Normal 与 Failure 是独立 Store/Session，不混用计数 |
-| 0:58–1:22 | 三张 Agent 卡分别完成并全部 `ALLOW`，Event Ledger 出现 seq20/seq21 | 每个局部结论都对，但观察来自不同世界版本 |
-| 1:22–1:33 | 保留三张 ALLOW 卡，同时 World Cut 与 Effect Gate 变为 `NONE/LOCKED` | 三个 Agent 都正确，但证据从未共同成立；浏览器没有重算结论 |
-| 1:33–1:53 | 放大 World Inspector：v18–v21、head、L/U、开闭端点与 witness | `[19,20) ∩ [21,∞) = ∅`，确定性后端拒绝，不是 LLM 再猜一次 |
-| 1:53–2:05 | 打开 Raw No-Cut Proof 与 Run-bound Evidence，画面保留同一 Snapshot revision，Gate 显示 `Effects in this session = 0` | 从 Effect 回溯到 Permit、Decision、真实 Run、Receipt 和 Source Version |
-| 2:05–2:17 | Refresh Planner 显示服务端计划 `Budget only` | Inventory 与 Policy 的仍有效 Run 被保留，按钮不能任意选择 Agent |
-| 2:17–2:34 | 点击一次 `Re-observe Budget only`；仅 Budget 第二次真实 Run | 读取 `$0`，返回 `DENY`；I=1、B=2、P=1，避免两次重跑 |
-| 2:34–2:47 | 同一 Dashboard 显示 `VALID @ v21 · 2 ALLOW/1 DENY · RESOLVED SAFELY · 0` | 恢复目标是一致、安全、可解释的当前决定，不是强迫发布 |
-| 2:47–2:55 | Event Ledger、自动化测试实测摘要与结尾标语 | 一次演示不自证安全率；结尾是 “No valid observed world, no side effect.” |
+| 0:00–0:10 | Hook、项目名、短 candidate SHA、脱敏 check/preflight 徽章 | “Every Agent can be right. The team can still act on a world that never existed.” |
+| 0:10–0:23 | Playground 内的 Session Safety Launcher；点击 Budget，显示真实全 ID/profile；三名 Agent 均为 `ready`；Normal 已选 | 用户可检查真实 Budget specialist，但 owner 由服务端预置和冻结，UI focus 不能换人 |
+| 0:23–0:45 | 点击 `Run Normal World`；标注加速；Runtime evidence 显示 `Unique active runs 3/3`、`Threads recorded 3/3` | local-process Runtime 下三个独立 Role-Agent Codex Run 使用各自专用 workspace，获得 server-issued Evidence Pack，回传不可信候选决定 |
+| 0:45–0:58 | 高亮 Budget 卡 + 展开其 `Run-bound evidence`，核对相同 Agent ID 和具体 Run；Protected Effect `READY`；点击 `Commit protected effect` 后 Effect 1 | 同一 Budget 身份已继续到真实 Run 证据；后端绑定 Run/Receipt/version、重算三条固定规则并只释放一个本地 Effect |
+| 0:58–1:08 | 清除终态浏览器指针；选择并启动 Impossible | 同一业务故事的受控冲突分支，使用同一 take 中另一个 pristine Store，不混用历史 |
+| 1:08–1:31 | 标注加速；三个真实 Run 全部 `ALLOW` | 每个结果都符合该固定 Fixture 的服务端规则，但局部正确不等于联合有效 |
+| 1:31–1:56 | World Cut、`L=21`、`U=20`、Budget × Policy witness、Gate locked、Effect 0 | 这些权威观察从未共同成立；后端给出可检查反例并阻断 |
+| 1:56–2:10 | 同一 Snapshot revision 上的 `Raw server proof`、Run-bound Evidence 与 Gate | Browser 只投影服务端 Snapshot；Blocked Session 没有 Permit，也没有 Effect |
+| 2:10–2:32 | 服务端计划 `Budget only`；点击一次；只出现 Budget 第二个真实 Run | 保留两个仍有效 owner，只重观察冲突证据 owner |
+| 2:32–2:47 | Budget `DENY`；三卡 `1 run / 2 runs / 1 run`；Gate `LOCKED`；`RESOLVED SAFELY · NOT RELEASED`；Effect 0 | 权威 Session state 是 `CONSISTENT_DENY`；恢复是当前、安全、可解释的决定，不是强迫成功 |
+| 2:47–2:55 | 一页信任边界、脱敏测试摘要、结尾标语 | “No valid observed world, no side effect. EpochGuard gates the action, not the explanation.” |
 
-录制执行、真实 Codex preflight、七次模型 Run、fresh-data 规则和故障恢复的唯一操作手册是 [`EPOCHGUARD_DEMO.md`](./EPOCHGUARD_DEMO.md)。视频允许剪掉模型等待时间，但画面必须来自同一候选 SHA 的真实七条 Run，不能用 FakeRunner、Mock Preview 或 controlled HTTP 冒充。
+录制执行、候选冻结、真实 Codex preflight、七次模型 Run、fresh-data 规则、证据 manifest、Go/No-Go 和故障切换的唯一操作手册是 [`EPOCHGUARD_DEMO.md`](./EPOCHGUARD_DEMO.md)。视频允许剪掉模型等待时间，但画面必须来自同一候选 SHA 的真实七条 Run，不能用 FakeRunner、Mock Preview 或 controlled HTTP 冒充。
 
-成片目标为 **2:50–2:55**，给平台转码和片头留出至少五秒余量，不制作卡在 3:00 的版本。视频可以剪掉等待时间，但跳切处必须短暂显示实际 elapsed time 或 Run 的真实开始/结束时间，并保留真实 Run ID 和 Event Ledger；不能用预制静态动画代替 Agent 执行。若最终使用顺序 Runtime，解说和屏幕不得称其为 parallel。
+成片目标为 **2:50–2:55**，给平台转码和片头留出至少五秒余量，不制作卡在 3:00 的版本。视频可以剪掉等待时间；candidate/preflight badge、elapsed/start/end、架构图和测试卡只能是来自同一 SHA 脱敏 manifest 的**明确标注剪辑 overlay**，不是产品 UI。产品画面保留 Runtime `3/3`、Budget focus 到同 Agent ID 的 Run-bound evidence 连续性、Receipt、Evidence Pack 和 Event Ledger；不能用预制静态动画代替 Agent 执行。若使用顺序 Runtime，解说和屏幕不得称其为 parallel。正式录屏的 GO/FAIL 只由未改变候选的脱敏 manifest 记录，本设计文档不预先声明结果。
 
 ---
 
@@ -2002,7 +2040,9 @@ Normal 和 Failure 位于两个物理独立 Store，各自创建不可预测的 
 | 协调 Middleware | 三个局部决定能否被安全组合，竞态和重放是否 fail closed？ | World Ledger、区间数学、状态机不变量、Effect Record 数、选择性刷新结果 |
 | Dashboard 投影 | 评委看到的是否正是后端同一时刻的事实，陈旧视图是否安全？ | `SessionDashboardSnapshot` reconciliation、revision、命令 409、可访问性检查 |
 
-Agent 级正确不等于系统级安全：三个 Agent 即使全部符合各自 fixture oracle，`WC-02` 仍必须阻断。反过来，最终 `DENY` 也不是 Agent 失败，而是对最新证据的正确恢复。模型质量统计只描述真实 Run 的稳定性；发布安全由确定性协议和不变量证明。
+Agent 级正确不等于系统级安全：三个 Agent 即使全部符合各自 fixture oracle，`WC-02` 仍必须阻断。反过来，最终 `DENY` 也不是 Agent 失败，而是对最新证据的正确恢复。模型质量统计只描述真实 Run 的稳定性；运行时安全由固定规则权威重算、时间联合有效性和 Effect Gate 不变量共同约束。
+
+以下 `FixtureManifestEntry`、`AgentEvaluationRecord`、完整分母、false-ALLOW/false-DENY 指标和 Evaluation Gate 是**尚未落地的 Release Evaluation 合同**。当前运行时只在 Validator/Effect Gate 中临时计算 `authoritativeVerdict`，并未持久化或展示 `expectedVerdict`；只有生成并提交完整 manifest、evaluation artifact 与分母记录后，才能报告下列离线指标。
 
 单 Agent 的评测单元是一条全新 Assignment + canonical Pack。所有 dispatched Assignment 都进入首轮分母；timeout、Run failed、非法 Marker/JSON、绑定失败都记首轮失败，重试只生成新 Attempt，不能覆盖旧结果。每次保存不可变 Evaluation Record：Role、oracle Verdict、实际 Verdict、parse/binding 结果、false-ALLOW/false-DENY、模型/Runner、Role Profile/Prompt/Rule/Pack digest、Git SHA、开始结束时间与 usage。分别报告首轮端到端正确率、合法输出后的 Verdict accuracy、解析/绑定通过率、三次重复一致率和 p50/p95 延迟；小样本同时显示原始次数，不能只报百分比。
 
@@ -2056,7 +2096,7 @@ interface AgentEvaluationRecord {
 1. 按 `role × oracle verdict × interval boundary × validation outcome × failure kind` 分层；有限的 P0 安全负例全量执行，不抽样，覆盖 current-valid、no-cut、historical-stale、缺失、伪造、重放、malformed、head race、Run failure 和重复/并发命令；
 2. 对模型非确定性做分层重复：Normal 与 Impossible 主链至少各跑 3 次，时间允许目标各 5 次，逐次保存 Run ID、fixture/version/seed、期望/实际 Verdict、解析结果、耗时、usage、模型版本与 Git SHA；
 3. deterministic core 每次 commit 都运行；真实 Ark 集成测试单独标记，不能用 mock 成功率替代；
-4. 安全结论取“是否存在一次违规 Effect”，不是平均准确率；任何一例 invalid effect 都是 P0 失败。
+4. 安全结论取“是否存在一次违规 Effect”，不是平均准确率；任何一例绑定/时间协议无效或违反三条固定权威规则的 Effect 都是 P0 失败。
 
 Badcase 使用 `sessionId + actionHash + sessionRevision` 固定现场，从 `Session/Action → Diagnostic/Validation → Attempts → Assignment/Run → Envelope/Receipt → Source Version` 核对，成功路径再追到 `Permit → Effect`，定位**第一个**与 oracle 不一致的边界。每个失败保存结构化 stage/reasonCode、相关 ID、期望/实际状态和最小 fixture；Parser、Normalizer、Validator、Planner、Gate、Projection 各有独立 fault-injection case，避免只凭完整日志猜原因。
 
@@ -2072,7 +2112,7 @@ Badcase 使用 `sessionId + actionHash + sessionRevision` 固定现场，从 `Se
 | IN-02 | RoleQuerySpec / queryHash 被替换 | `QUERY_HASH_MISMATCH`，Receipt/Decision/Effect 均不产生 |
 | AR-01 | 三个固定领域的真实 Agent fixture | 只读各自 Pack，严格 Envelope 可解析，Verdict 与 oracle 一致，Run ID 各不相同 |
 | AR-02 | 并发模式与任一 Run 失败 | 三条 Run 时间区间实际重叠；任一失败时 join fail closed、effect=0；Diagnostic=`SYSTEM_FAILURE/RUN` 且 Attempt/Run refs 可解析；顺序 fallback 如实标注 |
-| AR-03 | 正确当前绑定但故意错误 Verdict | Normalizer 可接受绑定；Agent oracle 必须记 false-ALLOW/false-DENY，证明语义正确性不在协议保证内 |
+| AR-03 | 正确当前绑定但故意错误 Verdict | Normalizer 可在事务内完成结构/绑定解析并临时构造候选；Validator 重算权威 Verdict，mismatch 返回 `DECISION_INVALID` 且事务不发布，新的 Decision/JVC/Permit/Effect 均为零；false-ALLOW/false-DENY 仅在离线评测工具落地后记录 |
 | CTX-01 | Role Profile 被编辑或复用线程返回旧 Receipt/nonce | Profile mismatch 在 dispatch 前拒绝；旧上下文输出在 Normalizer 拒绝，effect=0 |
 | RC-01 | 伪造或跨 Session / Action / Agent / Receipt 绑定 | fail closed，effect=0 |
 | RC-02 | 未知或已裁剪 `sourceRevision` | `HISTORY_UNVERIFIABLE`，effect=0 |
@@ -2218,31 +2258,35 @@ H+36 门只检查：现有 Playground 能触发两个 Scenario，展示三条真
 
 ### 17.7 H+36 至 H+48：稳定与演练
 
+- 先关闭官方 UI 验收缺口：Launcher Role 卡支持只读 focus/inspection，Web 测试证明 focus 不改变冻结 assignments/create payload，也不开放 protected Agent mutation；
 - 完成所有 P0 测试；
 - 完成 DS-01/03 的单 Snapshot Projection、伪造命令与脱敏检查；其余 Dashboard/网络竞态测试只在核心演示稳定后做；
 - WSL 清洁克隆复现；
 - 处理 malformed output、Run fail 和 `UNSTABLE_WORLD`；
-- 连续五轮演示，至少四轮无需人工救场；
+- 使用 `git clone --branch epochguard/staging --single-branch ...` 建立一个公开 fresh clone，验证当前分支为 `epochguard/staging`、tree clean、`HEAD = origin/epochguard/staging`，然后完成一次 `npm ci && npm run check` 和同 SHA scratch preflight；保持该干净候选不变，再进行五轮正式 production single-port 彩排：每轮先 fetch 公开 staging ref 并重验同一 SHA，再使用独立 fresh data/workspace/Codex product root 与独立 origin/port `3101`–`3105`，以 `NODE_ENV=production HOST=127.0.0.1 PORT=310N RUNTIME_PROVIDER=local-process npm start`；至少四轮无需人工救场，不能把 API-only 或 `npm run dev` 通过记作正式 browser pass；
+- 正式浏览器链必须覆盖 Launcher 三个 Agent `ready`、Normal、真实 Run-bound Evidence、Commit、Impossible、no-cut、Budget-only refresh 和终态可控；
 - 完成一页架构图初稿。
 
 ### 17.8 H+48 至 H+58：提交材料与视频彩排
 
+- 立即在 Devpost 点击 `Start a Project` 并保存草稿，核对真实字段、字符限制、图片/视频/仓库输入；不猜测未公开的表单结构；
 - 英文 README；
 - README 正文明确写 `Selected Track: Track 1 — Multi-Agent Coordination Middleware`；
 - 英文 Devpost 描述；
 - 公开仓库；
-- 三分钟视频 shot list、旁白和彩排；
+- 三分钟视频 shot list、英文旁白/字幕、证据 manifest 和 Go/No-Go 彩排；
 - 预留最终录屏、剪辑和转码时间；
 - 一页架构图；
 - 第三方库、API、资产和限制说明。
 
 ### 17.9 H+58 至 H+62：最终复现与上传
 
-- 全新 WSL clone 一键启动；
-- 完整跑 P0 和 `npm run check`；
-- 录制最终视频并核对 `≤ 3:00`；
-- 上传 YouTube，等待转码后实际播放；
-- 填写并保存 Devpost 草稿。
+- 审核全部 working diff，提交并推送不可变 candidate SHA；公开默认分支或正式 tag 必须指向它，不能继续让评委落到 pre-product Starter/canary 基线；
+- 从 WSL Linux 文件系统全新 clone 该精确候选，确认 clean/local=remote；
+- 同一 SHA 完整跑 `npm ci`、`npm run check`、scratch preflight，再用 production single-port `npm start` 完成真实浏览器七 Run；
+- 录制最终 1080p 视频，核对 `2:50–2:55`、字幕、音轨、可读性、无秘密和所有 jump-cut 标签；
+- 计算成片哈希，上传 YouTube，等待转码后在无登录窗口完整播放；
+- 填写并保存 Devpost 草稿，重新打开每个仓库、架构和视频链接。
 
 ### 17.10 最后至少 7 小时：冻结与提交
 
@@ -2251,7 +2295,7 @@ H+36 门只检查：现有 Playground 能触发两个 Scenario，展示三条真
 - 检查仓库、Git 历史、截图和视频无秘密；
 - 检查视频 `≤ 3:00` 且链接公开；
 - Devpost 保存草稿，逐字段核对；
-- 最晚不要拖到 11:59；
+- 官方截止为 **2026-09-01 12:00 SGT（中午）**；目标 10:00 前完成最终提交，绝不拖到 11:59；
 - 提交后重新打开公开页面确认链接可访问。
 
 ---
@@ -2269,6 +2313,16 @@ H+36 门只检查：现有 Playground 能触发两个 Scenario，展示三条真
 用户点击 `Re-observe Budget only`、静态 CSS/区间表、同进程 Mock Sink 和不做 HMAC 本来就是 P0 设计，不再伪装成“降级后才采用”的选项。无论降到哪一级，真实 Run、服务器 Receipt、No-Cut Proof、Effect Gate、Mock Sink 和 P0 核心测试都必须保留。
 
 任何 Dashboard 降级都不能改成浏览器从多个调试接口拼状态，不能让 UI 计算 L/U、witness、Gate 或 refresh owner，也不能绕过服务端命令重验。
+
+正式路径只批准已验证的 **WSL2 + local-process + BytePlus AP**。Docker/Podman 尚未形成 release evidence，不作为现场救场路径；现场切换到一个未验证 Runtime 比使用同一候选的已标注成片风险更高。可选 demo automation 只有在同一候选通过审核和 fresh-clone 测试后才能替代手册命令，不能为写脚本推迟候选冻结、浏览器彩排或上传。
+
+对提交视频，任何外部失败都必须换 fresh root 重录，不能用静态图冒充成功。对 Grand Final 现场，切换顺序固定为：
+
+1. 同一公开候选的本地真实演示；
+2. 清楚标注为 prerecorded、来自同一候选的 1080p 完整成片，再用现场架构/代码回答问题；
+3. 离线一页架构图、脱敏 evidence manifest 和关键截图，并明确外部模型当前不可用。
+
+不得现场长时间调 Key，不得切 Mock Preview，不得把 prerecorded 说成 live。官方尚未公布决赛 pitch、live demo 或 Q&A 时长，所以只准备可独立成立的三分钟核心和 90 秒可选技术附录，等待组织方确认后再使用附录。
 
 绝不能降级成：
 
@@ -2330,6 +2384,10 @@ H+36 门只检查：现有 Playground 能触发两个 Scenario，展示三条真
 
 Agent 回传的区间不被信任。Receipt 由服务端保存，并绑定 Session、Action、Agent、Run assignment、Source、Revision 和 Value Hash；伪造、跨 Run、跨 Action 或重放全部 fail closed。
 
+### “如果模型返回结构正确、绑定正确但 Verdict 错了呢？”
+
+模型 Verdict 只是候选。Validator 会从 canonical Action 与权威 ResourceVersion 对 Inventory、Budget、Policy 三条固定规则重新计算结果；不一致就以 `DECISION_INVALID` fail closed，不签发 JVC/Permit/Effect。发布路径的 Effect Gate 还会再次重算。这个保证只覆盖 MVP 三条硬编码规则，不证明任意开放语义或模型 `reason` 正确。
+
 ### “你能证明 Agent 没漏报依赖吗？”
 
 不能对任意开放 Agent 做此保证。MVP 限制每个 Agent 只有一个动态证据领域，Evidence Pack 由服务端捕获并交付，决定必须引用该服务器 Receipt，且不能依赖其他 Agent 输出。安全声明限定为 `server-issued, assignment-bound declared observation receipts`。
@@ -2340,29 +2398,43 @@ Agent 回传的区间不被信任。Receipt 由服务端保存，并绑定 Sessi
 
 ### “为什么 Coordinator 不直接重查三个数据源？”
 
-真实系统中的 Agent 可能拥有不同凭据和领域推理，Coordinator 只验证 evidence metadata。全量重查也会丢弃昂贵的有效推理并引入无关模型漂移。本演示保留两个仍有效 Run，只刷新 Budget。
+真实系统中的 Agent 可能拥有不同凭据和领域推理。Coordinator 不重新调用外部数据源，也不复现任意 LLM 推理；但对 MVP 三个固定 Role，它会从权威 Store 的 Action 与 ResourceVersion 重算 Verdict。全量重新 dispatch 仍会丢弃昂贵的有效工作并引入无关模型漂移，因此本演示保留两个仍有效 Run，只刷新 Budget。
 
 ### “Budget 最后 DENY，为什么算恢复？”
 
 恢复目标是得到一个与当前受观测世界一致、可解释的团队决定，而不是强迫发布成功。安全拒绝是正确恢复；正常场景已经证明 Gate 可以发布一次。
 
+### “Normal 和 Impossible 为什么是两个 Store？这还是一个场景吗？”
+
+它们是同一 campaign-publish 业务条件的两个受控实验分支：Normal 是健康对照，Impossible 是时间冲突与恢复。独立 Store 防止 one-shot fixture 历史互相污染，也让每个分支可复现；演示不会谎称它们是同一 Store 的连续世界。核心问题、Action shape、三个 Role 和 Effect Gate 都相同。
+
 ### “Receipt 证明了事实是真的吗？”
 
-没有。P0 只证明验证器引用的是服务端权威 Store 中、与该 Assignment 和 Run 绑定的 Receipt，而不是 LLM 自报的版本；可选 HMAC 也只增强本地静态防篡改。它不证明数据源诚实、物理世界正确或 Agent 推理正确。
+没有。P0 只证明验证器引用的是服务端权威 Store 中、与该 Assignment 和 Run 绑定的 Receipt，而不是 LLM 自报的版本；可选 HMAC 也只增强本地静态防篡改。后端会对三条固定规则从该权威值重算结果，但这仍不证明数据源诚实、物理世界正确、模型内部推理或 `reason` 文本正确，也不构成任意开放领域的通用语义验证。
 
 ### “Dashboard 是安全控制本身吗？”
 
 不是。Session Safety Dashboard 只显示服务端同 revision 的只读投影并发送不含可信安全字段的命令；即使 UI 被篡改、陈旧或断开，Effect Gate 仍在后端串行临界区重验。它提高可解释性和演示质量，不是核心创新，也不属于信任边界。
 
+### “远程模型或网络在现场失败怎么办？”
+
+不会切到 Mock Preview 冒充真实运行。先说明外部依赖不可用，再播放来自同一公开 candidate SHA、清楚标注为 prerecorded 的完整真实 take；随后用离线架构图、evidence manifest 和代码回答问题。提交视频本身必须提前完成并公开，不能把现场 fallback 当成提交证据。
+
+### “这已经能直接保护生产发布吗？”
+
+不能这样宣称。当前 P0 是单 Node、单 writer、受控 World Ledger、三个固定 Role、三条固定服务端规则和本地幂等 Mock Effect。外部生产 Sink 只有具备 CAS/ETag/If-Match 或等价条件写、可比较的版本域、身份/RBAC、持久数据库和完整运营审计后，才能扩展类似的 effect-boundary 保证。
+
 ---
 
 ## 21. 提交清单
 
+本节是每个冻结候选都要重新执行的模板，不是文件被阅读时的活状态。历史完成项只说明对应旧证据；候选门的实际 PASS/FAIL 只在仓库外脱敏 manifest 中勾选，不因每次发布回改本文。
+
 ### 功能
 
-- [ ] 三个真实 Agent ID / Run ID / Thread ID；
-- [ ] Normal 当前切面发布一次；
-- [ ] Impossible Collage 三个 `ALLOW` 仍被阻断；
+- [x] 三个真实 Agent ID / Run ID / Thread ID（WSL2 + BytePlus Seed Lite API 主链）；
+- [x] Normal 当前切面发布一次，重复 Commit 仍返回同一 Effect；
+- [x] Impossible Collage 三个真实 `ALLOW` 仍被阻断，`L=21`、`U=20`、effect=0；
 - [x] No-Cut Proof 展示 L/U 和 conflict witness（确定性测试与 controlled-HTTP）；
 - [x] 仅 Budget 第二次运行（确定性测试与 controlled-HTTP）；
 - [x] 刷新后 `CONSISTENT_DENY`（确定性测试与 controlled-HTTP）；
@@ -2382,16 +2454,23 @@ Agent 回传的区间不被信任。Receipt 由服务端保存，并绑定 Sessi
 
 - [x] WSL2 Ubuntu 24.04 作为主环境；
 - [x] Node 22；
-- [ ] Docker / Podman Runtime 可用；
-- [ ] Ark 连续真实 Run；
-- [x] `npm run check`（Windows/WSL 精确 SHA 干净克隆均为 Server 361/361 + Web 6/6）；
+- [ ] Docker / Podman Runtime 可用（可选，不是正式演示放行门；当前批准路径为 WSL2 local-process）；
+- [x] 一次完整 ModelArk/Codex 七 Run API 主链；
+- [x] 历史 pre-freeze WSL 快照在 2026-08-30 通过其当时全部测试、typecheck 和 production build；此行不认证后续 candidate；
 - [x] DS-01/03 与并发 Commit 通过；
 - [x] Snapshot 无密钥、绝对用户路径、完整 Prompt 或未脱敏输出；
 - [x] P0 单 Node / 单 writer 限制写入 README；
-- [x] 清洁克隆一键复现；
-- [ ] 无秘密；
+- [x] 历史已提交候选的清洁克隆启动路径已复现；
+- [x] 凭据设计为仓库外注入；正式隐私门必须对 tracked tree、完整 Git history、retained raw logs、截图和视频分别扫描，不得用一次 workspace 扫描代替；
 - [x] 公开仓库；
 - [x] 许可证和第三方依赖说明。
+- [ ] 候选门：浏览器 Budget read-only focus 显示真实完整 Agent ID/profile/lifecycle，同一 ID 继续到 Run-bound evidence；自动测试证明 focus 不进入 create payload、不改变冻结 assignments、不开放 protected Agent mutation；
+- [ ] 候选门：全部计划补丁完成 review、commit、push，local SHA = public upstream SHA 且工作树 clean；
+- [ ] 候选门：以 `--branch epochguard/staging --single-branch` 从公开仓库 fresh clone，验证分支为 staging、tree clean、`HEAD = origin/epochguard/staging`，再跑 `npm ci && npm run check`；不得用任何未提交 working-tree pass 替代；
+- [ ] 默认公开入口或正式 submission tag 指向候选，不再把评委带到 pre-product Starter/canary 基线；
+- [ ] 同一候选完成真实浏览器七 Run，不把 API-only pass 记作 UI pass；
+- [ ] 一个已验证 public fresh clone 上的五个 fresh product root、独立 origin/port `3101`–`3105` production single-port 彩排至少四个无需人工救场；
+- [ ] 候选 SHA、环境、check/preflight、Normal/Impossible/Recovery 与成片哈希写入脱敏 evidence manifest；
 
 ### 提交
 
@@ -2407,10 +2486,13 @@ Agent 回传的区间不被信任。Receipt 由服务端保存，并绑定 Sessi
 - [x] README 明确声明 `Selected Track: Track 1 — Multi-Agent Coordination Middleware`；
 - [x] 一页架构图；
 - [ ] `≤ 3:00` 的公开 YouTube 视频；
+- [ ] 1080p 下 Agent lifecycle、真实 Run/Assignment/Receipt/Runtime/Thread/Pack 证据可读；所有加速/跳切有标签；
 - [x] Testing instructions；
 - [x] 已知限制；
-- [ ] working project、仓库和测试入口至少到 2026-09-07 15:00 SGT 保持免费、无障碍、可访问；
+- [ ] 公开仓库、无秘密的离线检查、视频和提交素材至少到 2026-09-07 15:00 SGT 保持免费、无障碍、可访问；live ModelArk 不声称已托管，访问边界如实写入 testing instructions；
 - [ ] 无未授权音乐、商标或第三方素材；
+- [ ] Devpost 已从 `Start a Project` 建立草稿，并按真实表单逐字段保存、预览；
+- [ ] YouTube、GitHub、架构图和测试入口全部在无登录窗口重新打开；
 - [ ] 截止前最终提交并检查公开页面。
 
 ---

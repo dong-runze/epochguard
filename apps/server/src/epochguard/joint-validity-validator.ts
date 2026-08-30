@@ -21,15 +21,26 @@ import {
   DecisionNormalizationError,
   resolveBoundDecision,
 } from "./decision-parser.js";
+import { evaluateAuthoritativeVerdict } from "./evidence-pack-writer.js";
 
 export const JOINT_VALIDITY_VALIDATOR_VERSION = "epochguard-jv-v1" as const;
+export const AUTHORITATIVE_VERDICT_MISMATCH =
+  "AUTHORITATIVE_VERDICT_MISMATCH" as const;
+export type JointValidityValidationDiscriminator =
+  | typeof AUTHORITATIVE_VERDICT_MISMATCH
+  | null;
 
 export class JointValidityValidationError extends Error {
   constructor(
     public readonly reasonCode: FailureCode,
     message: string,
+    public readonly discriminator: JointValidityValidationDiscriminator = null,
+    public readonly role: Role | null = null,
   ) {
     super(message);
+    if ((discriminator === null) !== (role === null)) {
+      throw new Error("Joint-validity discriminator and Role must be present together");
+    }
     this.name = "JointValidityValidationError";
   }
 }
@@ -238,6 +249,12 @@ function resolveIntervals(
         `World history value does not match Receipt ${binding.receipt.receiptId}`,
       );
     }
+    if (version.valueHash !== sha256Digest(canonicalJson(version.value))) {
+      fail(
+        "HISTORY_UNVERIFIABLE",
+        `World history value hash is invalid for Receipt ${binding.receipt.receiptId}`,
+      );
+    }
     if (
       version.validUntilSeq !== null &&
       version.validUntilSeq > head
@@ -256,6 +273,27 @@ function resolveIntervals(
       fail(
         "HISTORY_UNVERIFIABLE",
         `Receipt ${binding.receipt.receiptId} is not inside its authoritative interval`,
+      );
+    }
+    let authoritativeVerdict: DependencyCertificate["verdict"];
+    try {
+      authoritativeVerdict = evaluateAuthoritativeVerdict(
+        decision.role,
+        session.action,
+        version.value,
+      );
+    } catch {
+      fail(
+        "HISTORY_UNVERIFIABLE",
+        `Authoritative evidence is invalid for Role ${decision.role}`,
+      );
+    }
+    if (decision.verdict !== authoritativeVerdict) {
+      throw new JointValidityValidationError(
+        "DECISION_INVALID",
+        `Role ${decision.role} verdict does not match the authoritative decision rule`,
+        AUTHORITATIVE_VERDICT_MISMATCH,
+        decision.role,
       );
     }
     return {

@@ -55,7 +55,7 @@ function unsupportedFailure(input: unknown): SnapshotDecodeFailure | null {
   };
 }
 
-/** Decode every HTTP and Mock payload through the frozen v6 contract. */
+/** Decode every HTTP and Mock payload through the active frozen contract. */
 export function decodeEpochGuardSnapshot(input: unknown): SnapshotDecodeResult {
   const unsupported = unsupportedFailure(input);
   if (unsupported !== null) return { ok: false, failure: unsupported };

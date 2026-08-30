@@ -423,7 +423,7 @@ function parseDatabase(input: unknown, sessionId: string): EpochDatabase {
       typeof receivedSnapshotRevision === "number"
         ? receivedSnapshotRevision
         : null,
-      "EpochStore snapshot failed contract-v6 validation.",
+      "EpochStore snapshot failed active EpochGuard contract validation.",
     );
   }
   return parsed.data;
@@ -684,12 +684,14 @@ function resolveInFlightAttempt(
   const terminalRejected = ["FAILED", "INTERRUPTED", "OUTPUT_REJECTED"].includes(
     attemptStatus,
   );
+  const completedButSemanticallyRejected =
+    attemptStatus === "COMPLETED" && assignment.status === "REJECTED";
   const assignmentStateValid =
     assignment.consumedByDecisionCertificateId === null &&
     assignment.consumedAt === null &&
     (attempt.runId === null
       ? assignment.status === "CREATED" || assignment.status === "REJECTED"
-      : terminalRejected
+      : terminalRejected || completedButSemanticallyRejected
         ? assignment.status === "BOUND" || assignment.status === "REJECTED"
         : assignment.status === "BOUND");
   if (!assignmentStateValid) {
@@ -1738,7 +1740,7 @@ function projectSessionDashboardSnapshot(
     projectionFailure(
       sessionId,
       database.snapshotRevision,
-      "Dashboard candidate was rejected by the contract-v6 decoder.",
+      "Dashboard candidate was rejected by the active EpochGuard contract decoder.",
     );
   }
   assertSnapshotContainsNoSensitiveMaterial(decoded);

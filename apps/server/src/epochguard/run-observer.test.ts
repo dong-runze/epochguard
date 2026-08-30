@@ -11,6 +11,7 @@ import {
 } from "./role-profiles.js";
 import {
   RunAdapterError,
+  buildAssignmentPrompt,
   deriveCoordinationMode,
   dispatchBindPoll,
   fanOutDispatchBindPoll,
@@ -35,6 +36,64 @@ import {
 
 const createdAt = "2026-08-29T12:00:00.000Z";
 const profileDigest = sha256Digest("controlled AGENTS.md");
+
+describe("EpochGuard assignment prompt", () => {
+  it("preserves the persisted v1 prompt for historical replay", () => {
+    const assignment = makeAssignment("inventory", {
+      promptTemplateVersion: "epoch-prompt-v1",
+    });
+
+    expect(buildAssignmentPrompt(assignment)).toBe(
+      [
+        `You are the Inventory Agent for assignment ${assignment.assignmentId}.`,
+        `Read ${assignment.evidencePackRelativePath}.`,
+        "Use only the immutable action and evidence in that file.",
+        "Do not infer missing facts or claim a publish action.",
+        "Return exactly one <EPOCH_DECISION>{...}</EPOCH_DECISION> envelope.",
+      ].join("\n"),
+    );
+  });
+
+  it("spells out the strict decision envelope instead of leaving the schema implicit", () => {
+    const assignment = makeAssignment("budget", {
+      promptTemplateVersion: "epoch-prompt-v2",
+    });
+    const prompt = buildAssignmentPrompt(assignment);
+
+    expect(prompt).toContain(assignment.evidencePackRelativePath);
+    expect(prompt).not.toContain("<EPOCH_DECISION>{...}");
+    expect(prompt).not.toContain("schemaVersion\":1,...");
+    expect(prompt).not.toContain("JSON_OBJECT");
+    expect(prompt).not.toContain("...");
+    for (const key of [
+      "schemaVersion",
+      "sessionId",
+      "actionHash",
+      "runAssignmentId",
+      "role",
+      "receiptId",
+      "nonce",
+      "verdict",
+      "reason",
+    ]) {
+      expect(prompt).toContain(key);
+    }
+    expect(prompt).toContain("Do not rename verdict to decision");
+    expect(prompt).toContain("do not rename reason to justification");
+    expect(prompt).toContain("do not add campaignId or any other key");
+    expect(prompt).toContain("silently verify that the object has exactly nine keys");
+  });
+
+  it("fails closed for an unknown persisted prompt version", () => {
+    const assignment = makeAssignment("policy", {
+      promptTemplateVersion: "epoch-prompt-v999",
+    });
+
+    expect(() => buildAssignmentPrompt(assignment)).toThrowError(
+      expect.objectContaining({ code: "BINDING_MISMATCH" }),
+    );
+  });
+});
 
 class FakeClock implements RunObserverClock {
   private wallMilliseconds = Date.parse(createdAt);

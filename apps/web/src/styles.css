@@ -228,7 +228,11 @@ button {
   text-align: left;
   gap: 10px;
   cursor: pointer;
-  transition: 150ms ease;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms ease;
 }
 
 .agent-card:hover {
@@ -1113,21 +1117,55 @@ textarea:focus {
   gap: 9px;
 }
 
-.safety-role-summary > div {
+.safety-role-card {
   min-width: 0;
   padding: 13px;
   border: 1px solid #e1dfd8;
   border-radius: 12px;
   background: white;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms ease;
 }
 
-.safety-role-summary span,
-.safety-role-summary strong,
-.safety-role-summary small {
+.safety-role-card:hover {
+  border-color: #cfc8ee;
+  transform: translateY(-1px);
+}
+
+.safety-role-card:disabled {
+  cursor: wait;
+  opacity: 0.58;
+  transform: none;
+}
+
+.safety-role-card:disabled:hover {
+  border-color: #e1dfd8;
+}
+
+.safety-role-card:focus-visible {
+  outline: 3px solid rgba(105, 84, 217, 0.24);
+  outline-offset: 2px;
+}
+
+.safety-role-card[aria-pressed="true"] {
+  border-color: #8f7ce9;
+  background: var(--purple-soft);
+  box-shadow: inset 3px 0 var(--purple);
+}
+
+.safety-role-card span,
+.safety-role-card strong,
+.safety-role-card small {
   display: block;
 }
 
-.safety-role-summary span {
+.safety-role-card span {
   color: #8a8b84;
   font-size: 8px;
   font-weight: 800;
@@ -1135,16 +1173,67 @@ textarea:focus {
   text-transform: uppercase;
 }
 
-.safety-role-summary strong {
+.safety-role-card strong {
   margin: 6px 0 4px;
   overflow-wrap: anywhere;
   font-size: 11px;
 }
 
-.safety-role-summary small {
+.safety-role-card small {
   color: var(--green);
   font-size: 9px;
   text-transform: capitalize;
+}
+
+.safety-role-inspection {
+  margin: -10px 0 22px;
+  padding: 16px;
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.2fr);
+  gap: 20px;
+  border: 1px solid #ded9f4;
+  border-radius: 12px;
+  background: #f8f6ff;
+}
+
+.safety-role-inspection-copy h4 {
+  margin: 6px 0 5px;
+  font-size: 14px;
+}
+
+.safety-role-inspection-copy p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.safety-role-inspection dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+}
+
+.safety-role-inspection dl > div {
+  min-width: 0;
+}
+
+.safety-role-inspection dt {
+  color: #8a8b84;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.safety-role-inspection dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  color: #454641;
+  font-size: 10px;
+  line-height: 1.4;
+  text-transform: none;
 }
 
 .safety-setup-error,
@@ -1375,6 +1464,10 @@ textarea:focus {
     grid-template-columns: 1fr;
   }
 
+  .safety-role-inspection {
+    grid-template-columns: 1fr;
+  }
+
   .session-info {
     display: none;
   }
@@ -1389,5 +1482,15 @@ textarea:focus {
 
   .form-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .safety-role-card {
+    transition: none;
+  }
+
+  .safety-role-card:hover {
+    transform: none;
   }
 }

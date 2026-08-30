@@ -217,7 +217,7 @@ export function buildSafetyDiagnostic(input: unknown): SafetyDiagnostic {
   if (!parsed.success) {
     integrityFailure(
       "INVALID_DIAGNOSTIC",
-      "SafetyDiagnostic does not satisfy epochguard-contract-v6.",
+      "SafetyDiagnostic does not satisfy the active EpochGuard contract.",
     );
   }
   assertDiagnosticShapeSemantics(parsed.data);

@@ -1198,7 +1198,7 @@ describe("single-snapshot isolation and fail-closed projection", () => {
     );
   });
 
-  it("fails closed when contract-v6 rejects the final candidate", () => {
+  it("fails closed when the active contract rejects the final candidate", () => {
     expect(() => snapshot(makeDatabase(), "not-an-iso-timestamp")).toThrowError(
       expect.objectContaining({ code: "PROJECTION_MISMATCH" }),
     );

@@ -12,6 +12,7 @@ import {
   type Verdict,
 } from "./types.js";
 import {
+  AUTHORITATIVE_VERDICT_MISMATCH,
   JointValidityValidationError,
   jointValidityDependencySetHash,
   validateJointValidity,
@@ -34,11 +35,26 @@ type FixtureOptions = {
   head?: number;
   intervals?: Partial<Record<Role, Partial<IntervalSpec>>>;
   verdicts?: Partial<Record<Role, Verdict>>;
+  authoritativeVerdicts?: Partial<Record<Role, Verdict>>;
   receiptIds?: Partial<Record<Role, string>>;
 };
 
 function agentId(role: Role): string {
   return `agent_${role}`;
+}
+
+function authoritativeValue(
+  role: Role,
+  verdict: Verdict,
+): ResourceVersion["value"] {
+  switch (role) {
+    case "inventory":
+      return { availableUnits: verdict === "ALLOW" ? 1 : 0 };
+    case "budget":
+      return { remainingBudgetCents: verdict === "ALLOW" ? 800_000 : 0 };
+    case "policy":
+      return { permitted: verdict === "ALLOW" };
+  }
 }
 
 function makeFixture(options: FixtureOptions = {}) {
@@ -53,6 +69,14 @@ function makeFixture(options: FixtureOptions = {}) {
   const queries = ROLES.map((role) =>
     buildRoleQuerySpec(GOLDEN_ACTION_INPUT, role),
   );
+  const valuesByRole = Object.fromEntries(
+    ROLES.map((role) => {
+      const decisionVerdict = options.verdicts?.[role] ?? "ALLOW";
+      const evidenceVerdict =
+        options.authoritativeVerdicts?.[role] ?? decisionVerdict;
+      return [role, authoritativeValue(role, evidenceVerdict)];
+    }),
+  ) as Record<Role, ResourceVersion["value"]>;
   const receipts = ROLES.map((role) => {
     const query = queries.find((candidate) => candidate.role === role)!;
     const interval = intervalsByRole[role];
@@ -69,7 +93,7 @@ function makeFixture(options: FixtureOptions = {}) {
       entityKey: query.entityKey,
       queryHash: query.queryHash,
       sourceRevision: interval.sourceRevision ?? interval.observedAt,
-      valueHash: sha256Digest(`value:${role}:${interval.observedAt}`),
+      valueHash: sha256Digest(canonicalJson(valuesByRole[role])),
       observedAtSeq: interval.observedAt,
       nonce: role.repeat(32).slice(0, 32),
       issuer: "epochguard" as const,
@@ -83,7 +107,7 @@ function makeFixture(options: FixtureOptions = {}) {
       id: `resource_version_${index + 1}`,
       resourceId: `opaque_resource_${index + 1}`,
       sourceRevision: receipt.sourceRevision,
-      value: { role, observedAt: interval.observedAt },
+      value: valuesByRole[role],
       valueHash: receipt.valueHash,
       validFromSeq: interval.from,
       validUntilSeq: interval.until,
@@ -257,13 +281,15 @@ function expectValidationFailure(
   fixture: ReturnType<typeof makeFixture>,
   reasonCode: string,
   overrides: Partial<JointValidityValidationOptions> = {},
-): void {
+): JointValidityValidationError {
   try {
     runValidation(fixture, overrides);
     throw new Error("Expected validation to fail");
   } catch (error) {
     expect(error).toBeInstanceOf(JointValidityValidationError);
-    expect((error as JointValidityValidationError).reasonCode).toBe(reasonCode);
+    const validationError = error as JointValidityValidationError;
+    expect(validationError.reasonCode).toBe(reasonCode);
+    return validationError;
   }
 }
 
@@ -508,6 +534,38 @@ describe("Joint validity validator", () => {
     expect(fixture.database).toEqual(before);
   });
 
+  it("rejects both directions of every structurally valid model/evidence contradiction", () => {
+    for (const role of ROLES) {
+      for (const [modelVerdict, authoritativeVerdict] of [
+        ["ALLOW", "DENY"],
+        ["DENY", "ALLOW"],
+      ] as const) {
+        const fixture = makeFixture({
+          verdicts: { [role]: modelVerdict },
+          authoritativeVerdicts: { [role]: authoritativeVerdict },
+        });
+        const before = structuredClone(fixture.database);
+
+        const error = expectValidationFailure(fixture, "DECISION_INVALID");
+        expect(error).toMatchObject({
+          discriminator: AUTHORITATIVE_VERDICT_MISMATCH,
+          role,
+        });
+        expect(fixture.database, `${role}:${modelVerdict}`).toEqual(before);
+      }
+    }
+  });
+
+  it("does not classify structural DECISION_INVALID as an authoritative verdict mismatch", () => {
+    const fixture = makeFixture();
+    const session = fixture.database.sessions[0]!;
+    session.activeDecisionCertificateIds.policy =
+      session.activeDecisionCertificateIds.inventory;
+
+    const error = expectValidationFailure(fixture, "DECISION_INVALID");
+    expect(error).toMatchObject({ discriminator: null, role: null });
+  });
+
   it("fails closed for unknown, truncated, future, and mismatched history", () => {
     const unknown = makeFixture();
     expectValidationFailure(unknown, "HISTORY_UNVERIFIABLE", {
@@ -534,6 +592,10 @@ describe("Joint validity validator", () => {
     const wrongValue = makeFixture();
     wrongValue.resourceVersions[0]!.valueHash = `sha256:${"f".repeat(64)}`;
     expectValidationFailure(wrongValue, "BINDING_MISMATCH");
+
+    const valueOnlyTamper = makeFixture();
+    valueOnlyTamper.resourceVersions[0]!.value = { availableUnits: 0 };
+    expectValidationFailure(valueOnlyTamper, "HISTORY_UNVERIFIABLE");
   });
 
   it("requires the resolver to preserve source and entityKey bindings", () => {

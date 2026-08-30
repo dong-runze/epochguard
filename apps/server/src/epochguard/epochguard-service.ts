@@ -22,7 +22,11 @@ import {
   initializeFixtureWorld,
   type EpochGuardFixture,
 } from "./fixtures.js";
-import { validateJointValidity } from "./joint-validity-validator.js";
+import {
+  AUTHORITATIVE_VERDICT_MISMATCH,
+  JointValidityValidationError,
+  validateJointValidity,
+} from "./joint-validity-validator.js";
 import { ReceiptIssuer, resolveReceiptResourceVersion } from "./receipt-issuer.js";
 import {
   buildRefreshPlan,
@@ -41,6 +45,7 @@ import {
   type WorkspacePort,
 } from "./role-profiles.js";
 import {
+  CURRENT_PROMPT_TEMPLATE_VERSION,
   deriveCoordinationMode,
   dispatchBindPoll,
   joinRoleRunObservations,
@@ -102,7 +107,6 @@ import {
   resolveResourceVersionByIdentity,
 } from "./world-ledger.js";
 
-const PROMPT_TEMPLATE_VERSION = "epoch-prompt-v1";
 const EMPTY_PACK_HASH = sha256Digest("");
 
 const TERMINAL_SESSION_STATES = new Set<EpochSession["state"]>([
@@ -979,7 +983,7 @@ export class EpochGuardService {
       receiptId,
       queryHash: query.queryHash,
       roleProfileVersion: input.registration.roleProfileVersion,
-      promptTemplateVersion: PROMPT_TEMPLATE_VERSION,
+      promptTemplateVersion: CURRENT_PROMPT_TEMPLATE_VERSION,
       agentsMdDigest: input.registration.agentsMdDigest,
       runtimeLabelAtDispatch: input.runtimeLabel,
       evidencePackRelativePath: evidencePackRelativePath(
@@ -1591,10 +1595,15 @@ export class EpochGuardService {
       session.stateUpdatedAt = timestamp;
       session.activePermitId = null;
       const adapterError = error instanceof RunAdapterError ? error : null;
+      const validationError =
+        error instanceof JointValidityValidationError ? error : null;
       const refreshFailure = this.closeClaimedRefreshFailure(
         database,
         session,
         "FAILED",
+        validationError?.discriminator === AUTHORITATIVE_VERDICT_MISMATCH
+          ? validationError.role
+          : null,
       );
       if (!refreshFailure.handled) {
         session.activeAttemptIds = {
@@ -1619,8 +1628,13 @@ export class EpochGuardService {
         attempt.runCompletedAt !== null;
       this.appendDiagnostic(database, session, {
         kind: "SYSTEM_FAILURE",
-        stage: hasTerminalRunFailure ? "RUN" : "DISPATCH",
-        reasonCode: adapterError?.code ?? "RUN_FAILED",
+        stage: validationError
+          ? "VALIDATE"
+          : hasTerminalRunFailure
+            ? "RUN"
+            : "DISPATCH",
+        reasonCode:
+          validationError?.reasonCode ?? adapterError?.code ?? "RUN_FAILED",
         role: attempt?.role ?? null,
         attemptId: attempt?.attemptId ?? null,
         assignmentId: attempt?.assignmentId ?? null,
@@ -1646,6 +1660,7 @@ export class EpochGuardService {
     database: EpochDatabase,
     session: EpochSession,
     terminalStatus: "FAILED" | "INTERRUPTED",
+    preserveCompletedAttemptRole: Role | null = null,
   ): RefreshFailureClosure {
     if (session.activeRefreshPlanId === null) {
       return { handled: false, attempt: null };
@@ -1692,12 +1707,26 @@ export class EpochGuardService {
     if (!bindingIsValid || attempt === null || assignment === null) {
       plan.status = "INVALIDATED";
       plan.claimedAttemptId = null;
+      session.activeValidationId = null;
       session.activeRefreshPlanId = null;
       session.activeAttemptIds = {
         inventory: null,
         budget: null,
         policy: null,
       };
+      return { handled: true, attempt };
+    }
+
+    // A semantic rejection happens after AgentService has already completed the
+    // Run. Preserve the terminal Run/Attempt and its claimed provenance for the
+    // VALIDATE diagnostic instead of rewriting COMPLETED as a runtime failure.
+    if (
+      preserveCompletedAttemptRole === attempt.role &&
+      attempt.status === "COMPLETED"
+    ) {
+      assignment.status = "REJECTED";
+      AgentAttemptSchema.parse(attempt);
+      RunAssignmentSchema.parse(assignment);
       return { handled: true, attempt };
     }
 

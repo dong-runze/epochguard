@@ -36,6 +36,7 @@ import {
   type StaleViewErrorBody,
   type ValidationRecord,
 } from "./types.js";
+import { evaluateAuthoritativeVerdict } from "./evidence-pack-writer.js";
 
 export interface EffectGateMutationPort {
   mutate<T>(
@@ -408,6 +409,25 @@ function validateCommittedEvidenceClosure(
       fail(
         "HISTORY_UNVERIFIABLE",
         `committed ${role} Receipt was not valid at the committed head`,
+      );
+    }
+    let authoritativeVerdict: "ALLOW" | "DENY" = "DENY";
+    try {
+      authoritativeVerdict = evaluateAuthoritativeVerdict(
+        role,
+        session.action,
+        version.value,
+      );
+    } catch {
+      fail(
+        "HISTORY_UNVERIFIABLE",
+        `committed ${role} authoritative evidence is invalid`,
+      );
+    }
+    if (authoritativeVerdict !== "ALLOW") {
+      fail(
+        "DECISION_INVALID",
+        `committed ${role} ALLOW contradicts the authoritative decision rule`,
       );
     }
 
@@ -1204,6 +1224,28 @@ export async function commitProtectedEffect(
           return reject(
             "HISTORY_UNVERIFIABLE",
             `${role} Receipt is not valid at the current World head`,
+          );
+        }
+        let authoritativeVerdict: "ALLOW" | "DENY";
+        try {
+          authoritativeVerdict = evaluateAuthoritativeVerdict(
+            role,
+            parsedAction.data,
+            version.value,
+          );
+        } catch {
+          return reject(
+            "HISTORY_UNVERIFIABLE",
+            `${role} authoritative evidence is invalid`,
+          );
+        }
+        if (authoritativeVerdict !== "ALLOW") {
+          // This is an integrity rejection, not a freshness race. Abort the
+          // cloned mutation so the original READY/ISSUED evidence remains
+          // available for forensics; most importantly, no Effect is created.
+          return reject(
+            "DECISION_INVALID",
+            `${role} ALLOW contradicts the authoritative decision rule`,
           );
         }
 

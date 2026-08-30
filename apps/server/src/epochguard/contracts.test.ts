@@ -463,10 +463,10 @@ function makePersistedAttempt(status: string): any {
 }
 
 describe("EpochGuard frozen contract", () => {
-  it("freezes v7 over complete JSON Schemas, invariants, fixtures, and Snapshots", () => {
-    expect(CONTRACT_VERSION).toBe("epochguard-contract-v7");
+  it("freezes v8 over complete JSON Schemas, invariants, fixtures, and Snapshots", () => {
+    expect(CONTRACT_VERSION).toBe("epochguard-contract-v8");
     expect(CONTRACT_DIGEST).toBe(
-      "sha256:4dfbeb9e55de7ca17a19f5fb8f99494b17e441af0f877767027284d3ae646361",
+      "sha256:127f9fcf14bd15d89db5d6a071484c622e12a5004721becab19961bc289d913a",
     );
     expect(computeContractDigest()).toBe(CONTRACT_DIGEST);
     expect(computeContractDigest(CONTRACT_MANIFEST)).toBe(CONTRACT_DIGEST);
@@ -861,7 +861,7 @@ describe("EpochGuard frozen contract", () => {
     ).toBe(false);
   });
 
-  it("freezes exact conflict, 422, 404, Schema, projection, and v7 public error bodies", () => {
+  it("freezes exact conflict, 422, 404, Schema, projection, and v8 public error bodies", () => {
     const stale = makeStaleViewError("session_1", 4, 5);
     expect(stale).toEqual({
       error: "STALE_VIEW",
@@ -985,7 +985,7 @@ describe("EpochGuard frozen contract", () => {
     }
   });
 
-  it("rejects malformed v7 public errors symmetrically while accepting nullable session identity", () => {
+  it("rejects malformed v8 public errors symmetrically while accepting nullable session identity", () => {
     const unstable = makeUnstableWorldError(null, 0);
     const unstableWithSession = makeUnstableWorldError("session_1", 7);
     const mismatch = makeRoleProfileMismatchError("budget", "agent_budget");
@@ -1579,7 +1579,7 @@ describe("EpochGuard frozen contract", () => {
     expectSnapshotRejected(nonCanonicalEarliestEnd);
   });
 
-  it("accepts the v6 refresh lifecycle through partial collection, validation, and commit", () => {
+  it("accepts the v8 refresh lifecycle through partial collection, validation, and commit", () => {
     const reobserving = makeRefreshInProgressSnapshot();
     const twoOwnerReobserving = makeTwoOwnerRefreshInProgressSnapshot();
     const historicalReobserving = makeHistoricalRefreshInProgressSnapshot();
@@ -1829,6 +1829,25 @@ describe("EpochGuard frozen contract", () => {
     partialTerminal.agents[2].inFlightAttempt.status = "INTERRUPTED";
     partialTerminal.agents[2].inFlightAttempt.runCompletedAt =
       "2026-08-29T12:00:02.000Z";
+    const validateRejectedCompleted = makeTerminalClaimedSnapshot();
+    validateRejectedCompleted.gate.reasonCode = "DECISION_INVALID";
+    validateRejectedCompleted.agents[1].inFlightAttempt.status = "COMPLETED";
+    validateRejectedCompleted.latestDiagnostics = [
+      {
+        diagnosticId: "diagnostic_validate_rejected_completed",
+        kind: "SYSTEM_FAILURE",
+        stage: "VALIDATE",
+        reasonCode: "DECISION_INVALID",
+        role: "budget",
+        relevantIds: [
+          { kind: "ATTEMPT", id: "attempt_budget_2" },
+          { kind: "ASSIGNMENT", id: "assignment_budget_2" },
+          { kind: "RUN", id: "run_budget_2" },
+        ],
+        auditSeq: 22,
+        recommendedAction: "NEW_SESSION",
+      },
+    ];
 
     const interruptedAfterValidation = makeRefreshValidatingSnapshot();
     interruptedAfterValidation.sessionState = "INTERRUPTED";
@@ -1844,6 +1863,7 @@ describe("EpochGuard frozen contract", () => {
       failedRunning,
       interruptedQueued,
       partialTerminal,
+      validateRejectedCompleted,
       interruptedAfterValidation,
     ]) {
       expectSnapshotAccepted(snapshot);
@@ -1860,6 +1880,13 @@ describe("EpochGuard frozen contract", () => {
     });
     const terminalCompleted = makeTerminalClaimedSnapshot();
     terminalCompleted.agents[1].inFlightAttempt.status = "COMPLETED";
+    const completedWithExtraDiagnosticReference = mutableClone(
+      validateRejectedCompleted,
+    );
+    completedWithExtraDiagnosticReference.latestDiagnostics[0].relevantIds.push({
+      kind: "SESSION",
+      id: "session_unrelated",
+    });
     const terminalNoAttempt = makeTerminalClaimedSnapshot();
     terminalNoAttempt.agents[1].inFlightAttempt = null;
     const terminalWrongOwner = makeTerminalClaimedSnapshot();
@@ -1886,6 +1913,7 @@ describe("EpochGuard frozen contract", () => {
       terminalRunning,
       terminalQueued,
       terminalCompleted,
+      completedWithExtraDiagnosticReference,
       terminalNoAttempt,
       terminalWrongOwner,
       terminalDeletedOldDecision,
@@ -2149,6 +2177,15 @@ describe("EpochGuard frozen contract", () => {
     };
     for (const candidate of [
       { ...NORMAL_READY_GOLDEN_SNAPSHOT, schemaVersion: 2 },
+      {
+        ...NORMAL_READY_GOLDEN_SNAPSHOT,
+        contractVersion: "epochguard-contract-v7",
+      },
+      {
+        ...NORMAL_READY_GOLDEN_SNAPSHOT,
+        contractDigest:
+          "sha256:4dfbeb9e55de7ca17a19f5fb8f99494b17e441af0f877767027284d3ae646361",
+      },
       {
         ...NORMAL_READY_GOLDEN_SNAPSHOT,
         contractDigest: `sha256:${"f".repeat(64)}`,

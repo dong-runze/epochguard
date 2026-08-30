@@ -14,13 +14,14 @@ witness; and re-observes only the evidence owner that became invalid.
 **中文摘要：** EpochGuard 检查多个 Agent 的证据是否曾在同一个当前世界版本中共同成立。若不存在共同切面，后端 Effect Gate 会拒绝副作用、给出可检验冲突证明，并只刷新已失效的证据 owner。
 
 > [!IMPORTANT]
-> **Release truth — 2026-08-30:** the deterministic WSL2 gate passes
-> (`npm run check`: 361/361 server tests plus 6/6 web tests, typecheck, and
-> production builds).
-> The final candidate has **not yet completed the real Volcengine Ark/Codex
-> lifecycle gate**. Controlled runners, HTTP fixtures, and the Mock Preview are
-> not evidence of a real Ark run. Do not describe this project as live-Ark
-> verified until the seven-run story below succeeds on the final candidate.
+> **Evidence boundary:** on 2026-08-30, a pre-freeze WSL2 working-tree snapshot
+> passed its then-current `npm run check`, a scratch Responses/Codex preflight,
+> and one complete seven-Run API story against BytePlus ModelArk
+> `seed-2-0-lite-260428`. That historical result does not certify the checkout
+> you are reading. A release is `GO` only when one exact clean public commit
+> passes the offline, live, browser, repeatability, privacy, and link gates in
+> the [demo runbook](docs/EPOCHGUARD_DEMO.md). Its SHA and results belong in the
+> external sanitized release manifest; this repository does not pre-claim them.
 
 ## The failure EpochGuard prevents
 
@@ -56,6 +57,10 @@ combination around real Agent work:
 - **Run-bound evidence:** a decision is accepted only when its server-issued
   Receipt, nonce, Role profile, Assignment, actual Run, action, query, and
   canonical Evidence Pack all match.
+- **Authoritative fixed-rule verification:** model Verdicts are untrusted
+  proposals. The backend recomputes the three fixed Role results from the
+  canonical Action and authoritative ResourceVersion before issuing a Permit,
+  and the Effect Gate repeats that check immediately before release.
 - **Joint validity as effect admission:** the model cannot publish. Only a
   backend Effect Gate can append the local Mock Effect after revalidating the
   current head and consuming a one-time Permit.
@@ -146,20 +151,23 @@ export CODEX_BIN="$(npm prefix --global)/bin/codex"
 "$CODEX_BIN" --version
 
 # Stop here without a key: every deterministic release gate above is complete.
-# Only a real Ark preflight and the seven product Runs remain credential-gated.
+# Credentials are required only for the live preflight and seven product Runs.
 read -rsp "ARK_API_KEY: " ARK_API_KEY; echo
 export ARK_API_KEY
 read -rp "ARK_MODEL (Responses-capable endpoint/model ID): " ARK_MODEL
 export ARK_MODEL
-export ARK_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
+# Verified BytePlus AP/Johor data-plane route.
+export ARK_BASE_URL="https://ark.ap-southeast.bytepluses.com/api/v3"
 
 case "$ARK_API_KEY" in ""|replace-*|*'<'*|*'>'*) echo "Real ARK_API_KEY required"; exit 2;; esac
 case "$ARK_MODEL" in ""|*replace-*|*'<'*|*'>'*) echo "Real ARK_MODEL required"; exit 2;; esac
 ```
 
-Until the real Ark gate passes and the reviewed candidate is promoted, the
-repository's default `main` is intentionally still the Starter baseline. Clone
-`epochguard/staging` explicitly as above; do not test the default branch yet.
+The public candidate reference for this protocol is `epochguard/staging`; the
+older default `main` branch is not a release identity. Devpost, the external
+manifest, and reviewer commands must name that public branch and its exact SHA.
+If the team later publishes an immutable submission tag or promotes the default
+branch, update every public link together and repeat the same-SHA release gates.
 
 Keep using the explicit `"$CODEX_BIN"` path for every later Codex command.
 Do not replace it with `command -v codex` or bare `codex`: an inherited Windows
@@ -196,10 +204,14 @@ printf %s "$APP_AUTH_TOKEN" | clip.exe
 npm run dev
 ```
 
-Open <http://localhost:5173>, paste `APP_AUTH_TOKEN`, select **Session Safety**,
-and use the exact UI buttons described in the [demo guide](docs/EPOCHGUARD_DEMO.md).
-The UI automatically resolves the three fixed Role Agents and hides them from
-the normal Agent Chat list; there is no manual Role selection step.
+Open <http://localhost:5173>, paste `APP_AUTH_TOKEN`, and select **Session
+Safety** inside the Playground. Before a Session starts, its launcher displays
+the three exact protected Role Agent names and lifecycle states. Click a Role
+card to focus that real Agent's read-only ID and fixed-profile inspection. This
+focus is not owner assignment: the frontend still resolves all three fixed
+Agents by exact name and cannot substitute their IDs. They remain hidden from
+ordinary Agent Chat so an operator cannot mutate, stop, delete, or manually
+prompt them. Use the exact UI sequence in the [demo guide](docs/EPOCHGUARD_DEMO.md).
 
 > [!CAUTION]
 > `npm run dev` does **not** load `.env`; the server is plain `tsx watch` and
@@ -223,7 +235,7 @@ export APP_AUTH_TOKEN="$(node -e 'process.stdout.write(require("node:crypto").ra
 : "${ARK_MODEL:?Run the credential preflight first}"
 case "$ARK_API_KEY" in replace-*|*'<'*|*'>'*) echo "Real ARK_API_KEY required"; exit 2;; esac
 case "$ARK_MODEL" in *replace-*|*'<'*|*'>'*) echo "Real ARK_MODEL required"; exit 2;; esac
-export ARK_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
+export ARK_BASE_URL="https://ark.ap-southeast.bytepluses.com/api/v3"
 npm run poc
 ```
 
@@ -241,25 +253,41 @@ character URL-safe value with the Node command above and set all three of
 
 ## Three-minute judge walkthrough
 
+The formal submission is one campaign-publish safety story with two controlled
+fixture states: Normal is the healthy control; Impossible is the temporal
+conflict and recovery branch. The Dashboard is the evidence surface, while the
+claimed middleware executes in the trusted server/Runtime/data/Effect path.
+
 The recorded submission should be a truthful **edited/accelerated capture** of
 the real seven-Run story, not a promise that seven live model calls finish
 unedited within three minutes:
 
-1. Show the candidate revision, live credential preflight, and a new demo data
-   root without exposing secrets.
-2. Click `Run Normal World`; show three real Run IDs and `READY`, then click
-   `Commit protected effect` and show `Effects in this session: 1`.
-3. Click `Clear saved session`, switch to Impossible, and click
+1. Show one public, clean candidate revision plus sanitized offline/preflight
+   pass badges without exposing secrets.
+2. Start inside the Playground on the Session Safety launcher. Focus the Budget
+   Role card and show its real Agent name, ID, lifecycle, and fixed profile while
+   all three remain `ready`. The focus must not alter the server-frozen trio.
+3. Click `Run Normal World`, then follow the same Budget Role into its actual
+   Run-bound evidence while showing all three real Runs. Show `READY`, click
+   `Commit protected effect`, and capture effect count 1.
+4. Click `Clear saved session`, switch to Impossible, and click
    `Run Impossible World`.
-4. Keep all three `ALLOW` cards visible while the server reports
+5. Keep all three `ALLOW` cards visible while the server reports
    `NO VALID OBSERVED-WORLD CUT`, `L=21`, `U=20`, the Budget × Policy witness,
    and effect count 0.
-5. Click `Re-observe Budget only`; show only Budget's second Run, final
+6. Click `Re-observe Budget only`; show only Budget's second Run, final
    `CONSISTENT_DENY`, counts `1/2/1`, two reruns avoided, and effect count 0.
 
 Label cuts or speed-ups, preserve real Run/Assignment/Receipt IDs and elapsed
 times, and never substitute the Mock Preview. A detailed shot list is in
-[Reproducible demo](docs/EPOCHGUARD_DEMO.md#7-recording-a-truthful-three-minute-video).
+[Reproducible demo](docs/EPOCHGUARD_DEMO.md#7-execute-the-formal-demo-and-produce-the-submission-video).
+
+> [!WARNING]
+> **Do not infer release status from this README.** A dirty tree, a historical
+> pass, an API-only run, or the presence of the Agent-focus UI is not Formal Demo
+> `GO`. Freeze and publish one reviewed commit, then record every required gate
+> against that unchanged SHA in the external sanitized release manifest. Any
+> code or documentation change starts that evidence chain again.
 
 ## Reproducibility traps
 
@@ -276,11 +304,17 @@ times, and never substitute the Mock Preview. A detailed shot list is in
 
 ## Test evidence
 
-| Evidence | Current result | What it proves | What it does **not** prove |
+| Evidence | Recorded result | What it proves | What it does **not** prove |
 | --- | --- | --- | --- |
-| Windows and WSL2 Ubuntu 24.04 clean clones: `npm run check` | **PASS** — Server 23 files / 361 tests; Web 1 file / 6 tests; Server/Web typecheck; Web/Server production builds | Contracts, Stores, interval validation, no-cut proof, run binding, selective refresh, Effect Gate, routes, dual-scenario integration, Snapshot projection, and fail-closed Runtime readiness under deterministic tests | Ark credentials, remote model behavior, Docker daemon, or an end-to-end live recording |
-| Controlled-HTTP browser gate recorded for the integrated production shell | **PASS**, documented in the two authoritative design/workflow records | Production routing, authentication boundary, single-Snapshot UI, and fail-closed browser behavior under controlled responses | A real Ark/Codex lifecycle |
-| Final-candidate real Ark seven-Run story | **NOT COMPLETED / NOT PASSED** | Required before the release claim can be upgraded | Nothing yet; this is the open release gate |
+| Pre-freeze WSL2 working-tree snapshot (2026-08-30): then-current `npm run check` | **HISTORICAL PASS** — all Server/Web tests, typechecks, and production builds in that snapshot passed | Contracts, Stores, interval validation, no-cut proof, run binding, selective refresh, Effect Gate, routes, dual-scenario integration, Snapshot projection, and fail-closed Runtime readiness at that revision | The later authoritative fixed-rule Verdict recomputation, public candidate, Agent-focus UI, remote-model repeatability, or a finished video |
+| Earlier controlled-HTTP browser gate | **HISTORICAL PASS** on the recorded pre-focus candidate | Production routing, authentication boundary, single-Snapshot UI, and fail-closed browser behavior under controlled responses at that revision | The final Agent-focus UI or a real ModelArk/Codex lifecycle |
+| Pre-freeze ModelArk/Codex seven-Run API story (`seed-2-0-lite-260428`) | **HISTORICAL PASS ONCE** — Normal `3 ALLOW`, effective joint-validation window `[10,11)` at head 10, one idempotent Effect; Impossible `L=21/U=20`, Budget-only refresh, final `2 ALLOW + 1 DENY`, counts `1/2/1`, zero Effects | That configuration, then-current prompt/validation logic, Runtime, real Agent outputs, selective refresh, and Effect Gate worked together once | Strict `epoch-prompt-v2`, the later authoritative fixed-rule Verdict recomputation, the exact public candidate, repeated stability, the browser journey, or the submission video |
+| Exact public submission candidate | **NOT ASSERTED IN REPOSITORY TEXT** — verify the external sanitized manifest and Devpost-linked video | Same-SHA offline, live, browser, rehearsal, privacy, and link evidence when present | Anything not recorded by those gates |
+
+Strict `epoch-prompt-v2` and authoritative fixed-rule Verdict recomputation are
+current-candidate capabilities, not facts inherited from either historical row.
+They remain pending the exact public fresh-clone check, same-SHA live preflight,
+and browser release gates recorded in the external sanitized manifest.
 
 Run the deterministic gate yourself:
 
@@ -290,6 +324,42 @@ npm run check
 
 The real Ark smoke and seven-Run story are intentionally separate and are not
 part of the default offline test command.
+
+## Reviewer access
+
+The offline install, deterministic tests, typechecks, and production builds are
+free to run and require no ModelArk credential:
+
+```bash
+npm ci
+npm run check
+```
+
+This repository does **not** claim that a public hosted live-model service
+already exists. A reviewer who chooses to repeat the real Agent path needs
+either their own eligible BytePlus ModelArk AP account and API key, or temporary
+access arranged by the organizers/team outside the public repository. BytePlus
+publishes a [free-token offer](https://docs.byteplus.com/en/docs/modelark/1399514)
+for eligible accounts, but availability and terms are controlled by BytePlus
+and are not guaranteed by EpochGuard. Never share or commit a ModelArk API key.
+
+If a temporary hosted reviewer endpoint is later listed in Devpost, it may
+provide only a revocable application access token; the ModelArk key remains on
+the server. The prerecorded submission video is evidence of execution, not a
+substitute for credentials or a claim of current hosted availability.
+
+## Third-party technology and assets
+
+| Item | Use and attribution |
+| --- | --- |
+| TikTok TechJam Agent Launchpad Starter Kit | The supplied baseline at commit `8d0bd4f` provides the original React/Node Agent CRUD, Playground, Runtime adapters, deployment templates, and `docs/assets/create-agent.jpg` / `playground.jpg` reference images. It is distributed under the repository's [MIT License](LICENSE). |
+| BytePlus ModelArk | External OpenAI-compatible Responses API used for model inference through the AP/Johor data plane. It is not bundled; BytePlus account, regional key/model access, and [BytePlus terms](https://www.byteplus.com/en/terms) apply. |
+| OpenAI Codex CLI | Separately installed Agent runtime (`@openai/codex@0.111.0` for the recorded protocol). It is not vendored; see the [upstream project and license](https://github.com/openai/codex). |
+| React, React DOM, Vite, `@vitejs/plugin-react` | Browser UI and production bundle; each is MIT-licensed. |
+| Fastify, `@fastify/cors`, `@fastify/static` | HTTP API, CORS, and single-port static production serving; each is MIT-licensed. |
+| Zod | Runtime configuration and contract validation; MIT-licensed. |
+| TypeScript, tsx, Vitest, concurrently | Build, development, orchestration, and deterministic tests. TypeScript is Apache-2.0; the other three are MIT-licensed. Exact packages, versions, integrity hashes, and dependency licenses are inspectable from [`package-lock.json`](package-lock.json) and the installed package metadata. |
+| EpochGuard visual assets | `docs/assets/epochguard-architecture.svg` and the EpochGuard UI styling are project-created. No third-party music or stock media is required; any final video asset must still pass the release asset/license review. |
 
 ## Limits and honest claims
 
@@ -303,9 +373,9 @@ part of the default offline test command.
 - The two JSON scenario Stores use single-process serialized writes. They do not
   support multiple Node writers or shared multi-replica deployment, and updates
   across the two files are not a cross-file transaction.
-- A Receipt proves server-side binding to stored source history; it does not
-  prove that the physical world or source is honest, or that the LLM's semantic
-  reasoning is correct.
+- A Receipt alone does not prove source truth or LLM reasoning. For the three
+  fixed MVP rules, the backend independently recomputes the result from the
+  authoritative Action and ResourceVersion and fails closed on any mismatch.
 - The central `world_seq` works only for registered comparable sources.
   Unverifiable history and incomparable clocks fail closed.
 - `APP_AUTH_TOKEN` is a shared demo bearer token, not identity, RBAC, or tenant
@@ -317,15 +387,19 @@ part of the default offline test command.
 
 See [Security](SECURITY.md) for the Starter's broader POC limitations.
 
-## Documentation
+## English reviewer documentation
 
 - [Reproducible demo and recording runbook](docs/EPOCHGUARD_DEMO.md)
 - [Architecture and trust boundaries](docs/ARCHITECTURE.md)
-- [Authoritative EpochGuard final design](docs/EPOCHGUARD_FINAL_DESIGN.md)
-- [Authoritative implementation and release workflow](docs/EPOCHGUARD_PARALLEL_SESSION_WORKFLOW.md)
 - [Local container POC details](docs/LOCAL_POC.md)
 - [Security policy](SECURITY.md)
 - [License](LICENSE)
+
+Internal planning records are retained for provenance but are written in
+Chinese and are **not submission instructions**: [detailed design](docs/EPOCHGUARD_FINAL_DESIGN.md)
+and [parallel implementation workflow](docs/EPOCHGUARD_PARALLEL_SESSION_WORKFLOW.md).
+The English README, architecture, security policy, and demo runbook are the
+judge-facing sources of truth.
 
 ---
 

@@ -32,7 +32,7 @@ const ACTION = {
   market: "SG" as const,
 };
 
-// Frozen outputs of the authoritative v6 canonicalization. Preview code never
+// Frozen outputs of the authoritative contract canonicalization. Preview code never
 // derives or uses these values as a safety decision.
 const ACTION_HASH =
   "sha256:bd99e824e58087f03cd1018fe7457865a596ae74ffbb5a707b1d2c3b6da5c202";

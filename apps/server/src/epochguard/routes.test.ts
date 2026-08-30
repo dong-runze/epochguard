@@ -314,7 +314,7 @@ describe("EpochGuard routes", () => {
     expect(mismatchResponse.json()).toEqual(projectionMismatch);
   });
 
-  it("derives canonical v7 conflict statuses from parsed bodies rather than constructor status", async () => {
+  it("derives canonical v8 conflict statuses from parsed bodies rather than constructor status", async () => {
     const service = makeService();
     const app = await buildApp("test", service);
 

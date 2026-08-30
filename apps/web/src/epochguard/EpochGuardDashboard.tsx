@@ -111,6 +111,7 @@ function activeOverlapLabel(
 export interface EpochGuardDashboardProps {
   source: EpochGuardSessionSource;
   sessionId: string;
+  focusedAgentId?: string | null;
   pollIntervalMs?: number;
   staleAfterMs?: number;
 }
@@ -255,12 +256,14 @@ function RuntimeEvidence({
   );
 }
 
-function AgentCard({
+export function AgentCard({
   agent,
   witnessReceiptIds,
+  isInspectionFocus = false,
 }: {
   agent: SessionDashboardSnapshot["agents"][number];
   witnessReceiptIds: ReadonlySet<string>;
+  isInspectionFocus?: boolean;
 }) {
   const decision = agent.activeDecision;
   const attempt = agent.inFlightAttempt;
@@ -269,8 +272,8 @@ function AgentCard({
 
   return (
     <article
-      className={`eg-agent-card${isWitness ? " eg-agent-card-witness" : ""}`}
-      aria-label={`${ROLE_LABELS[agent.role]} Agent evidence`}
+      className={`eg-agent-card${isWitness ? " eg-agent-card-witness" : ""}${isInspectionFocus ? " eg-agent-card-focus" : ""}`}
+      aria-label={`${ROLE_LABELS[agent.role]} Agent evidence${isInspectionFocus ? " selected before Run" : ""}`}
     >
       <header className="eg-agent-card-header">
         <div className={`eg-role-mark eg-role-${agent.role}`} aria-hidden="true">
@@ -279,8 +282,16 @@ function AgentCard({
         <div className="eg-agent-identity">
           <span className="eg-kicker">{ROLE_LABELS[agent.role]} Agent</span>
           <h3>{agent.agentNameAtAssignment}</h3>
+          <span className="eg-agent-id" title={agent.agentId}>
+            Agent ID <code>{agent.agentId}</code>
+          </span>
         </div>
-        <span className="eg-run-count">{agent.runCount} run{agent.runCount === 1 ? "" : "s"}</span>
+        <div className="eg-agent-card-badges">
+          {isInspectionFocus ? (
+            <span className="eg-inspection-focus-badge">Selected before Run</span>
+          ) : null}
+          <span className="eg-run-count">{agent.runCount} run{agent.runCount === 1 ? "" : "s"}</span>
+        </div>
       </header>
 
       {decision === null ? (
@@ -315,7 +326,10 @@ function AgentCard({
             </span>
             <strong>{intervalLabel(decision.receipt)}</strong>
           </div>
-          <details className="eg-details">
+          <details
+            className="eg-details"
+            open={isInspectionFocus ? true : undefined}
+          >
             <summary>Run-bound evidence</summary>
             <dl className="eg-evidence-grid">
               <div>
@@ -339,6 +353,14 @@ function AgentCard({
               <div>
                 <dt>Runtime</dt>
                 <dd>{decision.runtimeProof.runtimeLabel}</dd>
+              </div>
+              <div>
+                <dt>Role profile</dt>
+                <dd>{decision.runtimeProof.roleProfileVersion}</dd>
+              </div>
+              <div>
+                <dt>Prompt template</dt>
+                <dd>{decision.runtimeProof.promptTemplateVersion}</dd>
               </div>
               <div>
                 <dt>Thread</dt>
@@ -411,6 +433,7 @@ function EmptyDashboard({
 export function EpochGuardDashboard({
   source,
   sessionId,
+  focusedAgentId = null,
   pollIntervalMs,
   staleAfterMs,
 }: EpochGuardDashboardProps) {
@@ -530,6 +553,7 @@ export function EpochGuardDashboard({
                 key={agent.role}
                 agent={agent}
                 witnessReceiptIds={witnessReceiptIds}
+                isInspectionFocus={agent.agentId === focusedAgentId}
               />
             ))}
           </section>

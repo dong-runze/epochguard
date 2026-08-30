@@ -1,9 +1,9 @@
 import { z } from "zod";
 
-export const CONTRACT_VERSION = "epochguard-contract-v7" as const;
+export const CONTRACT_VERSION = "epochguard-contract-v8" as const;
 export const CONTRACT_SCHEMA_VERSION = 1 as const;
 export const CONTRACT_DIGEST =
-  "sha256:4dfbeb9e55de7ca17a19f5fb8f99494b17e441af0f877767027284d3ae646361" as const;
+  "sha256:127f9fcf14bd15d89db5d6a071484c622e12a5004721becab19961bc289d913a" as const;
 
 export const ROLES = ["inventory", "budget", "policy"] as const;
 export const SCENARIO_IDS = ["normal-world-v1", "impossible-collage-v1"] as const;
@@ -600,7 +600,7 @@ export const SNAPSHOT_UNIVERSAL_SAFETY_RULES = {
     validating:
       "three Decisions, no Attempt, PENDING/CHECKING/no-side-effect/no-action; initial Plan is null with no reobserved owner, while refresh Plan is COMPLETED with exact reobserved owners, all Decisions current-valid, and owner evidence CURRENT",
     terminalClaimed:
-      "FAILED/INTERRUPTED CLAIMED owners partition into completed current-valid owners and invalid owners carrying only fresh terminal Attempts",
+      "FAILED/INTERRUPTED CLAIMED owners partition into completed current-valid owners and invalid owners carrying fresh terminal Attempts; a COMPLETED invalid-owner Attempt is allowed only for FAILED DECISION_INVALID with a matching VALIDATE diagnostic bound to that Attempt, Assignment, and Run",
     completedPlan:
       "COMPLETED is restricted to validation and current-valid post-refresh stable/terminal projections with exact reobserved owners",
     ownerAttempt:
@@ -769,6 +769,43 @@ function agentHasTerminalNewRefreshAttempt(
     agent.runCount > 1 &&
     attempt.assignmentId !== decision.runtimeProof.assignmentId &&
     (attempt.runId === null || attempt.runId !== decision.runId)
+  );
+}
+
+function agentHasValidateRejectedCompletedRefreshAttempt(
+  snapshot: SessionDashboardSnapshotCandidate,
+  agent: SnapshotAgentCandidate,
+): boolean {
+  const decision = agent.activeDecision;
+  const attempt = agent.inFlightAttempt;
+  const diagnostic = snapshot.latestDiagnostics[0];
+  if (
+    snapshot.sessionState !== "FAILED" ||
+    snapshot.gate.reasonCode !== "DECISION_INVALID" ||
+    decision === null ||
+    attempt === null ||
+    attempt.status !== "COMPLETED" ||
+    attempt.runId === null ||
+    agent.runCount <= 1 ||
+    attempt.assignmentId === decision.runtimeProof.assignmentId ||
+    attempt.runId === decision.runId ||
+    diagnostic === undefined ||
+    diagnostic.stage !== "VALIDATE" ||
+    diagnostic.reasonCode !== "DECISION_INVALID" ||
+    diagnostic.role !== agent.role ||
+    diagnostic.relevantIds.length !== 3
+  ) {
+    return false;
+  }
+  return [
+    { kind: "ATTEMPT", id: attempt.attemptId },
+    { kind: "ASSIGNMENT", id: attempt.assignmentId },
+    { kind: "RUN", id: attempt.runId },
+  ].every((expected) =>
+    diagnostic.relevantIds.some(
+      (reference) =>
+        reference.kind === expected.kind && reference.id === expected.id,
+    ),
   );
 }
 
@@ -1448,7 +1485,8 @@ function addSnapshotInvariantIssues(
       return agent.inFlightAttempt === null
         ? agent.runCount > 1 && agentDecisionIsCurrentValid(snapshot, agent)
         : agentDecisionIsInvalidAtHead(snapshot, agent) &&
-            agentHasTerminalNewRefreshAttempt(agent);
+            (agentHasTerminalNewRefreshAttempt(agent) ||
+              agentHasValidateRejectedCompletedRefreshAttempt(snapshot, agent));
     });
     if (
       decisions.length !== 3 ||
@@ -1459,7 +1497,7 @@ function addSnapshotInvariantIssues(
     ) {
       snapshotIssue(
         context,
-        "FAILED/INTERRUPTED CLAIMED Plan owners must partition into completed current Decisions and invalid owners with fresh terminal Attempts",
+        "FAILED/INTERRUPTED CLAIMED Plan owners must partition into completed current Decisions and invalid owners with fresh terminal Attempts; COMPLETED requires a bound FAILED VALIDATE/DECISION_INVALID diagnostic",
         ["refreshPlan"],
       );
     }
@@ -1785,7 +1823,7 @@ export const CONTRACT_SEMANTIC_INVARIANTS = [
   "Snapshot RefreshPlan.reasonCode is exactly NO_VALID_OBSERVED_WORLD_CUT or HISTORICAL_BUT_STALE_NOW; AVAILABLE exists only for matching blocked/historical invalid owners; CLAIMED and COMPLETED follow their closed state routes",
   "REOBSERVING CLAIMED retains three old Decisions and exact invalid/in-flight/reobserved owners; COLLECTING preserves the full owner set across partial completion and makes stale validity PENDING after the first replacement",
   "VALIDATING always has three Decisions, no Attempt, PENDING/CHECKING and no side effect/action; initial validation has no reobserved owner/Plan, while refresh validation has the exact COMPLETED owner set with current-valid evidence and CURRENT owner Decisions",
-  "FAILED/INTERRUPTED CLAIMED owners partition into completed current-valid Decisions and invalid owners with fresh terminal Attempts; a terminal Attempt is required",
+  "FAILED/INTERRUPTED CLAIMED owners partition into completed current-valid Decisions and invalid owners with fresh terminal Attempts; a COMPLETED invalid-owner Attempt is allowed only for FAILED DECISION_INVALID with a matching VALIDATE diagnostic bound to that Attempt, Assignment, and Run",
   "READY_AT_CURRENT_HEAD accepts an absent initial Plan or the exact COMPLETED selective-refresh Plan and always exposes exactly COMMIT",
   "FAILED with WAITING and null reason is rejected; side-effect-free FAILED/INTERRUPTED Gate and reason products otherwise remain unfrozen",
   "availableActions is exactly REOBSERVE_INVALID for blocked/historical AVAILABLE Plans, COMMIT for READY_AT_CURRENT_HEAD, and empty otherwise",

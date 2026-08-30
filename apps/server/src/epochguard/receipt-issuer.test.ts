@@ -141,7 +141,7 @@ describe("ReceiptIssuer", () => {
     expect(observations.get("budget")?.receipt.sourceRevision).toBe(19);
   });
 
-  it("reconstructs the finite Budget horizon under the v6 temporal rules", () => {
+  it("reconstructs the finite Budget horizon under the active temporal rules", () => {
     const { database, observations } = captureImpossibleWorld();
     const budgetReceipt = observations.get("budget")?.receipt;
     if (budgetReceipt === undefined) throw new Error("Budget Receipt is missing");

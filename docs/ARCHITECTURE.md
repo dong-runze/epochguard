@@ -9,12 +9,14 @@ Its release invariant is deliberately narrow:
 > For effects routed exclusively through EpochGuard, no effect is released
 > unless every server-issued, Assignment-bound observation Receipt is bound to
 > the same action and its actual Run, all three authoritative intervals cover
-> one current observed-world head, every Role verdict allows that action, and
+> one current observed-world head, every submitted Role verdict equals the
+> backend's fixed authoritative-rule result, all three results are `ALLOW`, and
 > the local Sink's freshness and idempotency checks pass.
 
 This is not a claim about arbitrary tools, external sinks, physical-world
-truth, Agent semantic correctness, distributed transactions, or exactly-once
-delivery across systems.
+truth, arbitrary/open-ended semantic verification, the model's internal
+reasoning or `reason` text, distributed transactions, or exactly-once delivery
+across systems.
 
 ## System view
 
@@ -85,9 +87,15 @@ Both partitions share the same three dedicated Role Agents:
 Startup creates missing Role Agents, freezes each Role profile version and
 actual `AGENTS.md` digest, and copies the registration identity into the other
 pristine scenario Store. The UI resolves these Agents by exact name and hides
-them from the ordinary Agent Chat list. The API also blocks edit, delete,
-start, stop, and chat operations against their IDs. Each dispatch and each
-accepted output re-checks the frozen profile and on-disk digest.
+them from the ordinary Agent Chat list. Before a Session, each real Role Agent
+is a read-only focus button exposing its actual ID, lifecycle, and expected
+fixed-profile summary. Focus changes only the inspection panel: all three owner
+IDs are still resolved independently and the create command cannot contain a
+focused Role. During the Run, the server requires each Snapshot Agent and its
+Run-bound evidence to preserve the same frozen Agent ID and assigned name. The
+API also blocks edit, delete, start, stop, and chat operations against those
+IDs. Each dispatch and accepted output re-checks the frozen profile and on-disk
+digest.
 
 ## End-to-end protocol
 
@@ -163,6 +171,12 @@ Session + Action + Role + Agent + profile digest
 ```
 
 The model never supplies a trusted `runId`, interval, Permit, or Sink argument.
+The normalized Verdict remains an untrusted candidate. In the same Store
+transaction, the validator resolves the Receipt's authoritative
+ResourceVersion and calls the fixed `evaluateAuthoritativeVerdict(role, action,
+resourceValue)` predicate. A mismatch is `DECISION_INVALID`; the candidate
+Decision, JVC, Permit, and Effect are not published. The Evidence Pack's natural
+language `decisionRule` is model guidance, not an interpreted policy DSL.
 
 ### 4. Joint validity and current-head readiness
 
@@ -178,8 +192,10 @@ current readiness: every interval contains current head H
 
 The result is one of:
 
-- `VALID_CURRENT_ALLOW`: all evidence covers `H` and every verdict is `ALLOW`;
-- `CONSISTENT_DENY`: evidence is current, but at least one Role says `DENY`;
+- `VALID_CURRENT_ALLOW`: all evidence covers `H`, every submitted Verdict
+  matches the authoritative fixed-rule result, and all three are `ALLOW`;
+- `CONSISTENT_DENY`: evidence is current and at least one authoritative result
+  is `DENY`, with every submitted Verdict matching its result;
 - `NO_VALID_OBSERVED_WORLD_CUT`: `L >= U`, with a persisted proof and canonical
   latest-start/earliest-end witness;
 - `HISTORICAL_BUT_STALE_NOW`: a historical intersection exists but does not
@@ -201,9 +217,11 @@ Session + actionHash + dependencySetHash
 `POST /commit` contains only `expectedSessionRevision`. Inside one
 `EpochStore.mutate()` critical section, the Effect Gate rechecks the active
 Decisions, Assignment/Run closure, Receipts and source intervals, dependency
-hash, current head, Permit, and idempotency key. It then appends one local
-Effect and consumes the Permit in the same atomic JSON replacement. A repeated
-or concurrent Commit for the same Session + Action returns the existing Effect.
+hash, current head, Permit, idempotency key, and all three fixed authoritative
+rule results. It requires both each active Decision and each recomputed result
+to be `ALLOW`, then appends one local Effect and consumes the Permit in the same
+atomic JSON replacement. A repeated or concurrent Commit for the same
+Session + Action returns the existing Effect.
 
 If the head advances after validation, the Session terminates as
 `COMMIT_RACE`, keeps effect count zero, and does not auto-replay.
@@ -337,8 +355,11 @@ URL-safe `APP_AUTH_TOKEN` of at least 24 characters.
 - convergence under unlimited source changes; or
 - an unedited three-minute live run.
 
-For the exact reproducible flow and the open live-Ark release gate, see the
-[EpochGuard demo runbook](EPOCHGUARD_DEMO.md). The detailed product contract
-remains in [EpochGuard final design](EPOCHGUARD_FINAL_DESIGN.md), and executed
-implementation evidence remains in the
-[parallel implementation workflow](EPOCHGUARD_PARALLEL_SESSION_WORKFLOW.md).
+For the exact English reviewer flow and the final-candidate
+ModelArk/browser/repeatability gates, see the
+[EpochGuard demo runbook](EPOCHGUARD_DEMO.md). The Chinese
+[detailed design](EPOCHGUARD_FINAL_DESIGN.md) and
+[parallel implementation workflow](EPOCHGUARD_PARALLEL_SESSION_WORKFLOW.md)
+are internal provenance records, not submission instructions and not evidence
+that a release gate has passed. The English README, this architecture, the
+security policy, and the demo runbook are the judge-facing sources of truth.

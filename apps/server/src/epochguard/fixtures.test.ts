@@ -26,7 +26,7 @@ const QUERY_HASHES: Record<Role, string> = {
 };
 
 describe("EpochGuard fixtures", () => {
-  it("freezes the v6 Action and RoleQuery golden hashes", () => {
+  it("freezes the active Action and RoleQuery golden hashes", () => {
     expect(Object.isFrozen(FIXTURE_ACTION)).toBe(true);
     expect(canonicalizeAction(FIXTURE_ACTION)).toBe(ACTION_CANONICAL);
     expect(actionHash(FIXTURE_ACTION)).toBe(ACTION_HASH);

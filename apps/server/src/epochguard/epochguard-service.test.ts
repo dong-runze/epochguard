@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Agent, AgentRun, CreateAgentInput } from "../types.js";
 import type { EvidencePack } from "./evidence-pack-writer.js";
 import { EpochStore } from "./epoch-store.js";
+import { AUTHORITATIVE_VERDICT_MISMATCH } from "./joint-validity-validator.js";
 import {
   EpochGuardService,
   EpochGuardServiceError,
@@ -469,6 +470,27 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
   throw new Error("Timed out waiting for the controlled service state");
 }
 
+function expectStrictV2AssignmentWiring(
+  database: EpochDatabase,
+  agents: TestAgentRuntime,
+  sessionId: string,
+  expectedAssignments: number,
+): void {
+  const assignments = database.runAssignments.filter(
+    (assignment) => assignment.sessionId === sessionId,
+  );
+  expect(assignments).toHaveLength(expectedAssignments);
+  for (const assignment of assignments) {
+    expect(assignment.promptTemplateVersion).toBe("epoch-prompt-v2");
+    expect(assignment.boundRunId).not.toBeNull();
+    const prompt = agents.getRun(assignment.boundRunId!).prompt;
+    expect(prompt).toContain(
+      "exactly these nine keys in this spelling: schemaVersion, sessionId, actionHash, runAssignmentId, role, receiptId, nonce, verdict, reason",
+    );
+    expect(prompt).not.toContain("<EPOCH_DECISION>{...}</EPOCH_DECISION>");
+  }
+}
+
 async function waitForSessionState(
   service: EpochGuardService,
   sessionId: string,
@@ -530,6 +552,47 @@ function failNextStoreMutations(
   };
 }
 
+function injectNextCompletedRefreshValidation(
+  store: EpochStore,
+  sessionId: string,
+  inject: (database: EpochDatabase) => void,
+): { injected: () => boolean; restore: () => void } {
+  const originalMutate = store.mutate.bind(store) as EpochStore["mutate"];
+  let injected = false;
+  store.mutate = async <T>(
+    mutation: (database: EpochDatabase) => T | Promise<T>,
+  ): Promise<T> =>
+    originalMutate(async (database) => {
+      if (!injected) {
+        const session = database.sessions.find(
+          (candidate) => candidate.sessionId === sessionId,
+        );
+        const plan = database.refreshPlans.find(
+          (candidate) =>
+            candidate.refreshPlanId === session?.activeRefreshPlanId,
+        );
+        const attempt = database.attempts.find(
+          (candidate) => candidate.attemptId === plan?.claimedAttemptId,
+        );
+        if (
+          session?.state === "REOBSERVING" &&
+          plan?.status === "CLAIMED" &&
+          attempt?.status === "COMPLETED"
+        ) {
+          inject(database);
+          injected = true;
+        }
+      }
+      return mutation(database);
+    });
+  return {
+    injected: () => injected,
+    restore: () => {
+      store.mutate = originalMutate;
+    },
+  };
+}
+
 describe("EpochGuardService", () => {
   it("runs the Normal chain and makes concurrent/lost Commit responses exactly-once", async () => {
     const { service, store, requestFor, agents, workspaces } =
@@ -584,6 +647,12 @@ describe("EpochGuardService", () => {
     expect(ready!.metrics.allowDecisions).toBe(3);
     expect(ready!.gate.effectsInSession).toBe(0);
     expect(agents.dispatchCounts).toEqual({ inventory: 1, budget: 1, policy: 1 });
+    expectStrictV2AssignmentWiring(
+      store.snapshot(),
+      agents,
+      ready!.sessionId,
+      3,
+    );
     const issuedPermits = store
       .snapshot()
       .permits.filter((permit) => permit.sessionId === ready!.sessionId);
@@ -910,9 +979,15 @@ describe("EpochGuardService", () => {
     expect(recoveredDatabase.permits).toHaveLength(0);
     expect(recoveredDatabase.effects).toHaveLength(0);
     expect(agents.dispatchCounts).toEqual({ inventory: 1, budget: 2, policy: 1 });
+    expectStrictV2AssignmentWiring(
+      recoveredDatabase,
+      agents,
+      recovered.sessionId,
+      4,
+    );
   });
 
-  it("retains the completed selective RefreshPlan through READY and Commit", async () => {
+  it("fails closed when refreshed Budget contradicts the authoritative decision rule", async () => {
     const { service, store, requestFor, agents } = await createHarness();
     const created = await service.createSession(
       requestFor("impossible-collage-v1"),
@@ -921,69 +996,231 @@ describe("EpochGuardService", () => {
       "BLOCKED_NO_CUT",
     ]);
     agents.allowRefreshBudgetDecision();
+    const beforeRefresh = store.snapshot();
 
-    const ready = await service.refresh(blocked.sessionId, {
-      expectedSessionRevision: blocked.sessionRevision,
-      refreshPlanId: blocked.refreshPlan!.refreshPlanId,
-    });
-
-    expect(ready.sessionState).toBe("READY_AT_CURRENT_HEAD");
-    expect(ready.metrics.allowDecisions).toBe(3);
-    expect(ready.refreshPlan).toMatchObject({
-      refreshPlanId: blocked.refreshPlan!.refreshPlanId,
-      status: "COMPLETED",
-    });
-    const projected = service.getSnapshot(ready.sessionId);
-    expect(projected.refreshPlan).toEqual(ready.refreshPlan);
-    const readyDatabase = store.snapshot();
-    const readySession = readyDatabase.sessions.find(
-      (session) => session.sessionId === ready.sessionId,
-    )!;
-    const readyValidation = readyDatabase.validations.find(
-      (validation) =>
-        validation.validationId === readySession.activeValidationId,
-    )!;
-    expect(readySession.activeRefreshPlanId).toBe(
-      blocked.refreshPlan!.refreshPlanId,
-    );
-    expect(readyValidation.refreshPlanId).toBe(
-      blocked.refreshPlan!.refreshPlanId,
-    );
-    expect(
-      readyDatabase.refreshPlans.find(
-        (plan) => plan.refreshPlanId === blocked.refreshPlan!.refreshPlanId,
-      ),
-    ).toMatchObject({ status: "COMPLETED" });
-
-    const committed = await service.commit(ready.sessionId, {
-      expectedSessionRevision: ready.sessionRevision,
-    });
-    expect(committed).toMatchObject({
-      status: "COMMITTED",
-      effectsInSession: 1,
-    });
-    const released = service.getSnapshot(ready.sessionId);
-    expect(released.gate.effectsInSession).toBe(1);
-    expect(store.snapshot().effects).toHaveLength(1);
-
-    const beforeReplay = store.snapshot();
-    const dispatchesBeforeReplay = structuredClone(agents.dispatchCounts);
     await expect(
-      service.refresh(ready.sessionId, {
-        expectedSessionRevision: released.sessionRevision,
+      service.refresh(blocked.sessionId, {
+        expectedSessionRevision: blocked.sessionRevision,
         refreshPlanId: blocked.refreshPlan!.refreshPlanId,
       }),
     ).rejects.toMatchObject({
-      statusCode: 409,
-      body: {
-        error: "STALE_VIEW",
-        sessionId: ready.sessionId,
-        expectedSessionRevision: released.sessionRevision,
-        actualSessionRevision: released.sessionRevision,
+      reasonCode: "DECISION_INVALID",
+      discriminator: AUTHORITATIVE_VERDICT_MISMATCH,
+      role: "budget",
+    });
+
+    const failed = service.getSnapshot(blocked.sessionId);
+    const afterRefresh = store.snapshot();
+    expect(failed).toMatchObject({
+      sessionState: "FAILED",
+      gate: { state: "FAILED", effectsInSession: 0 },
+      refreshPlan: { status: "CLAIMED" },
+    });
+    expect(failed.latestDiagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stage: "VALIDATE",
+          reasonCode: "DECISION_INVALID",
+        }),
+      ]),
+    );
+    expect(afterRefresh.decisions).toHaveLength(beforeRefresh.decisions.length);
+    expect(afterRefresh.validations).toHaveLength(
+      beforeRefresh.validations.length,
+    );
+    expect(afterRefresh.jointValidityCertificates).toHaveLength(
+      beforeRefresh.jointValidityCertificates.length,
+    );
+    expect(afterRefresh.permits).toHaveLength(0);
+    expect(afterRefresh.effects).toHaveLength(0);
+    const completedBudgetAttempts = afterRefresh.attempts.filter(
+      (attempt) =>
+        attempt.sessionId === blocked.sessionId &&
+        attempt.role === "budget" &&
+        !beforeRefresh.attempts.some(
+          (before) => before.attemptId === attempt.attemptId,
+        ),
+    );
+    expect(completedBudgetAttempts).toEqual([
+      expect.objectContaining({
+        status: "COMPLETED",
+        runId: expect.any(String),
+        runCompletedAt: expect.any(String),
+        outputDigest: expect.any(String),
+      }),
+    ]);
+    const completedBudgetAttempt = completedBudgetAttempts[0]!;
+    expect(
+      failed.agents.find((agent) => agent.role === "budget")!.inFlightAttempt,
+    ).toMatchObject({
+      attemptId: completedBudgetAttempt.attemptId,
+      status: "COMPLETED",
+    });
+    const authoritativeRun = agents.getRun(completedBudgetAttempt.runId!);
+    expect(authoritativeRun.status).toBe("completed");
+    expect(completedBudgetAttempt.runStartedAt).toBe(authoritativeRun.startedAt);
+    expect(completedBudgetAttempt.runCompletedAt).toBe(authoritativeRun.completedAt);
+    expect(
+      afterRefresh.runAssignments.find(
+        (assignment) =>
+          assignment.assignmentId === completedBudgetAttempt.assignmentId,
+      ),
+    ).toMatchObject({ status: "REJECTED" });
+    expect(
+      afterRefresh.refreshPlans.find(
+        (plan) => plan.refreshPlanId === blocked.refreshPlan!.refreshPlanId,
+      ),
+    ).toMatchObject({
+      status: "CLAIMED",
+      claimedAttemptId: completedBudgetAttempt.attemptId,
+    });
+    expect(
+      afterRefresh.sessions.find(
+        (session) => session.sessionId === blocked.sessionId,
+      ),
+    ).toMatchObject({
+      activeRefreshPlanId: blocked.refreshPlan!.refreshPlanId,
+      activeAttemptIds: {
+        inventory: null,
+        budget: completedBudgetAttempt.attemptId,
+        policy: null,
       },
-    } satisfies Partial<EpochGuardServiceError>);
-    expect(store.snapshot()).toEqual(beforeReplay);
-    expect(agents.dispatchCounts).toEqual(dispatchesBeforeReplay);
+    });
+    expect(failed.latestDiagnostics[0]).toMatchObject({
+      stage: "VALIDATE",
+      reasonCode: "DECISION_INVALID",
+      role: "budget",
+      relevantIds: expect.arrayContaining([
+        { kind: "ATTEMPT", id: completedBudgetAttempt.attemptId },
+        { kind: "ASSIGNMENT", id: completedBudgetAttempt.assignmentId },
+        { kind: "RUN", id: completedBudgetAttempt.runId },
+      ]),
+    });
+  });
+
+  it("closes a non-verdict validation failure into a decodable terminal refresh", async () => {
+    const { service, store, requestFor } = await createHarness();
+    const created = await service.createSession(
+      requestFor("impossible-collage-v1"),
+    );
+    const blocked = await waitForSessionState(service, created.sessionId, [
+      "BLOCKED_NO_CUT",
+    ]);
+    const beforeRefresh = store.snapshot();
+    const injection = injectNextCompletedRefreshValidation(
+      store,
+      blocked.sessionId,
+      (database) => {
+        database.resourceVersions = [];
+      },
+    );
+
+    try {
+      await expect(
+        service.refresh(blocked.sessionId, {
+          expectedSessionRevision: blocked.sessionRevision,
+          refreshPlanId: blocked.refreshPlan!.refreshPlanId,
+        }),
+      ).rejects.toMatchObject({
+        reasonCode: "HISTORY_UNVERIFIABLE",
+        discriminator: null,
+        role: null,
+      });
+    } finally {
+      injection.restore();
+    }
+
+    expect(injection.injected()).toBe(true);
+    const failed = service.getSnapshot(blocked.sessionId);
+    const afterRefresh = store.snapshot();
+    const budgetAttempt = failed.agents.find(
+      (agent) => agent.role === "budget",
+    )!.inFlightAttempt!;
+    expect(failed).toMatchObject({
+      sessionState: "FAILED",
+      gate: {
+        state: "FAILED",
+        reasonCode: "HISTORY_UNVERIFIABLE",
+        effectsInSession: 0,
+      },
+      refreshPlan: { status: "CLAIMED" },
+    });
+    expect(budgetAttempt.status).toBe("FAILED");
+    expect(
+      afterRefresh.runAssignments.find(
+        (assignment) => assignment.assignmentId === budgetAttempt.assignmentId,
+      ),
+    ).toMatchObject({ status: "REJECTED" });
+    expect(afterRefresh.decisions).toHaveLength(beforeRefresh.decisions.length);
+    expect(afterRefresh.validations).toHaveLength(
+      beforeRefresh.validations.length,
+    );
+    expect(afterRefresh.jointValidityCertificates).toHaveLength(
+      beforeRefresh.jointValidityCertificates.length,
+    );
+    expect(afterRefresh.permits).toHaveLength(0);
+    expect(afterRefresh.effects).toHaveLength(0);
+    expect(failed.latestDiagnostics[0]).toMatchObject({
+      stage: "VALIDATE",
+      reasonCode: "HISTORY_UNVERIFIABLE",
+      role: "budget",
+      relevantIds: expect.arrayContaining([
+        { kind: "ATTEMPT", id: budgetAttempt.attemptId },
+        { kind: "ASSIGNMENT", id: budgetAttempt.assignmentId },
+        { kind: "RUN", id: budgetAttempt.runId },
+      ]),
+    });
+  });
+
+  it("does not preserve COMPLETED for structural DECISION_INVALID", async () => {
+    const { service, store, requestFor } = await createHarness();
+    const created = await service.createSession(
+      requestFor("impossible-collage-v1"),
+    );
+    const blocked = await waitForSessionState(service, created.sessionId, [
+      "BLOCKED_NO_CUT",
+    ]);
+    const injection = injectNextCompletedRefreshValidation(
+      store,
+      blocked.sessionId,
+      (database) => {
+        const session = database.sessions.find(
+          (candidate) => candidate.sessionId === blocked.sessionId,
+        )!;
+        session.activeDecisionCertificateIds.policy =
+          session.activeDecisionCertificateIds.inventory;
+      },
+    );
+
+    try {
+      await expect(
+        service.refresh(blocked.sessionId, {
+          expectedSessionRevision: blocked.sessionRevision,
+          refreshPlanId: blocked.refreshPlan!.refreshPlanId,
+        }),
+      ).rejects.toMatchObject({
+        reasonCode: "DECISION_INVALID",
+        discriminator: null,
+        role: null,
+      });
+    } finally {
+      injection.restore();
+    }
+
+    expect(injection.injected()).toBe(true);
+    const failed = service.getSnapshot(blocked.sessionId);
+    expect(failed).toMatchObject({
+      sessionState: "FAILED",
+      gate: {
+        state: "FAILED",
+        reasonCode: "DECISION_INVALID",
+        effectsInSession: 0,
+      },
+      refreshPlan: { status: "CLAIMED" },
+    });
+    expect(
+      failed.agents.find((agent) => agent.role === "budget")!.inFlightAttempt,
+    ).toMatchObject({ status: "FAILED" });
   });
 
   it("exposes a lost Refresh as CLAIMED and rejects a duplicate without a second Run", async () => {
@@ -1763,41 +2000,62 @@ describe("EpochGuardService", () => {
     expect(malformed.store.snapshot()).toEqual(beforeRecovery);
   });
 
-  it("recovers COMMITTING with a completed selective RefreshPlan and issued Permit", async () => {
+  it("recovers COMMITTING with an issued Permit and completed RefreshPlan", async () => {
     const { agents, forkPersistedService, service, requestFor } =
       await createHarness();
     const created = await service.createSession(
-      requestFor("impossible-collage-v1"),
+      requestFor("normal-world-v1"),
     );
-    const blocked = await waitForSessionState(service, created.sessionId, [
-      "BLOCKED_NO_CUT",
+    const ready = await waitForSessionState(service, created.sessionId, [
+      "READY_AT_CURRENT_HEAD",
     ]);
-    agents.allowRefreshBudgetDecision();
-    const ready = await service.refresh(blocked.sessionId, {
-      expectedSessionRevision: blocked.sessionRevision,
-      refreshPlanId: blocked.refreshPlan!.refreshPlanId,
-    });
     expect(ready).toMatchObject({
       sessionState: "READY_AT_CURRENT_HEAD",
-      refreshPlan: { status: "COMPLETED" },
+      refreshPlan: null,
       gate: { state: "READY", effectsInSession: 0 },
     });
 
     const restarted = await forkPersistedService();
     await restarted.store.initialize();
+    const completedRefreshPlanId = "refresh_completed_recovery";
     await restarted.store.mutate((database) => {
       const session = database.sessions.find(
         (candidate) => candidate.sessionId === ready.sessionId,
       )!;
-      const plan = database.refreshPlans.find(
-        (candidate) =>
-          candidate.refreshPlanId === session.activeRefreshPlanId,
+      const validation = database.validations.find(
+        (candidate) => candidate.validationId === session.activeValidationId,
       )!;
       const permit = database.permits.find(
         (candidate) => candidate.permitId === session.activePermitId,
       )!;
-      expect(plan.status).toBe("COMPLETED");
       expect(permit.status).toBe("ISSUED");
+      const activeDecisionCertificateIds = [
+        session.activeDecisionCertificateIds.inventory!,
+        session.activeDecisionCertificateIds.budget!,
+        session.activeDecisionCertificateIds.policy!,
+      ];
+      const budgetDecision = database.decisions.find(
+        (candidate) =>
+          candidate.certificateId ===
+          session.activeDecisionCertificateIds.budget,
+      )!;
+      const claimedAttempt = database.attempts.find(
+        (candidate) =>
+          candidate.assignmentId === budgetDecision.runAssignmentId,
+      )!;
+      database.refreshPlans.push({
+        refreshPlanId: completedRefreshPlanId,
+        sessionId: session.sessionId,
+        baseSessionRevision: Math.max(0, validation.baseSessionRevision - 1),
+        validatedHead: validation.validatedHead,
+        dependencySetHash: validation.dependencySetHash,
+        activeDecisionCertificateIds,
+        agentIds: [session.frozenAssignments.budgetAgentId],
+        status: "COMPLETED",
+        claimedAttemptId: claimedAttempt.attemptId,
+      });
+      validation.refreshPlanId = completedRefreshPlanId;
+      session.activeRefreshPlanId = completedRefreshPlanId;
       session.state = "COMMITTING";
       session.sessionRevision += 1;
       session.stateUpdatedAt = NOW;
@@ -1805,7 +2063,7 @@ describe("EpochGuardService", () => {
     const beforeRecovery = restarted.store.snapshot();
     const completedPlanBeforeRecovery = structuredClone(
       beforeRecovery.refreshPlans.find(
-        (plan) => plan.refreshPlanId === ready.refreshPlan!.refreshPlanId,
+        (plan) => plan.refreshPlanId === completedRefreshPlanId,
       )!,
     );
     const dispatchCountsBeforeRecovery = structuredClone(agents.dispatchCounts);
@@ -1830,7 +2088,7 @@ describe("EpochGuardService", () => {
     expect(recoveredSession.activePermitId).toBeNull();
     expect(
       recoveredDatabase.refreshPlans.find(
-        (plan) => plan.refreshPlanId === ready.refreshPlan!.refreshPlanId,
+        (plan) => plan.refreshPlanId === completedRefreshPlanId,
       ),
     ).toEqual(completedPlanBeforeRecovery);
     expect(agents.dispatchCounts).toEqual(dispatchCountsBeforeRecovery);

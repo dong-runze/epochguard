@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-export const CONTRACT_VERSION = "epochguard-contract-v7" as const;
+export const CONTRACT_VERSION = "epochguard-contract-v8" as const;
 export const CONTRACT_SCHEMA_VERSION = 1 as const;
 export const CONTRACT_DIGEST =
-  "sha256:4dfbeb9e55de7ca17a19f5fb8f99494b17e441af0f877767027284d3ae646361" as const;
+  "sha256:127f9fcf14bd15d89db5d6a071484c622e12a5004721becab19961bc289d913a" as const;
 
 export const ROLES = ["inventory", "budget", "policy"] as const;
 export const SOURCES = ["inventory", "budget", "policy"] as const;
@@ -1151,7 +1151,7 @@ export const SNAPSHOT_UNIVERSAL_SAFETY_RULES = {
     validating:
       "three Decisions, no Attempt, PENDING/CHECKING/no-side-effect/no-action; initial Plan is null with no reobserved owner, while refresh Plan is COMPLETED with exact reobserved owners, all Decisions current-valid, and owner evidence CURRENT",
     terminalClaimed:
-      "FAILED/INTERRUPTED CLAIMED owners partition into completed current-valid owners and invalid owners carrying only fresh terminal Attempts",
+      "FAILED/INTERRUPTED CLAIMED owners partition into completed current-valid owners and invalid owners carrying fresh terminal Attempts; a COMPLETED invalid-owner Attempt is allowed only for FAILED DECISION_INVALID with a matching VALIDATE diagnostic bound to that Attempt, Assignment, and Run",
     completedPlan:
       "COMPLETED is restricted to validation and current-valid post-refresh stable/terminal projections with exact reobserved owners",
     ownerAttempt:
@@ -1320,6 +1320,43 @@ function agentHasTerminalNewRefreshAttempt(
     agent.runCount > 1 &&
     attempt.assignmentId !== decision.runtimeProof.assignmentId &&
     (attempt.runId === null || attempt.runId !== decision.runId)
+  );
+}
+
+function agentHasValidateRejectedCompletedRefreshAttempt(
+  snapshot: SessionDashboardSnapshotCandidate,
+  agent: SnapshotAgentCandidate,
+): boolean {
+  const decision = agent.activeDecision;
+  const attempt = agent.inFlightAttempt;
+  const diagnostic = snapshot.latestDiagnostics[0];
+  if (
+    snapshot.sessionState !== "FAILED" ||
+    snapshot.gate.reasonCode !== "DECISION_INVALID" ||
+    decision === null ||
+    attempt === null ||
+    attempt.status !== "COMPLETED" ||
+    attempt.runId === null ||
+    agent.runCount <= 1 ||
+    attempt.assignmentId === decision.runtimeProof.assignmentId ||
+    attempt.runId === decision.runId ||
+    diagnostic === undefined ||
+    diagnostic.stage !== "VALIDATE" ||
+    diagnostic.reasonCode !== "DECISION_INVALID" ||
+    diagnostic.role !== agent.role ||
+    diagnostic.relevantIds.length !== 3
+  ) {
+    return false;
+  }
+  return [
+    { kind: "ATTEMPT", id: attempt.attemptId },
+    { kind: "ASSIGNMENT", id: attempt.assignmentId },
+    { kind: "RUN", id: attempt.runId },
+  ].every((expected) =>
+    diagnostic.relevantIds.some(
+      (reference) =>
+        reference.kind === expected.kind && reference.id === expected.id,
+    ),
   );
 }
 
@@ -2002,7 +2039,8 @@ function addSnapshotInvariantIssues(
       return agent.inFlightAttempt === null
         ? agent.runCount > 1 && agentDecisionIsCurrentValid(snapshot, agent)
         : agentDecisionIsInvalidAtHead(snapshot, agent) &&
-            agentHasTerminalNewRefreshAttempt(agent);
+            (agentHasTerminalNewRefreshAttempt(agent) ||
+              agentHasValidateRejectedCompletedRefreshAttempt(snapshot, agent));
     });
     if (
       decisions.length !== 3 ||
@@ -2013,7 +2051,7 @@ function addSnapshotInvariantIssues(
     ) {
       snapshotIssue(
         context,
-        "FAILED/INTERRUPTED CLAIMED Plan owners must partition into completed current Decisions and invalid owners with fresh terminal Attempts",
+        "FAILED/INTERRUPTED CLAIMED Plan owners must partition into completed current Decisions and invalid owners with fresh terminal Attempts; COMPLETED requires a bound FAILED VALIDATE/DECISION_INVALID diagnostic",
         ["refreshPlan"],
       );
     }
@@ -3402,7 +3440,7 @@ export const CONTRACT_SEMANTIC_INVARIANTS = [
   "Snapshot RefreshPlan.reasonCode is exactly NO_VALID_OBSERVED_WORLD_CUT or HISTORICAL_BUT_STALE_NOW; AVAILABLE exists only for matching blocked/historical invalid owners; CLAIMED and COMPLETED follow their closed state routes",
   "REOBSERVING CLAIMED retains three old Decisions and exact invalid/in-flight/reobserved owners; COLLECTING preserves the full owner set across partial completion and makes stale validity PENDING after the first replacement",
   "VALIDATING always has three Decisions, no Attempt, PENDING/CHECKING and no side effect/action; initial validation has no reobserved owner/Plan, while refresh validation has the exact COMPLETED owner set with current-valid evidence and CURRENT owner Decisions",
-  "FAILED/INTERRUPTED CLAIMED owners partition into completed current-valid Decisions and invalid owners with fresh terminal Attempts; a terminal Attempt is required",
+  "FAILED/INTERRUPTED CLAIMED owners partition into completed current-valid Decisions and invalid owners with fresh terminal Attempts; a COMPLETED invalid-owner Attempt is allowed only for FAILED DECISION_INVALID with a matching VALIDATE diagnostic bound to that Attempt, Assignment, and Run",
   "READY_AT_CURRENT_HEAD accepts an absent initial Plan or the exact COMPLETED selective-refresh Plan and always exposes exactly COMMIT",
   "FAILED with WAITING and null reason is rejected; side-effect-free FAILED/INTERRUPTED Gate and reason products otherwise remain unfrozen",
   "availableActions is exactly REOBSERVE_INVALID for blocked/historical AVAILABLE Plans, COMMIT for READY_AT_CURRENT_HEAD, and empty otherwise",
@@ -3454,13 +3492,13 @@ export function normalizeContractDigestReferences(
 
 export const GOLDEN_SNAPSHOT_HASHES = {
   normalReady:
-    "sha256:b65ccde30c84bd9b36772971face79d5d42608b1817869a60c88e23ba5e9f631",
+    "sha256:1f58e9f413824260467148fa84717bee4d8206f224a6c0f53b7d32a8d91b9461",
   normalReleased:
-    "sha256:24af496b6d3dd884a862f06554c29ee0bf48a0375c4aa0937bd15a388621f4ab",
+    "sha256:84732708d778bf200d4ad66d7c35d3ecc11db11065b07f50b4d49828c83b3817",
   impossible:
-    "sha256:f6fb69ea55fda2a4423e81a23f89aaaa3b4d6688d82608ae6f33e2c20eb09f0d",
+    "sha256:b570232d47379b438340ab12c81354e603a743a935e99df5bce302155b3af74c",
   recovered:
-    "sha256:fe13811acfe4314452d694b99be1569df041208c2296866ee395a3608a2db30c",
+    "sha256:a8183b4b6cc2f4f6bc4853fa7b5710e019f1c0df7e7c738cc5f8302df6f068bf",
 } as const;
 
 function contractJsonSchema(schema: z.ZodType): JsonValue {

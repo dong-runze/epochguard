@@ -25,7 +25,10 @@ import {
   type SessionDashboardSnapshot,
 } from "./epochguard/contracts";
 import { decodeEpochGuardSnapshot } from "./epochguard/decode-snapshot";
-import { EpochGuardSessionSourceError } from "./epochguard/session-source";
+import {
+  EpochGuardSessionSourceError,
+  type EpochGuardSessionSource,
+} from "./epochguard/session-source";
 import type { Agent, AgentRun, Message, SystemInfo } from "./types";
 
 const starterPrompts = [
@@ -81,6 +84,37 @@ const ROLE_AGENT_NAMES: Readonly<Record<Role, string>> = {
   policy: "EpochGuard Policy Agent",
 };
 
+const ROLE_AGENT_INSPECTION: Readonly<
+  Record<
+    Role,
+    {
+      label: string;
+      description: string;
+      evidenceScope: string;
+      profileVersion: string;
+    }
+  >
+> = {
+  inventory: {
+    label: "Inventory",
+    description: "Dedicated inventory evidence owner for EpochGuard demo sessions.",
+    evidenceScope: "Inventory evidence and the requestedUnits projection only.",
+    profileVersion: "epochguard-inventory-v1",
+  },
+  budget: {
+    label: "Budget",
+    description: "Dedicated budget evidence owner for EpochGuard demo sessions.",
+    evidenceScope: "Budget evidence and the estimatedCostCents projection only.",
+    profileVersion: "epochguard-budget-v1",
+  },
+  policy: {
+    label: "Policy",
+    description: "Dedicated policy evidence owner for EpochGuard demo sessions.",
+    evidenceScope: "Policy evidence and the market projection only.",
+    profileVersion: "epochguard-policy-v1",
+  },
+};
+
 const SCENARIO_OPTIONS: ReadonlyArray<{
   id: ScenarioId;
   label: string;
@@ -115,14 +149,25 @@ function sessionStorageKey(scenarioId: ScenarioId): string {
   return `epochguard.session.v1.${scenarioId}`;
 }
 
-function readStoredSession(scenarioId: ScenarioId): string | null {
+export function decodeStoredSessionId(
+  raw: string | null,
+  scenarioId: ScenarioId,
+): string | null {
+  if (raw === null) return null;
   try {
-    const raw = window.localStorage.getItem(sessionStorageKey(scenarioId));
-    if (raw === null) return null;
     const parsed = storedSessionSchema.safeParse(JSON.parse(raw));
     return parsed.success && parsed.data.scenarioId === scenarioId
       ? parsed.data.sessionId
       : null;
+  } catch {
+    return null;
+  }
+}
+
+function readStoredSession(scenarioId: ScenarioId): string | null {
+  try {
+    const raw = window.localStorage.getItem(sessionStorageKey(scenarioId));
+    return decodeStoredSessionId(raw, scenarioId);
   } catch {
     return null;
   }
@@ -160,13 +205,7 @@ function removeStoredSessionIfMatches(
   try {
     const key = sessionStorageKey(scenarioId);
     const raw = window.localStorage.getItem(key);
-    if (raw === null) return;
-    const parsed = storedSessionSchema.safeParse(JSON.parse(raw));
-    if (
-      parsed.success &&
-      parsed.data.scenarioId === scenarioId &&
-      parsed.data.sessionId === expectedSessionId
-    ) {
+    if (decodeStoredSessionId(raw, scenarioId) === expectedSessionId) {
       window.localStorage.removeItem(key);
     }
   } catch {
@@ -231,12 +270,94 @@ function resolveRoleAssignments(agents: Agent[]): AssignmentResolution {
   return { ok: true, assignments, agents: resolved, issues: [] };
 }
 
+export function buildCreateSessionRequest(
+  scenarioId: ScenarioId,
+  assignments: RoleAssignments,
+): CreateSessionRequest {
+  return {
+    scenarioId,
+    assignments: {
+      inventory: assignments.inventory,
+      budget: assignments.budget,
+      policy: assignments.policy,
+    },
+  };
+}
+
+export function requestEpochGuardSession(
+  source: Pick<EpochGuardSessionSource, "createSession">,
+  scenarioId: ScenarioId,
+  assignments: RoleAssignments,
+): Promise<unknown> {
+  return source.createSession(
+    buildCreateSessionRequest(scenarioId, assignments),
+  );
+}
+
+export function SafetyRolePicker({
+  agents,
+  focusedRole,
+  onFocus,
+  disabled = false,
+}: {
+  agents: Agent[];
+  focusedRole: Role;
+  onFocus: (role: Role) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div
+      className="safety-role-summary"
+      role="group"
+      aria-label="Protected Role Agents"
+    >
+      {(Object.keys(ROLE_AGENT_NAMES) as Role[]).map((role) => {
+        const agent = agents.find(
+          (candidate) => candidate.name === ROLE_AGENT_NAMES[role],
+        );
+        return (
+          <button
+            key={role}
+            type="button"
+            className="safety-role-card"
+            aria-pressed={role === focusedRole}
+            aria-controls="safety-role-inspection"
+            disabled={disabled}
+            onClick={() => onFocus(role)}
+          >
+            <span>{ROLE_AGENT_INSPECTION[role].label} Role</span>
+            <strong>{ROLE_AGENT_NAMES[role]}</strong>
+            <small>
+              Lifecycle: {agent === undefined ? "not available" : agent.status}
+            </small>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 type SafetyOperationKind = "create" | "clear";
 
 type SafetyPendingOperation = {
   kind: SafetyOperationKind;
   token: number;
 } | null;
+
+export type SubmittedInspectionFocus = {
+  sessionId: string;
+  agentId: string;
+};
+
+export function inspectionFocusForSessionAcquisition(
+  acquisition:
+    | { kind: "created"; sessionId: string; agentId: string }
+    | { kind: "recovered"; sessionId: string },
+): SubmittedInspectionFocus | null {
+  return acquisition.kind === "created"
+    ? { sessionId: acquisition.sessionId, agentId: acquisition.agentId }
+    : null;
+}
 
 function snapshotAssignments(
   snapshot: SessionDashboardSnapshot,
@@ -325,6 +446,7 @@ export function SessionSafetyWorkspace({
   pendingOperation,
   beginOperation,
   finishOperation,
+  initialFocusedRole = "inventory",
 }: {
   agents: Agent[];
   runtimeReady: boolean;
@@ -336,9 +458,13 @@ export function SessionSafetyWorkspace({
   pendingOperation: SafetyPendingOperation;
   beginOperation: (kind: SafetyOperationKind) => number | null;
   finishOperation: (token: number) => void;
+  initialFocusedRole?: Role;
 }) {
   const [createError, setCreateError] = useState<string | null>(null);
   const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
+  const [focusedRole, setFocusedRole] = useState<Role>(initialFocusedRole);
+  const [submittedFocus, setSubmittedFocus] =
+    useState<SubmittedInspectionFocus | null>(null);
   const assignmentResolution = useMemo(
     () => resolveRoleAssignments(agents),
     [agents],
@@ -355,6 +481,14 @@ export function SessionSafetyWorkspace({
         (role) => assignmentResolution.agents[role].status !== "ready",
       )
     : [];
+  const focusedAgent = agents.find(
+    (candidate) => candidate.name === ROLE_AGENT_NAMES[focusedRole],
+  );
+  const focusedProfile = ROLE_AGENT_INSPECTION[focusedRole];
+  const focusedDescription =
+    focusedAgent !== undefined && focusedAgent.description.trim().length > 0
+      ? focusedAgent.description
+      : focusedProfile.description;
 
   const createSession = async () => {
     if (!runtimeReady) {
@@ -368,13 +502,15 @@ export function SessionSafetyWorkspace({
     if (operationToken === null) return;
     const requestedScenarioId = scenarioId;
     const requestedResolution = assignmentResolution;
+    const requestedFocusedAgentId = requestedResolution.agents[focusedRole].id;
     setCreateError(null);
     setRecoveryNotice(null);
     try {
-      const payload = await epochGuardSessionSource.createSession({
-        scenarioId: requestedScenarioId,
-        assignments: requestedResolution.assignments,
-      });
+      const payload = await requestEpochGuardSession(
+        epochGuardSessionSource,
+        requestedScenarioId,
+        requestedResolution.assignments,
+      );
       const decoded = decodeEpochGuardSnapshot(payload);
       if (!decoded.ok) {
         throw new Error(decoded.failure.message);
@@ -400,6 +536,13 @@ export function SessionSafetyWorkspace({
         ...current,
         [requestedScenarioId]: decoded.snapshot.sessionId,
       }));
+      setSubmittedFocus(
+        inspectionFocusForSessionAcquisition({
+          kind: "created",
+          sessionId: decoded.snapshot.sessionId,
+          agentId: requestedFocusedAgentId,
+        }),
+      );
       onScenarioIdChange(requestedScenarioId);
       persistStoredSession(requestedScenarioId, decoded.snapshot.sessionId);
     } catch (reason) {
@@ -432,6 +575,12 @@ export function SessionSafetyWorkspace({
                 ...current,
                 [activeScenarioId]: body.activeSessionId,
               }));
+              setSubmittedFocus(
+                inspectionFocusForSessionAcquisition({
+                  kind: "recovered",
+                  sessionId: body.activeSessionId,
+                }),
+              );
               onScenarioIdChange(activeScenarioId);
               persistStoredSession(activeScenarioId, body.activeSessionId);
               setCreateError(null);
@@ -486,6 +635,9 @@ export function SessionSafetyWorkspace({
           ? { ...current, [expectedScenarioId]: null }
           : current,
       );
+      setSubmittedFocus((current) =>
+        current?.sessionId === expectedSessionId ? null : current,
+      );
       removeStoredSessionIfMatches(expectedScenarioId, expectedSessionId);
     } catch (reason) {
       if (
@@ -498,6 +650,9 @@ export function SessionSafetyWorkspace({
           current[expectedScenarioId] === expectedSessionId
             ? { ...current, [expectedScenarioId]: null }
             : current,
+        );
+        setSubmittedFocus((current) =>
+          current?.sessionId === expectedSessionId ? null : current,
         );
         removeStoredSessionIfMatches(expectedScenarioId, expectedSessionId);
         return;
@@ -566,20 +721,48 @@ export function SessionSafetyWorkspace({
             <h3>{selectedScenario.label}</h3>
             <p>{selectedScenario.summary}</p>
           </div>
-          <div className="safety-role-summary" aria-label="Automatic Role assignments">
-            {(Object.keys(ROLE_AGENT_NAMES) as Role[]).map((role) => {
-              const agent = assignmentResolution.ok
-                ? assignmentResolution.agents[role]
-                : agents.find((candidate) => candidate.name === ROLE_AGENT_NAMES[role]);
-              return (
-                <div key={role}>
-                  <span>{role}</span>
-                  <strong>{ROLE_AGENT_NAMES[role]}</strong>
-                  <small>{agent === undefined ? "Not available" : agent.status}</small>
-                </div>
-              );
-            })}
-          </div>
+          <SafetyRolePicker
+            agents={agents}
+            focusedRole={focusedRole}
+            onFocus={setFocusedRole}
+            disabled={operationPending}
+          />
+          <section
+            id="safety-role-inspection"
+            className="safety-role-inspection"
+            aria-label={`${focusedProfile.label} Role Agent inspection`}
+            aria-live="polite"
+          >
+            <div className="safety-role-inspection-copy">
+              <span className="eyebrow">Read-only Agent inspection</span>
+              <h4>{ROLE_AGENT_NAMES[focusedRole]}</h4>
+              <p>{focusedDescription}</p>
+            </div>
+            <dl>
+              <div>
+                <dt>Role</dt>
+                <dd>{focusedProfile.label}</dd>
+              </div>
+              <div>
+                <dt>Lifecycle</dt>
+                <dd>{focusedAgent === undefined ? "Not available" : focusedAgent.status}</dd>
+              </div>
+              <div>
+                <dt>Agent ID</dt>
+                <dd title={focusedAgent?.id}>
+                  {focusedAgent === undefined ? "Not available" : focusedAgent.id}
+                </dd>
+              </div>
+              <div>
+                <dt>Expected profile</dt>
+                <dd>{focusedProfile.profileVersion}</dd>
+              </div>
+              <div>
+                <dt>Evidence scope</dt>
+                <dd>{focusedProfile.evidenceScope}</dd>
+              </div>
+            </dl>
+          </section>
           {!assignmentResolution.ok ? (
             <div className="safety-setup-error" role="status">
               <strong>Role setup is not ready</strong>
@@ -620,8 +803,10 @@ export function SessionSafetyWorkspace({
             {creating ? <Spinner /> : `Run ${selectedScenario.label}`}
           </button>
           <p className="safety-trust-note">
-            Assignments are resolved by exact Role Agent name. The browser cannot select
-            owners, world heads, Receipts, Permits, or effect values.
+            Role focus changes this read-only inspection only. Assignments remain resolved
+            by exact Role Agent name; the browser cannot select owners, change assignment
+            order, or choose world heads, Receipts, Permits, and effect values. After the
+            Run, the authoritative frozen profile appears in Run-bound evidence.
           </p>
         </section>
       ) : (
@@ -629,6 +814,11 @@ export function SessionSafetyWorkspace({
           key={sessionId}
           source={epochGuardSessionSource}
           sessionId={sessionId}
+          focusedAgentId={
+            submittedFocus?.sessionId === sessionId
+              ? submittedFocus.agentId
+              : null
+          }
         />
       )}
     </div>

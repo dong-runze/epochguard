@@ -29,6 +29,8 @@ type RunAdapterFailureCode = Extract<
   | "BINDING_MISMATCH"
 >;
 
+export const CURRENT_PROMPT_TEMPLATE_VERSION = "epoch-prompt-v2";
+
 export interface RunObserverClock {
   now(): string;
   monotonicMs(): number;
@@ -608,12 +610,36 @@ export function buildAssignmentPrompt(assignment: RunAssignment): string {
     budget: "Budget",
     policy: "Policy",
   };
-  return [
+  const prefix = [
     `You are the ${roleName[assignment.role]} Agent for assignment ${assignment.assignmentId}.`,
     `Read ${assignment.evidencePackRelativePath}.`,
     "Use only the immutable action and evidence in that file.",
     "Do not infer missing facts or claim a publish action.",
-    "Return exactly one <EPOCH_DECISION>{...}</EPOCH_DECISION> envelope.",
+  ];
+  if (assignment.promptTemplateVersion === "epoch-prompt-v1") {
+    return [
+      ...prefix,
+      "Return exactly one <EPOCH_DECISION>{...}</EPOCH_DECISION> envelope.",
+    ].join("\n");
+  }
+  if (assignment.promptTemplateVersion !== CURRENT_PROMPT_TEMPLATE_VERSION) {
+    throw new RunAdapterError(
+      "BINDING_MISMATCH",
+      `Unsupported prompt template version: ${assignment.promptTemplateVersion}`,
+    );
+  }
+  return [
+    ...prefix,
+    "Return exactly one <EPOCH_DECISION> JSON envelope and no other text or Markdown.",
+    "The JSON object must contain exactly these nine keys in this spelling: schemaVersion, sessionId, actionHash, runAssignmentId, role, receiptId, nonce, verdict, reason.",
+    "Set schemaVersion to the number 1.",
+    "Copy sessionId, actionHash, runAssignmentId, and role exactly from the Evidence Pack assignment object.",
+    "Copy receiptId and nonce exactly from the Evidence Pack observation object.",
+    "Set verdict to exactly ALLOW or DENY by applying only the Evidence Pack decisionRule.",
+    "Set reason to one concise evidence-based string.",
+    "Do not rename verdict to decision, do not rename reason to justification, and do not add campaignId or any other key.",
+    "Output the exact opening marker <EPOCH_DECISION>, then the complete nine-key JSON object, then the exact closing marker </EPOCH_DECISION>. Do not emit ellipses or placeholders.",
+    "Before emitting, silently verify that the object has exactly nine keys, the forbidden aliases are absent, and every copied binding value exactly equals the Evidence Pack.",
   ].join("\n");
 }
 

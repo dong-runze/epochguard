@@ -152,9 +152,12 @@ function checkedRegistrations(
       RoleAgentRegistrationSchema.parse(registration),
     );
   } catch (error) {
-    throw new RoleProfileMismatchError("Role registration violates contract-v6", {
+    throw new RoleProfileMismatchError(
+      "Role registration violates the active EpochGuard contract",
+      {
       cause: error,
-    });
+      },
+    );
   }
   const roles = new Set<Role>();
   const agentIds = new Set<string>();

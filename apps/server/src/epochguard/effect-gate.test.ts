@@ -68,7 +68,12 @@ function readyDatabase(): EpochDatabase {
   const dependencySetHash = snapshotReceiptDependencySetHash(receiptIds);
   const roleQuerySpecs = ROLES.map((role) => buildRoleQuerySpec(action, role));
   const resourceVersions = roleQuerySpecs.map((spec) => {
-    const value = { role: spec.role, allow: true } as const;
+    const value =
+      spec.role === "inventory"
+        ? { availableUnits: 1 }
+        : spec.role === "budget"
+          ? { remainingBudgetCents: 800_000 }
+          : { permitted: true };
     return {
       id: `version_${spec.role}_10`,
       resourceId: `${spec.source}:${spec.entityKey}`,
@@ -428,6 +433,37 @@ describe("Effect Gate", () => {
       state: "COMMIT_RACE",
       activePermitId: null,
       sessionRevision: 6,
+    });
+  });
+
+  it("rejects authoritative DENY without mutating READY/ISSUED forensic evidence", async () => {
+    const database = readyDatabase();
+    const budgetReceipt = database.receipts.find(
+      (receipt) => receipt.role === "budget",
+    )!;
+    const budgetVersion = database.resourceVersions.find(
+      (version) => version.resourceId === "budget:campaign_42",
+    )!;
+    const deniedValue = { remainingBudgetCents: 0 } as const;
+    const deniedHash = sha256Digest(canonicalJson(deniedValue));
+    budgetVersion.value = deniedValue;
+    budgetVersion.valueHash = deniedHash;
+    budgetReceipt.valueHash = deniedHash;
+    const store = new MemoryEffectStore(database);
+    const ports = makePorts(store);
+
+    const result = await commit(ports);
+
+    expect(result).toMatchObject({
+      status: "REJECTED",
+      reasonCode: "DECISION_INVALID",
+      effectsInSession: 0,
+    });
+    expect(ports.createEffectId).not.toHaveBeenCalled();
+    expect(store.snapshot()).toMatchObject({
+      effects: [],
+      permits: [expect.objectContaining({ status: "ISSUED" })],
+      sessions: [expect.objectContaining({ state: "READY_AT_CURRENT_HEAD" })],
     });
   });
 
@@ -880,6 +916,37 @@ describe("Effect Gate", () => {
     });
     expect(ports.createEffectId).not.toHaveBeenCalled();
     expect(store.snapshot().effects).toHaveLength(1);
+  });
+
+  it("recomputes the authoritative verdict before returning an existing Effect", async () => {
+    const database = await committedDatabase();
+    const budgetReceipt = database.receipts.find(
+      (receipt) => receipt.role === "budget",
+    )!;
+    const budgetVersion = database.resourceVersions.find(
+      (version) => version.resourceId === "budget:campaign_42",
+    )!;
+    const deniedValue = { remainingBudgetCents: 0 } as const;
+    const deniedHash = sha256Digest(canonicalJson(deniedValue));
+    budgetVersion.value = deniedValue;
+    budgetVersion.valueHash = deniedHash;
+    budgetReceipt.valueHash = deniedHash;
+    const store = new MemoryEffectStore(database);
+    const ports = makePorts(store);
+
+    const result = await commit(ports, 5);
+
+    expect(result).toMatchObject({
+      status: "REJECTED",
+      reasonCode: "DECISION_INVALID",
+      effectsInSession: 1,
+    });
+    expect(ports.createEffectId).not.toHaveBeenCalled();
+    expect(store.snapshot()).toMatchObject({
+      effects: [expect.objectContaining({ effectId: database.effects[0]!.effectId })],
+      permits: [expect.objectContaining({ status: "CONSUMED" })],
+      sessions: [expect.objectContaining({ state: "COMMITTED" })],
+    });
   });
 
   it("returns the same Effect for a healthy completed Budget RefreshPlan", async () => {

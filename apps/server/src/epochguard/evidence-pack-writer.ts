@@ -16,6 +16,7 @@ import {
   type Role,
   type RoleQuerySpec,
   type RunAssignment,
+  type Verdict,
 } from "./types.js";
 import {
   parseVerifiedResourceVersion,
@@ -83,6 +84,33 @@ export type EvidencePack =
   | InventoryEvidencePack
   | BudgetEvidencePack
   | PolicyEvidencePack;
+
+/**
+ * Recomputes the business verdict from authoritative Action and World values.
+ * Model output is never an input to this function.
+ */
+export function evaluateAuthoritativeVerdict(
+  role: Role,
+  action: ActionIntent,
+  value: ResourceVersion["value"],
+): Verdict {
+  switch (role) {
+    case "inventory": {
+      const observation = InventoryValueSchema.parse(value);
+      return observation.availableUnits >= action.requestedUnits ? "ALLOW" : "DENY";
+    }
+    case "budget": {
+      const observation = BudgetValueSchema.parse(value);
+      return observation.remainingBudgetCents >= action.estimatedCostCents
+        ? "ALLOW"
+        : "DENY";
+    }
+    case "policy": {
+      const observation = PolicyValueSchema.parse(value);
+      return observation.permitted ? "ALLOW" : "DENY";
+    }
+  }
+}
 
 export interface EvidencePackBuildInput {
   action: ActionIntent;
