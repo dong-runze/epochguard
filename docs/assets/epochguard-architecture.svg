@@ -1,0 +1,302 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080" role="img" aria-labelledby="svg-title svg-desc">
+  <title id="svg-title">EpochGuard architecture and two deterministic safety stories</title>
+  <desc id="svg-desc">A one-page architecture diagram showing the presentation-only browser dashboard, four production APIs, the dual-scenario service, independent Normal and Impossible EpochStores, three shared real Role Agents with server-built Evidence Packs, the server-side Joint Validity Validator and Effect Gate, and the sole Mock Publish Effect outlet. The Normal story produces one effect. The Impossible story has three ALLOW decisions but no common valid cut, produces zero effects, and refreshes only Budget.</desc>
+
+  <defs>
+    <marker id="arrow-cyan" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L10 5L0 10Z" fill="#45d7ff"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L10 5L0 10Z" fill="#a78bfa"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L10 5L0 10Z" fill="#f59e0b"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0 0L10 5L0 10Z" fill="#34d399"/>
+    </marker>
+    <style>
+      .sans { font-family: Arial, Helvetica, sans-serif; }
+      .mono { font-family: "Courier New", Courier, monospace; }
+      .title { fill: #f7fafc; font-size: 32px; font-weight: 700; letter-spacing: .2px; }
+      .subtitle { fill: #9fb2c8; font-size: 16px; }
+      .eyebrow { font-size: 12px; font-weight: 700; letter-spacing: 1.5px; }
+      .section { fill: #f7fafc; font-size: 18px; font-weight: 700; }
+      .label16 { fill: #f7fafc; font-size: 16px; font-weight: 700; }
+      .body { fill: #d8e3ef; font-size: 15px; }
+      .small { fill: #9fb2c8; font-size: 13px; }
+      .tiny { fill: #8498ae; font-size: 12px; }
+      .micro { fill: #8498ae; font-size: 10px; }
+      .code { fill: #dce8f6; font-size: 14px; }
+      .story-title { fill: #f7fafc; font-size: 21px; font-weight: 700; }
+      .story { fill: #d8e3ef; font-size: 15px; }
+      .panel { fill: #0d1b2a; stroke: #263a54; stroke-width: 1.5; }
+      .inner { fill: #101f31; stroke: #2b405c; stroke-width: 1.25; }
+      .connector { fill: none; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2.2; }
+      .dashed { stroke-dasharray: 8 7; }
+    </style>
+  </defs>
+
+  <rect width="1920" height="1080" fill="#07111f"/>
+  <path d="M0 104H1920" stroke="#1f3148" stroke-width="1"/>
+
+  <!-- Brand header -->
+  <g class="sans">
+    <path d="M42 24L72 14L102 24V49C102 70 90 86 72 94C54 86 42 70 42 49Z" fill="#102d43" stroke="#45d7ff" stroke-width="2"/>
+    <path d="M54 49A18 18 0 1 0 90 49A18 18 0 1 0 54 49" fill="none" stroke="#45d7ff" stroke-width="3"/>
+    <path d="M72 31V49L84 58" fill="none" stroke="#f7fafc" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="72" cy="49" r="3.5" fill="#f7fafc"/>
+    <text x="122" y="48" class="title">EpochGuard</text>
+    <text x="122" y="76" class="subtitle">Prove a common world before the only effect</text>
+
+    <g transform="translate(1255 28)">
+      <rect width="185" height="48" rx="24" fill="#102d43" stroke="#45d7ff"/>
+      <circle cx="23" cy="24" r="6" fill="#45d7ff"/>
+      <text x="39" y="29" class="small" fill="#c8f4ff">PRESENTATION</text>
+      <rect x="201" width="195" height="48" rx="24" fill="#2b2112" stroke="#f59e0b"/>
+      <circle cx="224" cy="24" r="6" fill="#f59e0b"/>
+      <text x="240" y="29" class="small" fill="#ffe2a8">UNTRUSTED MODEL</text>
+      <rect x="412" width="205" height="48" rx="24" fill="#17233b" stroke="#a78bfa"/>
+      <circle cx="435" cy="24" r="6" fill="#a78bfa"/>
+      <text x="451" y="29" class="small" fill="#e3d9ff">SERVER AUTHORITY</text>
+    </g>
+  </g>
+
+  <!-- Browser boundary -->
+  <g class="sans">
+    <rect x="40" y="126" width="300" height="614" rx="24" fill="#091827" stroke="#45d7ff" stroke-width="2" stroke-dasharray="9 8"/>
+    <rect x="58" y="145" width="211" height="29" rx="14.5" fill="#102d43"/>
+    <text x="73" y="165" class="eyebrow" fill="#75e2ff">BROWSER · PRESENTATION ONLY</text>
+
+    <rect x="68" y="198" width="244" height="214" rx="18" class="panel" stroke="#45d7ff"/>
+    <rect x="68" y="198" width="244" height="47" rx="18" fill="#102d43"/>
+    <path d="M68 227V245H312V227" fill="#102d43"/>
+    <circle cx="89" cy="221" r="5" fill="#45d7ff"/>
+    <text x="104" y="227" class="label16">Session Safety Dashboard</text>
+    <text x="88" y="272" class="body">Commands + authoritative snapshot</text>
+    <rect x="88" y="292" width="204" height="34" rx="8" fill="#0a1523" stroke="#263a54"/>
+    <text x="100" y="314" class="small">Scenario · Agents · Evidence</text>
+    <rect x="88" y="337" width="92" height="39" rx="9" fill="#173442" stroke="#45d7ff"/>
+    <text x="109" y="361" class="small" fill="#bdefff">REFRESH</text>
+    <rect x="192" y="337" width="100" height="39" rx="9" fill="#193629" stroke="#34d399"/>
+    <text x="218" y="361" class="small" fill="#b7f7dc">COMMIT</text>
+    <text x="88" y="396" class="tiny">Renders one server revision at a time</text>
+
+    <rect x="68" y="438" width="244" height="116" rx="16" fill="#102536" stroke="#45d7ff" stroke-width="1.5"/>
+    <path d="M91 463L104 476L127 451" fill="none" stroke="#45d7ff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="143" y="468" class="section" font-size="17">NO SAFETY LOGIC</text>
+    <text x="88" y="505" class="body">Does not compute verdicts, L/U,</text>
+    <text x="88" y="527" class="body">proofs, permits, or Gate state.</text>
+
+    <rect x="68" y="580" width="244" height="128" rx="16" fill="#0a1523" stroke="#263a54"/>
+    <text x="88" y="610" class="eyebrow" fill="#9fb2c8">VISIBLE, NOT AUTHORITATIVE</text>
+    <text x="88" y="641" class="small">• display backend facts</text>
+    <text x="88" y="665" class="small">• issue typed commands</text>
+    <text x="88" y="689" class="small">• never bypass Effect Gate</text>
+  </g>
+
+  <!-- Server trust boundary -->
+  <g class="sans">
+    <rect x="370" y="126" width="1510" height="614" rx="24" fill="#0a1423" stroke="#a78bfa" stroke-width="2"/>
+    <rect x="390" y="145" width="318" height="29" rx="14.5" fill="#211b38"/>
+    <text x="405" y="165" class="eyebrow" fill="#cbbcff">SERVER TRUST BOUNDARY · FAIL CLOSED</text>
+
+    <!-- Four formal APIs -->
+    <rect x="400" y="194" width="326" height="267" rx="18" class="panel"/>
+    <text x="422" y="225" class="section">Four production APIs</text>
+    <text x="422" y="248" class="small">Base /api/epochguard · typed server commands</text>
+
+    <rect x="418" y="266" width="290" height="39" rx="8" class="inner"/>
+    <rect x="430" y="277" width="45" height="18" rx="4" fill="#183a2c"/>
+    <text x="437" y="291" class="mono" font-size="11" fill="#7ee2b8">POST</text>
+    <text x="486" y="291" class="mono code">/sessions</text>
+
+    <rect x="418" y="315" width="290" height="39" rx="8" class="inner"/>
+    <rect x="430" y="326" width="45" height="18" rx="4" fill="#12304a"/>
+    <text x="440" y="340" class="mono" font-size="11" fill="#79c7ff">GET</text>
+    <text x="486" y="340" class="mono code">/sessions/:id</text>
+
+    <rect x="418" y="364" width="290" height="39" rx="8" class="inner"/>
+    <rect x="430" y="375" width="45" height="18" rx="4" fill="#183a2c"/>
+    <text x="437" y="389" class="mono" font-size="11" fill="#7ee2b8">POST</text>
+    <text x="486" y="389" class="mono code">/sessions/:id/refresh</text>
+
+    <rect x="418" y="413" width="290" height="39" rx="8" class="inner"/>
+    <rect x="430" y="424" width="45" height="18" rx="4" fill="#183a2c"/>
+    <text x="437" y="438" class="mono" font-size="11" fill="#7ee2b8">POST</text>
+    <text x="486" y="438" class="mono code">/sessions/:id/commit</text>
+
+    <!-- Composite service -->
+    <rect x="770" y="194" width="345" height="127" rx="18" fill="#171d35" stroke="#a78bfa" stroke-width="1.8"/>
+    <text x="792" y="226" class="eyebrow" fill="#cbbcff">AUTHORITATIVE COORDINATOR</text>
+    <text x="792" y="256" class="section">DualScenarioEpochGuardService</text>
+    <text x="792" y="282" class="small">Global admission + ordered commands</text>
+    <text x="792" y="303" class="small">Routes each session to one isolated partition</text>
+
+    <!-- Isolated Stores -->
+    <rect x="770" y="359" width="164" height="108" rx="15" fill="#10243b" stroke="#61a5fa" stroke-width="1.7"/>
+    <text x="789" y="385" class="eyebrow" fill="#94c4ff">NORMAL PARTITION</text>
+    <text x="789" y="413" class="section" font-size="16">EpochStore</text>
+    <text x="789" y="438" class="mono micro">epochguard-normal.json</text>
+    <text x="789" y="456" class="tiny">independent history</text>
+
+    <rect x="951" y="359" width="164" height="108" rx="15" fill="#261b35" stroke="#e879f9" stroke-width="1.7"/>
+    <text x="970" y="385" class="eyebrow" fill="#f0adf8">IMPOSSIBLE PARTITION</text>
+    <text x="970" y="413" class="section" font-size="16">EpochStore</text>
+    <text x="970" y="438" class="mono micro">epochguard-impossible.json</text>
+    <text x="970" y="456" class="tiny">independent history</text>
+
+    <!-- Shared Agent execution zone -->
+    <rect x="400" y="498" width="715" height="212" rx="18" fill="#17180f" stroke="#f59e0b" stroke-width="1.8" stroke-dasharray="9 7"/>
+    <text x="421" y="524" class="eyebrow" fill="#ffc866">SHARED REAL ROLE AGENTS · CANDIDATE OUTPUT IS UNTRUSTED</text>
+    <text x="421" y="546" class="tiny">The same registered triple serves either scenario; each run is separately bound.</text>
+
+    <rect x="420" y="560" width="205" height="62" rx="12" fill="#282113" stroke="#f59e0b"/>
+    <circle cx="443" cy="581" r="8" fill="#f59e0b"/>
+    <text x="459" y="585" class="section" font-size="15">Inventory Role Agent</text>
+    <text x="443" y="607" class="tiny">real AgentService run</text>
+
+    <rect x="640" y="560" width="205" height="62" rx="12" fill="#282113" stroke="#f59e0b"/>
+    <circle cx="663" cy="581" r="8" fill="#f59e0b"/>
+    <text x="679" y="585" class="section" font-size="15">Budget Role Agent</text>
+    <text x="663" y="607" class="tiny">real AgentService run</text>
+
+    <rect x="860" y="560" width="235" height="62" rx="12" fill="#282113" stroke="#f59e0b"/>
+    <circle cx="883" cy="581" r="8" fill="#f59e0b"/>
+    <text x="899" y="585" class="section" font-size="15">Policy Role Agent</text>
+    <text x="883" y="607" class="tiny">real AgentService run</text>
+
+    <rect x="420" y="642" width="675" height="48" rx="10" fill="#112a32" stroke="#38bdf8"/>
+    <path d="M443 654H461L469 662V680H443Z" fill="none" stroke="#45d7ff" stroke-width="1.8"/>
+    <path d="M461 654V662H469" fill="none" stroke="#45d7ff" stroke-width="1.8"/>
+    <text x="481" y="662" class="section" font-size="15">Evidence Pack</text>
+    <text x="481" y="681" class="tiny">server-built · assignment-scoped · Receipt + interval + hash; Agent reads, never authorizes</text>
+
+    <!-- Validator -->
+    <rect x="1150" y="194" width="322" height="301" rx="18" fill="#171d35" stroke="#a78bfa" stroke-width="1.8"/>
+    <text x="1173" y="224" class="eyebrow" fill="#cbbcff">SERVER-SIDE PROOF</text>
+    <text x="1173" y="253" class="section">Joint Validity Validator</text>
+    <text x="1173" y="279" class="small">Deterministic join of 3 certified Decisions</text>
+
+    <rect x="1172" y="298" width="278" height="73" rx="11" fill="#0d1425" stroke="#3b4368"/>
+    <text x="1190" y="325" class="mono" font-size="17" fill="#f7fafc">L = max(validFrom)</text>
+    <text x="1190" y="351" class="mono" font-size="17" fill="#f7fafc">U = min(validUntil)</text>
+
+    <rect x="1172" y="383" width="132" height="87" rx="11" fill="#113026" stroke="#34d399"/>
+    <text x="1188" y="409" class="eyebrow" fill="#7ee2b8">VALID CUT</text>
+    <text x="1188" y="434" class="mono" font-size="15" fill="#d8ffef">L &lt; U</text>
+    <text x="1188" y="455" class="tiny">head ∈ [L,U)</text>
+
+    <rect x="1318" y="383" width="132" height="87" rx="11" fill="#341821" stroke="#fb7185"/>
+    <text x="1334" y="409" class="eyebrow" fill="#ff9bad">NO-CUT</text>
+    <text x="1334" y="434" class="mono" font-size="15" fill="#ffd7de">U ≤ L</text>
+    <text x="1334" y="455" class="tiny">closed Proof</text>
+
+    <!-- Effect Gate -->
+    <rect x="1510" y="194" width="172" height="301" rx="18" fill="#17231f" stroke="#34d399" stroke-width="2.2"/>
+    <text x="1532" y="224" class="eyebrow" fill="#7ee2b8">SOLE AUTHORITY</text>
+    <text x="1532" y="254" class="section">Effect Gate</text>
+    <path d="M1565 300V282A31 31 0 0 1 1627 282V300" fill="none" stroke="#34d399" stroke-width="4"/>
+    <rect x="1551" y="300" width="90" height="75" rx="12" fill="#113026" stroke="#34d399" stroke-width="2"/>
+    <circle cx="1596" cy="328" r="8" fill="#34d399"/>
+    <path d="M1596 336V354" stroke="#34d399" stroke-width="5" stroke-linecap="round"/>
+    <text x="1532" y="405" class="small">Revalidate permit</text>
+    <text x="1532" y="427" class="small">Fence current head</text>
+    <text x="1532" y="449" class="small">Bind idempotency</text>
+    <text x="1532" y="476" class="eyebrow" fill="#7ee2b8">FAIL CLOSED</text>
+
+    <!-- Only effect outlet -->
+    <rect x="1716" y="230" width="140" height="229" rx="18" fill="#132a22" stroke="#34d399" stroke-width="3"/>
+    <text x="1786" y="261" text-anchor="middle" class="eyebrow" fill="#7ee2b8">ONLY OUTLET</text>
+    <circle cx="1786" cy="310" r="30" fill="#1b4132" stroke="#34d399" stroke-width="2"/>
+    <path d="M1771 310L1781 320L1803 298" fill="none" stroke="#7ee2b8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1786" y="361" text-anchor="middle" class="section" font-size="16">Mock Publish</text>
+    <text x="1786" y="383" text-anchor="middle" class="section" font-size="16">Effect</text>
+    <text x="1786" y="411" text-anchor="middle" class="tiny">local idempotent</text>
+    <text x="1786" y="430" text-anchor="middle" class="tiny">effect ledger</text>
+
+    <rect x="1510" y="531" width="346" height="157" rx="16" fill="#111a27" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="1532" y="558" class="eyebrow" fill="#ff9bad">CAPABILITY BOUNDARY</text>
+    <text x="1532" y="587" class="body">Browser, Agents, Coordinator, Validator,</text>
+    <text x="1532" y="610" class="body">and Stores cannot append an Effect.</text>
+    <path d="M1532 632H1833" stroke="#34475f"/>
+    <text x="1532" y="657" class="section" font-size="16" fill="#b7f7dc">Effect Gate is the one write path.</text>
+    <text x="1532" y="678" class="tiny">No permit / stale head / No-Cut ⇒ zero effects</text>
+  </g>
+
+  <!-- Architecture connectors -->
+  <g>
+    <path d="M312 304H400" class="connector" stroke="#45d7ff" marker-end="url(#arrow-cyan)"/>
+    <rect x="328" y="274" width="60" height="22" rx="11" fill="#102d43"/>
+    <text x="358" y="289" text-anchor="middle" class="sans tiny" fill="#75e2ff">HTTPS</text>
+
+    <path d="M726 304H770" class="connector" stroke="#a78bfa" marker-end="url(#arrow-violet)"/>
+    <path d="M942 321V340H852V359" class="connector" stroke="#61a5fa" marker-end="url(#arrow-violet)"/>
+    <path d="M942 340H1033V359" class="connector" stroke="#e879f9" marker-end="url(#arrow-violet)"/>
+    <path d="M770 286H744V498" class="connector" stroke="#f59e0b" stroke-dasharray="7 6" marker-end="url(#arrow-orange)"/>
+    <text x="755" y="470" class="sans tiny" fill="#ffc866" transform="rotate(-90 755 470)">dispatch + observe</text>
+
+    <path d="M1115 257H1150" class="connector" stroke="#a78bfa" marker-end="url(#arrow-violet)"/>
+    <path d="M852 467V482H1150" class="connector" stroke="#61a5fa" stroke-dasharray="7 6" marker-end="url(#arrow-violet)"/>
+    <path d="M1115 435H1133V429H1150" class="connector" stroke="#e879f9" stroke-dasharray="7 6" marker-end="url(#arrow-violet)"/>
+    <path d="M1095 666H1132V476H1150" class="connector" stroke="#f59e0b" stroke-dasharray="7 6" marker-end="url(#arrow-orange)"/>
+    <rect x="1112" y="550" width="126" height="22" rx="11" fill="#2b2112" transform="rotate(-90 1175 561)"/>
+    <text x="1175" y="565" text-anchor="middle" class="sans tiny" fill="#ffc866" transform="rotate(-90 1175 565)">candidate Decisions</text>
+
+    <path d="M1472 344H1510" class="connector" stroke="#a78bfa" marker-end="url(#arrow-violet)"/>
+    <path d="M1682 344H1716" class="connector" stroke="#34d399" stroke-width="3" marker-end="url(#arrow-green)"/>
+    <rect x="1669" y="304" width="63" height="22" rx="11" fill="#113026"/>
+    <text x="1700" y="319" text-anchor="middle" class="sans tiny" fill="#7ee2b8">atomic</text>
+  </g>
+
+  <!-- Two deterministic stories -->
+  <g class="sans">
+    <rect x="40" y="764" width="904" height="264" rx="22" fill="#0d1b2a" stroke="#34d399" stroke-width="2"/>
+    <rect x="40" y="764" width="904" height="53" rx="22" fill="#123026"/>
+    <path d="M40 795V817H944V795" fill="#123026"/>
+    <circle cx="70" cy="790" r="10" fill="#34d399"/>
+    <path d="M64 790L69 795L78 785" fill="none" stroke="#07111f" stroke-width="2.5" stroke-linecap="round"/>
+    <text x="92" y="797" class="story-title">Story A · Normal world</text>
+    <rect x="765" y="778" width="152" height="27" rx="13.5" fill="#1c4d3b"/>
+    <text x="841" y="797" text-anchor="middle" class="eyebrow" fill="#b7f7dc">EFFECT = 1</text>
+
+    <text x="68" y="850" class="eyebrow" fill="#7ee2b8">HEAD 10 · THREE ALLOW DECISIONS SHARE ONE CUT</text>
+    <rect x="68" y="868" width="248" height="42" rx="10" class="inner" stroke="#61a5fa"/>
+    <text x="84" y="895" class="mono story">Inventory [10,∞) · ALLOW</text>
+    <rect x="329" y="868" width="248" height="42" rx="10" class="inner" stroke="#61a5fa"/>
+    <text x="345" y="895" class="mono story">Budget    [10,∞) · ALLOW</text>
+    <rect x="590" y="868" width="248" height="42" rx="10" class="inner" stroke="#61a5fa"/>
+    <text x="606" y="895" class="mono story">Policy    [10,∞) · ALLOW</text>
+
+    <rect x="68" y="929" width="850" height="70" rx="12" fill="#101f31" stroke="#2b405c"/>
+    <text x="88" y="956" class="mono" font-size="17" fill="#b7f7dc">projected L=10 · U=11 · head∈[L,U) → Permit</text>
+    <text x="88" y="982" class="body">Commit crosses the sole Effect Gate → Mock Publish Effect appended exactly once.</text>
+
+    <rect x="976" y="764" width="904" height="264" rx="22" fill="#0d1b2a" stroke="#fb7185" stroke-width="2"/>
+    <rect x="976" y="764" width="904" height="53" rx="22" fill="#351821"/>
+    <path d="M976 795V817H1880V795" fill="#351821"/>
+    <circle cx="1006" cy="790" r="10" fill="#fb7185"/>
+    <path d="M1001 785L1011 795M1011 785L1001 795" stroke="#07111f" stroke-width="2.5" stroke-linecap="round"/>
+    <text x="1028" y="797" class="story-title">Story B · Impossible collage</text>
+    <rect x="1701" y="778" width="152" height="27" rx="13.5" fill="#52202c"/>
+    <text x="1777" y="797" text-anchor="middle" class="eyebrow" fill="#ffd7de">EFFECT = 0</text>
+
+    <text x="1004" y="850" class="eyebrow" fill="#ff9bad">HEAD 21 · THREE TRUE-at-observation ALLOWs, NO SHARED CUT</text>
+    <rect x="1004" y="868" width="252" height="42" rx="10" class="inner" stroke="#e879f9"/>
+    <text x="1020" y="895" class="mono story">Inventory [18,∞) · ALLOW</text>
+    <rect x="1269" y="868" width="252" height="42" rx="10" class="inner" stroke="#e879f9"/>
+    <text x="1285" y="895" class="mono story">Budget    [19,20) · ALLOW</text>
+    <rect x="1534" y="868" width="252" height="42" rx="10" class="inner" stroke="#e879f9"/>
+    <text x="1550" y="895" class="mono story">Policy    [21,∞) · ALLOW</text>
+
+    <rect x="1004" y="929" width="850" height="70" rx="12" fill="#101f31" stroke="#2b405c"/>
+    <text x="1024" y="956" class="mono" font-size="17" fill="#ffd7de">L=21 · U=20 · U≤L → No-Cut Proof → Gate LOCKED</text>
+    <text x="1024" y="982" class="body">Refresh plan re-observes Budget only; final current cut is consistent DENY, still effect=0.</text>
+  </g>
+
+  <g class="sans">
+    <text x="40" y="1058" class="tiny">EpochGuard architecture · production surface + deterministic demo contracts · no external assets or runtime script</text>
+    <text x="1880" y="1058" text-anchor="end" class="tiny">Browser displays · Agents propose · Server proves · Gate alone effects</text>
+  </g>
+</svg>
