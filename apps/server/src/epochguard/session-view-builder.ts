@@ -194,8 +194,9 @@ const SYSTEM_ID_CONTEXT: SensitiveTextContext = {
 const BARE_RANDOM_HEX_SECRET_PATTERN =
   /(?:^|[^0-9A-Fa-f])(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{40}|[0-9A-Fa-f]{32})(?=$|[^0-9A-Fa-f])/;
 
-const RFC_UUID_PATTERN =
-  /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-8][0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}$/;
+const RFC_UUID_TOKEN_PATTERN =
+  /[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-8][0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}/;
+const WHOLE_RFC_UUID_PATTERN = new RegExp(`^${RFC_UUID_TOKEN_PATTERN.source}$`);
 const CROCKFORD_ULID_PATTERN = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const STRUCTURED_HEX_SYSTEM_ID_PATTERN =
   /^(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{40}|[0-9A-Fa-f]{32})$/;
@@ -218,12 +219,12 @@ const UUID_SYSTEM_ID_PREFIXES = new Set([
 ]);
 
 function isWholeStructuredUuid(value: string): boolean {
-  if (RFC_UUID_PATTERN.test(value)) return true;
+  if (WHOLE_RFC_UUID_PATTERN.test(value)) return true;
   const separator = value.indexOf("_");
   return (
     separator > 0 &&
     UUID_SYSTEM_ID_PREFIXES.has(value.slice(0, separator)) &&
-    RFC_UUID_PATTERN.test(value.slice(separator + 1))
+    WHOLE_RFC_UUID_PATTERN.test(value.slice(separator + 1))
   );
 }
 
@@ -232,6 +233,7 @@ function containsHighEntropySecret(
   context: SensitiveTextContext,
 ): boolean {
   if (isWholeStructuredUuid(value)) return !context.allowSystemId;
+  if (RFC_UUID_TOKEN_PATTERN.test(value)) return true;
   if (
     context.allowSystemId &&
     (CROCKFORD_ULID_PATTERN.test(value) ||

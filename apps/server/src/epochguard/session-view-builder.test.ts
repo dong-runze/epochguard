@@ -1738,6 +1738,17 @@ describe("fixed redaction boundary", () => {
       expect(result.agents[0]!.agentNameAtAssignment).toBe("inventory Agent");
       expect(result.events[0]!.status).toBe("REDACTED");
     }
+
+    const embeddedId = `note session_${LOW_ENTROPY_V4_UUID} suffix`;
+    const embeddedDatabase = makeDatabase();
+    embeddedDatabase.runAssignments[0]!.agentNameAtAssignment = embeddedId;
+    embeddedDatabase.auditEvents[0]!.status = embeddedId;
+    const embeddedResult = snapshot(embeddedDatabase);
+    expect(JSON.stringify(embeddedResult)).not.toContain(embeddedId);
+    expect(embeddedResult.agents[0]!.agentNameAtAssignment).toBe(
+      "inventory Agent",
+    );
+    expect(embeddedResult.events[0]!.status).toBe("REDACTED");
   });
 
   it("rejects unknown mixed high-entropy opaque IDs", () => {
@@ -1745,6 +1756,13 @@ describe("fixed redaction boundary", () => {
     eventDatabase.auditEvents[0]!.eventId =
       "opaque_Ab3Cd5Ef7Gh9Jk2Mn4Pq6Rs8Tu0Vw1Xy9Za7Bc";
     expect(() => snapshot(eventDatabase)).toThrowError(SessionViewBuilderError);
+
+    const unknownUuidDatabase = makeDatabase();
+    unknownUuidDatabase.auditEvents[0]!.eventId =
+      `unknownprefix_${LOW_ENTROPY_V4_UUID}`;
+    expect(() => snapshot(unknownUuidDatabase)).toThrowError(
+      SessionViewBuilderError,
+    );
 
     const runDatabase = makeDatabase();
     const opaqueRunId =
