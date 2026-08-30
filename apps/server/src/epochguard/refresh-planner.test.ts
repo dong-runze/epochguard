@@ -27,6 +27,7 @@ import {
 } from "./types.js";
 
 const NOW = "2026-08-29T12:00:00.000Z";
+const LATER = "2026-08-29T12:00:01.000Z";
 const DIGEST = sha256Digest("fixture");
 
 const plannerWorld: RefreshPlannerWorldPort = {
@@ -588,10 +589,110 @@ describe("Refresh Planner", () => {
         world: plannerWorld,
         createArtifacts,
       }),
-    ).rejects.toThrow(/REOBSERVING Session pointers/);
+    ).rejects.toThrow(/allowed Session state, active pointers/);
     expect(retryStore.snapshot().attempts).toHaveLength(1);
     expect(retryStore.snapshot().runAssignments).toHaveLength(1);
   });
+
+  it("returns the original Attempt for a healthy COLLECTING CLAIMED retry", async () => {
+    const fixture = blockedFixture();
+    const firstStore = new MemoryRefreshStore(fixture.database);
+    const first = await claimRefreshPlan(firstStore, {
+      sessionId: fixture.session.sessionId,
+      request: {
+        expectedSessionRevision: fixture.session.sessionRevision,
+        refreshPlanId: fixture.plan.refreshPlanId,
+      },
+      now: NOW,
+      world: plannerWorld,
+      createArtifacts,
+    });
+    if (first.status !== "CLAIMED") throw new Error("expected initial claim");
+
+    const database = firstStore.snapshot();
+    database.sessions[0]!.state = "COLLECTING";
+    database.sessions[0]!.sessionRevision += 1;
+    database.runAssignments[0]!.status = "BOUND";
+    database.runAssignments[0]!.boundRunId = "run_budget_refresh_1";
+    database.runAssignments[0]!.boundAt = NOW;
+    database.attempts[0]!.status = "RUNNING";
+    database.attempts[0]!.runId = "run_budget_refresh_1";
+    database.attempts[0]!.runStartedAt = NOW;
+    const store = new MemoryRefreshStore(database);
+    const retryFactory = vi.fn(createArtifacts);
+    const retry = await claimRefreshPlan(store, {
+      sessionId: fixture.session.sessionId,
+      request: {
+        expectedSessionRevision: database.sessions[0]!.sessionRevision,
+        refreshPlanId: fixture.plan.refreshPlanId,
+      },
+      now: LATER,
+      world: plannerWorld,
+      createArtifacts: retryFactory,
+    });
+
+    expect(retry).toMatchObject({
+      status: "ALREADY_REOBSERVING",
+      error: { attemptId: first.attempt.attemptId },
+    });
+    expect(retryFactory).not.toHaveBeenCalled();
+    expect(store.snapshot().attempts).toHaveLength(1);
+  });
+
+  it.each([
+    { sessionState: "FAILED" as const, attemptStatus: "FAILED" as const },
+    {
+      sessionState: "INTERRUPTED" as const,
+      attemptStatus: "INTERRUPTED" as const,
+    },
+  ])(
+    "returns the original Attempt for a terminal $sessionState CLAIMED retry",
+    async ({ sessionState, attemptStatus }) => {
+      const fixture = blockedFixture();
+      const firstStore = new MemoryRefreshStore(fixture.database);
+      const first = await claimRefreshPlan(firstStore, {
+        sessionId: fixture.session.sessionId,
+        request: {
+          expectedSessionRevision: fixture.session.sessionRevision,
+          refreshPlanId: fixture.plan.refreshPlanId,
+        },
+        now: NOW,
+        world: plannerWorld,
+        createArtifacts,
+      });
+      if (first.status !== "CLAIMED") throw new Error("expected initial claim");
+
+      const database = firstStore.snapshot();
+      database.sessions[0]!.state = sessionState;
+      database.sessions[0]!.sessionRevision += 1;
+      database.runAssignments[0]!.status = "BOUND";
+      database.runAssignments[0]!.boundRunId = "run_budget_refresh_1";
+      database.runAssignments[0]!.boundAt = NOW;
+      database.attempts[0]!.status = attemptStatus;
+      database.attempts[0]!.runId = "run_budget_refresh_1";
+      database.attempts[0]!.runStartedAt = NOW;
+      database.attempts[0]!.runCompletedAt = LATER;
+      const store = new MemoryRefreshStore(database);
+      const retryFactory = vi.fn(createArtifacts);
+      const retry = await claimRefreshPlan(store, {
+        sessionId: fixture.session.sessionId,
+        request: {
+          expectedSessionRevision: database.sessions[0]!.sessionRevision,
+          refreshPlanId: fixture.plan.refreshPlanId,
+        },
+        now: LATER,
+        world: plannerWorld,
+        createArtifacts: retryFactory,
+      });
+
+      expect(retry).toMatchObject({
+        status: "ALREADY_REOBSERVING",
+        error: { attemptId: first.attempt.attemptId },
+      });
+      expect(retryFactory).not.toHaveBeenCalled();
+      expect(store.snapshot().attempts).toHaveLength(1);
+    },
+  );
 
   it.each([
     {
@@ -662,6 +763,18 @@ describe("Refresh Planner", () => {
       name: "Assignment/Attempt Run binding",
       mutate(database: EpochDatabase) {
         database.runAssignments[0]!.boundRunId = "run_unbound_shadow";
+      },
+    },
+    {
+      name: "REOBSERVING terminal Attempt lifecycle",
+      mutate(database: EpochDatabase) {
+        database.runAssignments[0]!.status = "BOUND";
+        database.runAssignments[0]!.boundRunId = "run_budget_refresh_1";
+        database.runAssignments[0]!.boundAt = NOW;
+        database.attempts[0]!.status = "FAILED";
+        database.attempts[0]!.runId = "run_budget_refresh_1";
+        database.attempts[0]!.runStartedAt = NOW;
+        database.attempts[0]!.runCompletedAt = LATER;
       },
     },
   ])("rejects a CLAIMED retry with broken $name", async ({ mutate }) => {

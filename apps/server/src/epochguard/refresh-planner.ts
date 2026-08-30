@@ -445,7 +445,8 @@ function activeValidationBindsPlan(
   return (
     parsedValidation.success &&
     parsedValidation.data.sessionId === session.sessionId &&
-    parsedValidation.data.refreshPlanId === plan.refreshPlanId
+    parsedValidation.data.refreshPlanId === plan.refreshPlanId &&
+    parsedValidation.data.baseSessionRevision + 1 === plan.baseSessionRevision
   );
 }
 
@@ -566,12 +567,16 @@ function assertClaimedPlanClosure(
   if (!parsedPlan.success) {
     return failInvariant("CLAIMED RefreshPlan is malformed");
   }
+  const activeClaimedState =
+    session.state === "REOBSERVING" || session.state === "COLLECTING";
+  const terminalClaimedState =
+    session.state === "FAILED" || session.state === "INTERRUPTED";
   if (
     plan.status !== "CLAIMED" ||
     plan.claimedAttemptId === null ||
     plan.sessionId !== session.sessionId ||
-    session.state !== "REOBSERVING" ||
-    session.sessionRevision !== plan.baseSessionRevision + 1 ||
+    (!activeClaimedState && !terminalClaimedState) ||
+    session.sessionRevision <= plan.baseSessionRevision ||
     session.activeRefreshPlanId !== plan.refreshPlanId ||
     session.activePermitId !== null ||
     session.activeAttemptIds.inventory !== null ||
@@ -581,7 +586,7 @@ function assertClaimedPlanClosure(
     !activeValidationBindsPlan(database, session, plan)
   ) {
     return failInvariant(
-      "CLAIMED RefreshPlan does not close over its REOBSERVING Session pointers and single CAS revision",
+      "CLAIMED RefreshPlan does not close over an allowed Session state, active pointers, and post-CAS revision",
     );
   }
 
@@ -638,16 +643,32 @@ function assertClaimedPlanClosure(
   const assignmentAttempts = database.attempts.filter(
     (candidate) => candidate.assignmentId === assignment.assignmentId,
   );
-  const createdBinding =
-    assignment.status === "CREATED" &&
+  const activeAttemptStates = [
+    "ASSIGNMENT_CREATED",
+    "DISPATCHING",
+    "QUEUED",
+    "RUNNING",
+  ] as const;
+  const terminalAttemptStates = [
+    "FAILED",
+    "INTERRUPTED",
+    "OUTPUT_REJECTED",
+  ] as const;
+  const attemptLifecycleMatchesSession = activeClaimedState
+    ? (activeAttemptStates as readonly string[]).includes(attempt.status)
+    : (terminalAttemptStates as readonly string[]).includes(attempt.status);
+  const unboundAssignment =
     assignment.boundRunId === null &&
     assignment.boundAt === null &&
-    attempt.runId === null;
-  const activeRunBinding =
-    assignment.status === "BOUND" &&
+    attempt.runId === null &&
+    (assignment.status === "CREATED" ||
+      (terminalClaimedState && assignment.status === "REJECTED"));
+  const boundAssignment =
     assignment.boundRunId !== null &&
     assignment.boundAt !== null &&
-    attempt.runId === assignment.boundRunId;
+    attempt.runId === assignment.boundRunId &&
+    (assignment.status === "BOUND" ||
+      (terminalClaimedState && assignment.status === "REJECTED"));
   if (
     assignmentAttempts.length !== 1 ||
     attempt.sessionId !== session.sessionId ||
@@ -664,10 +685,11 @@ function assertClaimedPlanClosure(
       buildRoleQuerySpec(session.action, "budget").queryHash ||
     assignment.consumedAt !== null ||
     assignment.consumedByDecisionCertificateId !== null ||
-    (!createdBinding && !activeRunBinding)
+    !attemptLifecycleMatchesSession ||
+    (!unboundAssignment && !boundAssignment)
   ) {
     return failInvariant(
-      "CLAIMED RefreshPlan Attempt/Assignment owner or Run binding is invalid",
+      "CLAIMED RefreshPlan Attempt/Assignment lifecycle, owner, or Run binding is invalid for the Session state",
     );
   }
   return attempt.attemptId;
