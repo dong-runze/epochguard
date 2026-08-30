@@ -904,7 +904,17 @@ describe("EpochGuard Role Run join and coordination evidence", () => {
 
     await expect(
       fanOutDispatchBindPoll(inputs, ports, { clock: new FakeClock() }),
-    ).rejects.toMatchObject({ code: "RUN_FAILED" });
+    ).rejects.toMatchObject({
+      code: "RUN_FAILED",
+      attempt: {
+        role: "budget",
+        attemptId: "attempt_budget",
+        assignmentId: "assignment_budget",
+        runId: "run_budget",
+        status: "FAILED",
+        runCompletedAt: "2026-08-29T12:00:02.000Z",
+      },
+    });
     expect(store.state.runAssignments.map((item) => item.status)).toEqual([
       "REJECTED",
       "REJECTED",
@@ -915,6 +925,97 @@ describe("EpochGuard Role Run join and coordination evidence", () => {
       "FAILED",
       "COMPLETED",
     ]);
+  });
+
+  it("selects the first concrete rejection by input order, not completion order", async () => {
+    const inventoryFailure = terminalAttempt(
+      "inventory",
+      "2026-08-29T12:00:00.000Z",
+      "2026-08-29T12:00:10.000Z",
+      {
+        status: "FAILED",
+        threadId: null,
+        outputDigest: null,
+      },
+    );
+    const budgetFailure = terminalAttempt(
+      "budget",
+      "2026-08-29T12:00:02.000Z",
+      "2026-08-29T12:00:12.000Z",
+      {
+        status: "FAILED",
+        threadId: null,
+        outputDigest: null,
+      },
+    );
+
+    for (const requestedOrder of [
+      ["budget", "inventory"],
+      ["inventory", "budget"],
+    ] as const) {
+      const { store, scope } = makeJoinFixture([
+        inventoryFailure,
+        budgetFailure,
+        overlap.policy,
+      ]);
+      const inventoryError = new RunAdapterError(
+        "RUN_FAILED",
+        "inventory failed",
+        inventoryFailure,
+      );
+      const budgetError = new RunAdapterError(
+        "RUN_FAILED",
+        "budget failed",
+        budgetFailure,
+      );
+      const completed: string[] = [];
+      const rejectors: Partial<Record<"inventory" | "budget", () => void>> = {};
+      const inventoryPromise = new Promise<TerminalRunObservation>(
+        (_resolve, reject) => {
+          rejectors.inventory = () => {
+            completed.push("inventory");
+            reject(inventoryError);
+          };
+        },
+      );
+      const budgetPromise = new Promise<TerminalRunObservation>(
+        (_resolve, reject) => {
+          rejectors.budget = () => {
+            completed.push("budget");
+            reject(budgetError);
+          };
+        },
+      );
+      const settledPromise = Promise.allSettled([
+        inventoryPromise,
+        budgetPromise,
+        Promise.resolve(observation(overlap.policy)),
+      ]);
+      for (const role of requestedOrder) rejectors[role]!();
+      const settled = await settledPromise;
+
+      let caught: unknown;
+      try {
+        await joinRoleRunObservations(settled, store, scope);
+      } catch (error) {
+        caught = error;
+      }
+      expect(completed).toEqual(requestedOrder);
+      expect(caught).toBe(inventoryError);
+      expect(caught).toMatchObject({
+        attempt: {
+          role: "inventory",
+          attemptId: "attempt_inventory",
+          assignmentId: "assignment_inventory",
+          runId: "run_inventory",
+        },
+      });
+      expect(store.state.runAssignments.map((item) => item.status)).toEqual([
+        "REJECTED",
+        "REJECTED",
+        "REJECTED",
+      ]);
+    }
   });
 
   it("joins only matching, distinct Role, Agent, Run, and output evidence", async () => {
@@ -972,7 +1073,7 @@ describe("EpochGuard Role Run join and coordination evidence", () => {
         store,
         scope,
       ),
-    ).rejects.toMatchObject({ code: "RUN_FAILED" });
+    ).rejects.toMatchObject({ code: "RUN_FAILED", attempt: null });
     expect(store.state.runAssignments.map((item) => item.status)).toEqual([
       "REJECTED",
       "REJECTED",
