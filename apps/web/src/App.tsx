@@ -1,5 +1,31 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, setAuthToken } from "./api";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
+import { z } from "zod";
+import {
+  api,
+  ApiError,
+  epochGuardSessionSource,
+  setAuthToken,
+} from "./api";
+import EpochGuardDashboard from "./epochguard/EpochGuardDashboard";
+import {
+  CONTRACT_DIGEST,
+  CONTRACT_VERSION,
+  OpaqueIdSchema,
+  ScenarioIdSchema,
+  type CreateSessionRequest,
+  type Role,
+  type SessionDashboardSnapshot,
+} from "./epochguard/contracts";
+import { decodeEpochGuardSnapshot } from "./epochguard/decode-snapshot";
+import { EpochGuardSessionSourceError } from "./epochguard/session-source";
 import type { Agent, AgentRun, Message, SystemInfo } from "./types";
 
 const starterPrompts = [
@@ -35,9 +61,538 @@ function Spinner() {
   return <span className="spinner" aria-label="Loading" />;
 }
 
+type WorkspaceMode = "chat" | "safety";
+type ScenarioId = z.infer<typeof ScenarioIdSchema>;
+
+const TERMINAL_SESSION_STATES = new Set<
+  SessionDashboardSnapshot["sessionState"]
+>([
+  "UNSTABLE_WORLD",
+  "CONSISTENT_DENY",
+  "COMMIT_RACE",
+  "COMMITTED",
+  "FAILED",
+  "INTERRUPTED",
+]);
+
+const ROLE_AGENT_NAMES: Readonly<Record<Role, string>> = {
+  inventory: "EpochGuard Inventory Agent",
+  budget: "EpochGuard Budget Agent",
+  policy: "EpochGuard Policy Agent",
+};
+
+const SCENARIO_OPTIONS: ReadonlyArray<{
+  id: ScenarioId;
+  label: string;
+  summary: string;
+}> = [
+  {
+    id: "normal-world-v1",
+    label: "Normal World",
+    summary: "Three current ALLOW decisions can release one protected effect.",
+  },
+  {
+    id: "impossible-collage-v1",
+    label: "Impossible World",
+    summary: "Three locally valid ALLOW decisions have no shared world revision.",
+  },
+];
+
+const storedSessionSchema = z
+  .object({
+    storageVersion: z.literal(1),
+    contractVersion: z.literal(CONTRACT_VERSION),
+    contractDigest: z.literal(CONTRACT_DIGEST),
+    scenarioId: ScenarioIdSchema,
+    sessionId: OpaqueIdSchema,
+  })
+  .strict();
+
+type RoleAssignments = CreateSessionRequest["assignments"];
+type StoredSessionIds = Record<ScenarioId, string | null>;
+
+function sessionStorageKey(scenarioId: ScenarioId): string {
+  return `epochguard.session.v1.${scenarioId}`;
+}
+
+function readStoredSession(scenarioId: ScenarioId): string | null {
+  try {
+    const raw = window.localStorage.getItem(sessionStorageKey(scenarioId));
+    if (raw === null) return null;
+    const parsed = storedSessionSchema.safeParse(JSON.parse(raw));
+    return parsed.success && parsed.data.scenarioId === scenarioId
+      ? parsed.data.sessionId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistStoredSession(
+  scenarioId: ScenarioId,
+  sessionId: string | null,
+): void {
+  try {
+    const key = sessionStorageKey(scenarioId);
+    if (sessionId === null) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({
+        storageVersion: 1,
+        contractVersion: CONTRACT_VERSION,
+        contractDigest: CONTRACT_DIGEST,
+        scenarioId,
+        sessionId,
+      }),
+    );
+  } catch {
+    // Browser storage is only a resumability aid. Canonical state stays server-side.
+  }
+}
+
+function removeStoredSessionIfMatches(
+  scenarioId: ScenarioId,
+  expectedSessionId: string,
+): void {
+  try {
+    const key = sessionStorageKey(scenarioId);
+    const raw = window.localStorage.getItem(key);
+    if (raw === null) return;
+    const parsed = storedSessionSchema.safeParse(JSON.parse(raw));
+    if (
+      parsed.success &&
+      parsed.data.scenarioId === scenarioId &&
+      parsed.data.sessionId === expectedSessionId
+    ) {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // Storage remains a best-effort hint and must never block the UI.
+  }
+}
+
+function isDedicatedRoleAgent(agent: Agent | null): boolean {
+  return (
+    agent !== null &&
+    Object.values(ROLE_AGENT_NAMES).includes(agent.name)
+  );
+}
+
+function isProtectedRoleAgentId(agentId: string, agents: Agent[]): boolean {
+  return agents.some(
+    (agent) => agent.id === agentId && isDedicatedRoleAgent(agent),
+  );
+}
+
+type AssignmentResolution =
+  | {
+      ok: true;
+      assignments: RoleAssignments;
+      agents: Record<Role, Agent>;
+      issues: [];
+    }
+  | { ok: false; assignments: null; agents: null; issues: string[] };
+
+function resolveRoleAssignments(agents: Agent[]): AssignmentResolution {
+  const issues: string[] = [];
+  const resolved = {} as Record<Role, Agent>;
+  for (const role of Object.keys(ROLE_AGENT_NAMES) as Role[]) {
+    const expectedName = ROLE_AGENT_NAMES[role];
+    const matches = agents.filter((agent) => agent.name === expectedName);
+    if (matches.length !== 1) {
+      issues.push(
+        matches.length === 0
+          ? expectedName + " is missing."
+          : expectedName + " appears " + matches.length + " times.",
+      );
+      continue;
+    }
+    resolved[role] = matches[0]!;
+  }
+  if (issues.length > 0 || Object.keys(resolved).length !== 3) {
+    return { ok: false, assignments: null, agents: null, issues };
+  }
+  const assignments: RoleAssignments = {
+    inventory: resolved.inventory.id,
+    budget: resolved.budget.id,
+    policy: resolved.policy.id,
+  };
+  if (new Set(Object.values(assignments)).size !== 3) {
+    return {
+      ok: false,
+      assignments: null,
+      agents: null,
+      issues: ["Each EpochGuard Role must resolve to a distinct Agent ID."],
+    };
+  }
+  return { ok: true, assignments, agents: resolved, issues: [] };
+}
+
+type SafetyOperationKind = "create" | "clear";
+
+type SafetyPendingOperation = {
+  kind: SafetyOperationKind;
+  token: number;
+} | null;
+
+function snapshotAssignments(
+  snapshot: SessionDashboardSnapshot,
+): RoleAssignments {
+  const byRole = Object.fromEntries(
+    snapshot.agents.map((agent) => [agent.role, agent.agentId]),
+  ) as Record<Role, string>;
+  return {
+    inventory: byRole.inventory,
+    budget: byRole.budget,
+    policy: byRole.policy,
+  };
+}
+
+function sameAssignments(
+  left: RoleAssignments,
+  right: RoleAssignments,
+): boolean {
+  return (
+    left.inventory === right.inventory &&
+    left.budget === right.budget &&
+    left.policy === right.policy
+  );
+}
+
+function snapshotPreservesRoleAgents(
+  snapshot: SessionDashboardSnapshot,
+  agents: Record<Role, Agent>,
+): boolean {
+  return (Object.keys(ROLE_AGENT_NAMES) as Role[]).every((role) => {
+    const frozen = snapshot.agents.find((agent) => agent.role === role);
+    return (
+      frozen !== undefined &&
+      frozen.agentId === agents[role].id &&
+      frozen.agentNameAtAssignment === agents[role].name
+    );
+  });
+}
+
+function SessionSafetyWorkspace({
+  agents,
+  scenarioId,
+  onScenarioIdChange,
+  sessionIds,
+  setSessionIds,
+  pendingOperation,
+  beginOperation,
+  finishOperation,
+}: {
+  agents: Agent[];
+  scenarioId: ScenarioId;
+  onScenarioIdChange: (scenarioId: ScenarioId) => void;
+  sessionIds: StoredSessionIds;
+  setSessionIds: Dispatch<SetStateAction<StoredSessionIds>>;
+  pendingOperation: SafetyPendingOperation;
+  beginOperation: (kind: SafetyOperationKind) => number | null;
+  finishOperation: (token: number) => void;
+}) {
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
+  const assignmentResolution = useMemo(
+    () => resolveRoleAssignments(agents),
+    [agents],
+  );
+  const selectedScenario = SCENARIO_OPTIONS.find(
+    (scenario) => scenario.id === scenarioId,
+  )!;
+  const sessionId = sessionIds[scenarioId];
+  const creating = pendingOperation?.kind === "create";
+  const clearing = pendingOperation?.kind === "clear";
+  const operationPending = pendingOperation !== null;
+  const nonReadyRoleAgents = assignmentResolution.ok
+    ? (Object.keys(ROLE_AGENT_NAMES) as Role[]).filter(
+        (role) => assignmentResolution.agents[role].status !== "ready",
+      )
+    : [];
+
+  const createSession = async () => {
+    if (!assignmentResolution.ok) return;
+    const operationToken = beginOperation("create");
+    if (operationToken === null) return;
+    const requestedScenarioId = scenarioId;
+    const requestedResolution = assignmentResolution;
+    setCreateError(null);
+    setRecoveryNotice(null);
+    try {
+      const payload = await epochGuardSessionSource.createSession({
+        scenarioId: requestedScenarioId,
+        assignments: requestedResolution.assignments,
+      });
+      const decoded = decodeEpochGuardSnapshot(payload);
+      if (!decoded.ok) {
+        throw new Error(decoded.failure.message);
+      }
+      if (decoded.snapshot.scenarioId !== requestedScenarioId) {
+        throw new Error("The created Session belongs to a different scenario.");
+      }
+      if (
+        !sameAssignments(
+          snapshotAssignments(decoded.snapshot),
+          requestedResolution.assignments,
+        ) ||
+        !snapshotPreservesRoleAgents(
+          decoded.snapshot,
+          requestedResolution.agents,
+        )
+      ) {
+        throw new Error(
+          "The created Session Snapshot does not preserve the requested Role assignments.",
+        );
+      }
+      setSessionIds((current) => ({
+        ...current,
+        [requestedScenarioId]: decoded.snapshot.sessionId,
+      }));
+      onScenarioIdChange(requestedScenarioId);
+      persistStoredSession(requestedScenarioId, decoded.snapshot.sessionId);
+    } catch (reason) {
+      if (reason instanceof EpochGuardSessionSourceError) {
+        const body = reason.body;
+        let recovered = false;
+        if (
+          body?.error === "AGENTS_BUSY" &&
+          sameAssignments(body.assignments, requestedResolution.assignments)
+        ) {
+          try {
+            const activePayload = await epochGuardSessionSource.getSession(
+              body.activeSessionId,
+            );
+            const active = decodeEpochGuardSnapshot(activePayload);
+            if (
+              active.ok &&
+              active.snapshot.sessionId === body.activeSessionId &&
+              sameAssignments(
+                snapshotAssignments(active.snapshot),
+                requestedResolution.assignments,
+              ) &&
+              snapshotPreservesRoleAgents(
+                active.snapshot,
+                requestedResolution.agents,
+              )
+            ) {
+              const activeScenarioId = active.snapshot.scenarioId;
+              setSessionIds((current) => ({
+                ...current,
+                [activeScenarioId]: body.activeSessionId,
+              }));
+              onScenarioIdChange(activeScenarioId);
+              persistStoredSession(activeScenarioId, body.activeSessionId);
+              setCreateError(null);
+              setRecoveryNotice(
+                "Recovered the active " +
+                  (activeScenarioId === "normal-world-v1"
+                    ? "Normal"
+                    : "Impossible") +
+                  " Session.",
+              );
+              recovered = true;
+            }
+          } catch {
+            // Keep the canonical AGENTS_BUSY error if recovery cannot be verified.
+          }
+        }
+        if (!recovered) setCreateError(reason.message);
+      } else {
+        setCreateError(reason instanceof Error ? reason.message : String(reason));
+      }
+    } finally {
+      finishOperation(operationToken);
+    }
+  };
+
+  const clearSavedSession = async () => {
+    if (sessionId === null) return;
+    const operationToken = beginOperation("clear");
+    if (operationToken === null) return;
+    const expectedSessionId = sessionId;
+    const expectedScenarioId = scenarioId;
+    setCreateError(null);
+    setRecoveryNotice(null);
+    try {
+      const payload = await epochGuardSessionSource.getSession(expectedSessionId);
+      const decoded = decodeEpochGuardSnapshot(payload);
+      if (
+        !decoded.ok ||
+        decoded.snapshot.sessionId !== expectedSessionId ||
+        decoded.snapshot.scenarioId !== expectedScenarioId
+      ) {
+        throw new Error("The saved Session could not be verified safely.");
+      }
+      if (!TERMINAL_SESSION_STATES.has(decoded.snapshot.sessionState)) {
+        setCreateError(
+          "This Session is still active. Keep observing it until it reaches a terminal state.",
+        );
+        return;
+      }
+      setSessionIds((current) =>
+        current[expectedScenarioId] === expectedSessionId
+          ? { ...current, [expectedScenarioId]: null }
+          : current,
+      );
+      removeStoredSessionIfMatches(expectedScenarioId, expectedSessionId);
+    } catch (reason) {
+      if (
+        reason instanceof EpochGuardSessionSourceError &&
+        reason.status === 404 &&
+        reason.body?.error === "SESSION_NOT_FOUND" &&
+        reason.body.sessionId === expectedSessionId
+      ) {
+        setSessionIds((current) =>
+          current[expectedScenarioId] === expectedSessionId
+            ? { ...current, [expectedScenarioId]: null }
+            : current,
+        );
+        removeStoredSessionIfMatches(expectedScenarioId, expectedSessionId);
+        return;
+      }
+      setCreateError(
+        reason instanceof EpochGuardSessionSourceError
+          ? reason.message
+          : reason instanceof Error
+            ? reason.message
+            : String(reason),
+      );
+    } finally {
+      finishOperation(operationToken);
+    }
+  };
+
+  return (
+    <div className="safety-workspace">
+      <div className="safety-scenario-bar">
+        <div className="safety-scenario-tabs" aria-label="EpochGuard scenario">
+          {SCENARIO_OPTIONS.map((scenario) => (
+            <button
+              key={scenario.id}
+              type="button"
+              aria-pressed={scenario.id === scenarioId}
+              disabled={operationPending}
+              onClick={() => {
+                onScenarioIdChange(scenario.id);
+                setCreateError(null);
+                setRecoveryNotice(null);
+              }}
+            >
+              {scenario.label}
+              {sessionIds[scenario.id] !== null ? <span>Saved</span> : null}
+            </button>
+          ))}
+        </div>
+        {sessionId !== null ? (
+          <button
+            type="button"
+            className="button button-ghost safety-new-session"
+            disabled={operationPending}
+            onClick={() => void clearSavedSession()}
+          >
+            {clearing ? <Spinner /> : "Clear saved session"}
+          </button>
+        ) : null}
+      </div>
+
+      {createError !== null ? (
+        <div className="safety-create-error" role="alert">
+          {createError}
+        </div>
+      ) : null}
+
+      {recoveryNotice !== null ? (
+        <div className="safety-recovery-notice" role="status" aria-live="polite">
+          {recoveryNotice}
+        </div>
+      ) : null}
+
+      {sessionId === null ? (
+        <section className="safety-launcher">
+          <div className="safety-launcher-copy">
+            <span className="eyebrow">Fixed, server-verified fixture</span>
+            <h3>{selectedScenario.label}</h3>
+            <p>{selectedScenario.summary}</p>
+          </div>
+          <div className="safety-role-summary" aria-label="Automatic Role assignments">
+            {(Object.keys(ROLE_AGENT_NAMES) as Role[]).map((role) => {
+              const agent = assignmentResolution.ok
+                ? assignmentResolution.agents[role]
+                : agents.find((candidate) => candidate.name === ROLE_AGENT_NAMES[role]);
+              return (
+                <div key={role}>
+                  <span>{role}</span>
+                  <strong>{ROLE_AGENT_NAMES[role]}</strong>
+                  <small>{agent === undefined ? "Not available" : agent.status}</small>
+                </div>
+              );
+            })}
+          </div>
+          {!assignmentResolution.ok ? (
+            <div className="safety-setup-error" role="status">
+              <strong>Role setup is not ready</strong>
+              <ul>
+                {assignmentResolution.issues.map((issue) => (
+                  <li key={issue}>{issue}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {assignmentResolution.ok && nonReadyRoleAgents.length > 0 ? (
+            <div className="safety-readiness-note" role="status">
+              <strong>Role status is advisory</strong>
+              <span>
+                {nonReadyRoleAgents.length === 1
+                  ? "One Role Agent is not currently ready. "
+                  : String(nonReadyRoleAgents.length) +
+                    " Role Agents are not currently ready. "}
+                Run stays available so the server can restore an active Session or return
+                the authoritative result.
+              </span>
+            </div>
+          ) : null}
+          <button
+            type="button"
+            className="button button-primary safety-run-button"
+            disabled={!assignmentResolution.ok || operationPending}
+            onClick={() => void createSession()}
+          >
+            {creating ? <Spinner /> : `Run ${selectedScenario.label}`}
+          </button>
+          <p className="safety-trust-note">
+            Assignments are resolved by exact Role Agent name. The browser cannot select
+            owners, world heads, Receipts, Permits, or effect values.
+          </p>
+        </section>
+      ) : (
+        <EpochGuardDashboard
+          key={sessionId}
+          source={epochGuardSessionSource}
+          sessionId={sessionId}
+        />
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("chat");
+  const [safetyScenarioId, setSafetyScenarioId] =
+    useState<ScenarioId>("normal-world-v1");
+  const [safetySessionIds, setSafetySessionIds] = useState<StoredSessionIds>(
+    () => ({
+      "normal-world-v1": readStoredSession("normal-world-v1"),
+      "impossible-collage-v1": readStoredSession("impossible-collage-v1"),
+    }),
+  );
+  const [safetyPendingOperation, setSafetyPendingOperation] =
+    useState<SafetyPendingOperation>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [system, setSystem] = useState<SystemInfo | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -53,20 +608,50 @@ export default function App() {
   const selectedIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
   const pollingRunIds = useRef(new Set<string>());
+  const safetyPendingOperationRef = useRef<SafetyPendingOperation>(null);
+  const safetyOperationTokenRef = useRef(0);
   selectedIdRef.current = selectedId;
+
+  const beginSafetyOperation = useCallback(
+    (kind: SafetyOperationKind): number | null => {
+      if (safetyPendingOperationRef.current !== null) return null;
+      const operation = {
+        kind,
+        token: safetyOperationTokenRef.current + 1,
+      };
+      safetyOperationTokenRef.current = operation.token;
+      safetyPendingOperationRef.current = operation;
+      setSafetyPendingOperation(operation);
+      return operation.token;
+    },
+    [],
+  );
+
+  const finishSafetyOperation = useCallback((token: number) => {
+    if (safetyPendingOperationRef.current?.token !== token) return;
+    safetyPendingOperationRef.current = null;
+    setSafetyPendingOperation((current) =>
+      current?.token === token ? null : current,
+    );
+  }, []);
 
   const selected = useMemo(
     () => agents.find((agent) => agent.id === selectedId) ?? null,
     [agents, selectedId],
   );
+  const chatAgents = useMemo(
+    () => agents.filter((agent) => !isDedicatedRoleAgent(agent)),
+    [agents],
+  );
 
   const refreshAgents = useCallback(async () => {
     const { agents: next } = await api.listAgents();
     setAgents(next);
+    const selectable = next.filter((agent) => !isDedicatedRoleAgent(agent));
     setSelectedId((current) =>
-      current && next.some((agent) => agent.id === current)
+      current && selectable.some((agent) => agent.id === current)
         ? current
-        : (next[0]?.id ?? null),
+        : (selectable[0]?.id ?? null),
     );
   }, []);
 
@@ -153,6 +738,10 @@ export default function App() {
   const saveAgent = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!selected) return;
+    if (isProtectedRoleAgentId(selected.id, agents)) {
+      setError("EpochGuard Role Agents are managed by the safety control plane.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -168,6 +757,10 @@ export default function App() {
 
   const toggleAgent = async () => {
     if (!selected) return;
+    if (isProtectedRoleAgentId(selected.id, agents)) {
+      setError("EpochGuard Role Agents cannot be started or stopped from Agent Chat.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -186,6 +779,10 @@ export default function App() {
 
   const deleteAgent = async () => {
     if (!selected) return;
+    if (isProtectedRoleAgentId(selected.id, agents)) {
+      setError("EpochGuard Role Agents cannot be deleted from Agent Chat.");
+      return;
+    }
     if (!window.confirm("Delete " + selected.name + "? Its workspace will be archived.")) {
       return;
     }
@@ -223,6 +820,10 @@ export default function App() {
   const sendMessage = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!selected || !prompt.trim()) return;
+    if (isProtectedRoleAgentId(selected.id, agents)) {
+      setError("EpochGuard Role Agents only accept assignment-scoped safety Runs.");
+      return;
+    }
     const content = prompt.trim();
     setPrompt("");
     setError(null);
@@ -333,10 +934,10 @@ export default function App() {
 
         <div className="sidebar-label">
           <span>Your Agents</span>
-          <span>{agents.length}</span>
+          <span>{chatAgents.length}</span>
         </div>
         <nav className="agent-list">
-          {agents.map((agent) => (
+          {chatAgents.map((agent) => (
             <button
               className={"agent-card " + (agent.id === selectedId ? "selected" : "")}
               key={agent.id}
@@ -350,7 +951,7 @@ export default function App() {
               <span className={"mini-dot mini-" + agent.status} />
             </button>
           ))}
-          {agents.length === 0 && (
+          {chatAgents.length === 0 && (
             <div className="empty-sidebar">
               <span>◇</span>
               Create your first coding Agent.
@@ -369,6 +970,32 @@ export default function App() {
       </aside>
 
       <main className="main">
+        <nav className="global-workspace-mode" aria-label="Workspace mode">
+          <button
+            type="button"
+            aria-pressed={workspaceMode === "chat"}
+            disabled={safetyPendingOperation !== null}
+            onClick={() => {
+              if (safetyPendingOperationRef.current !== null) return;
+              setWorkspaceMode("chat");
+            }}
+          >
+            Agent Chat
+          </button>
+          <button
+            type="button"
+            aria-pressed={workspaceMode === "safety"}
+            disabled={safetyPendingOperation !== null}
+            onClick={() => {
+              if (safetyPendingOperationRef.current !== null) return;
+              setShowSettings(false);
+              setWorkspaceMode("safety");
+            }}
+          >
+            Session Safety
+          </button>
+        </nav>
+
         {!system?.arkConfigured || !system?.codexAvailable ? (
           <div className="config-banner">
             <span>!</span>
@@ -392,42 +1019,54 @@ export default function App() {
           </div>
         )}
 
-        {selected ? (
+        {workspaceMode === "safety" || selected !== null ? (
           <>
             <header className="agent-header">
-              <div>
-                <div className="header-title-row">
-                  <h1>{selected.name}</h1>
-                  <StatusPill status={selected.status} />
+              {workspaceMode === "safety" ? (
+                <div>
+                  <div className="header-title-row">
+                    <h1>EpochGuard</h1>
+                    <span className="safety-header-pill">Joint-validity gate</span>
+                  </div>
+                  <p>Server-authoritative Session Safety for two isolated demo worlds.</p>
                 </div>
-                <p>{selected.description || "A Codex coding Agent in an isolated workspace."}</p>
-              </div>
-              <div className="header-actions">
-                <button
-                  className="button button-ghost"
-                  onClick={() => setShowSettings((value) => !value)}
-                  disabled={busy || selected.status === "busy"}
-                >
-                  Settings
-                </button>
-                <button
-                  className="button button-ghost"
-                  onClick={toggleAgent}
-                  disabled={busy}
-                >
-                  {selected.status === "stopped" ? "Start" : "Stop"}
-                </button>
-                <button
-                  className="button button-danger"
-                  onClick={deleteAgent}
-                  disabled={busy || selected.status === "busy"}
-                >
-                  Delete
-                </button>
-              </div>
+              ) : selected !== null ? (
+                <>
+                  <div>
+                    <div className="header-title-row">
+                      <h1>{selected.name}</h1>
+                      <StatusPill status={selected.status} />
+                    </div>
+                    <p>{selected.description || "A Codex coding Agent in an isolated workspace."}</p>
+                  </div>
+                  <div className="header-actions">
+                    <button
+                      className="button button-ghost"
+                      onClick={() => setShowSettings((value) => !value)}
+                      disabled={busy || selected.status === "busy"}
+                    >
+                      Settings
+                    </button>
+                    <button
+                      className="button button-ghost"
+                      onClick={toggleAgent}
+                      disabled={busy}
+                    >
+                      {selected.status === "stopped" ? "Start" : "Stop"}
+                    </button>
+                    <button
+                      className="button button-danger"
+                      onClick={deleteAgent}
+                      disabled={busy || selected.status === "busy"}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </>
+              ) : null}
             </header>
 
-            {showSettings && (
+            {workspaceMode === "chat" && selected !== null && showSettings && (
               <form className="settings-panel" onSubmit={saveAgent}>
                 <div className="settings-title">
                   <div>
@@ -477,19 +1116,38 @@ export default function App() {
               </form>
             )}
 
-            <section className="playground">
+            <section className={`playground playground-${workspaceMode}`}>
               <div className="playground-topbar">
                 <div>
                   <span className="eyebrow">Playground</span>
-                  <h2>Build something with your Agent</h2>
+                  <h2>
+                    {workspaceMode === "chat"
+                      ? "Build something with your Agent"
+                      : "Inspect and operate one protected Session"}
+                  </h2>
                 </div>
-                <div className="session-info">
-                  <span className="pulse" />
-                  {selected.codexThreadId ? "Session connected" : "New session"}
-                </div>
+                {workspaceMode === "chat" && selected !== null ? (
+                  <div className="session-info">
+                    <span className="pulse" />
+                    {selected.codexThreadId ? "Session connected" : "New session"}
+                  </div>
+                ) : null}
               </div>
 
-              <div className="messages">
+              {workspaceMode === "safety" ? (
+                <SessionSafetyWorkspace
+                  agents={agents}
+                  scenarioId={safetyScenarioId}
+                  onScenarioIdChange={setSafetyScenarioId}
+                  sessionIds={safetySessionIds}
+                  setSessionIds={setSafetySessionIds}
+                  pendingOperation={safetyPendingOperation}
+                  beginOperation={beginSafetyOperation}
+                  finishOperation={finishSafetyOperation}
+                />
+              ) : selected !== null ? (
+                <>
+                  <div className="messages">
                 {messages.length === 0 && !activeRun ? (
                   <div className="welcome">
                     <div className="welcome-orbit">
@@ -539,9 +1197,9 @@ export default function App() {
                   </article>
                 )}
                 <div ref={messageEnd} />
-              </div>
+                  </div>
 
-              <form className="composer" onSubmit={sendMessage}>
+                  <form className="composer" onSubmit={sendMessage}>
                 <textarea
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
@@ -580,7 +1238,9 @@ export default function App() {
                     ↑
                   </button>
                 </div>
-              </form>
+                  </form>
+                </>
+              ) : null}
             </section>
           </>
         ) : (
