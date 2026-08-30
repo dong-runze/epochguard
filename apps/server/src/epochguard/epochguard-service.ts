@@ -225,6 +225,7 @@ export class EpochGuardService {
   private readonly issuer: ReceiptIssuer;
   private readonly packWriter: EvidencePackWriter;
   private readonly viewBuilder: SessionViewBuilder;
+  private readonly backgroundTasks = new Map<string, Promise<void>>();
   private initializePromise: Promise<void> | null = null;
   private initialized = false;
 
@@ -464,16 +465,9 @@ export class EpochGuardService {
       throw error;
     }
 
-    try {
-      await Promise.all(prepared.map((pack) => this.writePack(pack.assignmentId)));
-      await this.transitionToCollecting(sessionId);
-      const observations = await this.runInitialFanOut(sessionId, prepared);
-      await this.acceptAndValidate(sessionId, observations, null);
-    } catch (error) {
-      await this.failSession(sessionId, error);
-      return this.getSnapshot(sessionId);
-    }
-    return this.getSnapshot(sessionId);
+    const snapshot = this.getSnapshot(sessionId);
+    this.scheduleInitialContinuation(sessionId, prepared);
+    return snapshot;
   }
 
   getSnapshot(sessionIdInput: string): SessionDashboardSnapshot {
@@ -620,6 +614,7 @@ export class EpochGuardService {
     await this.initialize();
     await this.ports.store.mutate((database) => {
       if (
+        this.backgroundTasks.size > 0 ||
         database.sessions.some(
           (session) => !TERMINAL_SESSION_STATES.has(session.state),
         )
@@ -795,6 +790,33 @@ export class EpochGuardService {
     });
   }
 
+  private scheduleInitialContinuation(
+    sessionId: string,
+    prepared: readonly PreparedPack[],
+  ): void {
+    if (this.backgroundTasks.has(sessionId)) return;
+    const task = new Promise<void>((resolve) => setImmediate(resolve))
+      .then(async () => {
+        await Promise.all(
+          prepared.map((pack) => this.writePack(pack.assignmentId)),
+        );
+        await this.transitionToCollecting(sessionId);
+        const observations = await this.runInitialFanOut(sessionId, prepared);
+        await this.acceptAndValidate(sessionId, observations, null);
+      })
+      .catch(async (error: unknown) => {
+        try {
+          await this.failSession(sessionId, error);
+        } catch {
+          // The background owner must never leak a rejected Promise.
+        }
+      })
+      .finally(() => {
+        this.backgroundTasks.delete(sessionId);
+      });
+    this.backgroundTasks.set(sessionId, task);
+  }
+
   private async runInitialFanOut(
     sessionId: string,
     packs: readonly PreparedPack[],
@@ -831,6 +853,16 @@ export class EpochGuardService {
       dispatchBindPoll(input, this.rolePorts, this.runObserver),
     );
     const settled = await Promise.allSettled(runPromises);
+    const preciseFailure = settled.find(
+      (item): item is PromiseRejectedResult =>
+        item.status === "rejected" && item.reason instanceof RunAdapterError,
+    );
+    if (preciseFailure !== undefined) {
+      // Once createSession returns, readers can poll between every Store
+      // publication. Close the Session before the join rejects its sibling
+      // Assignments so both authoritative snapshots remain projectable.
+      await this.failSession(sessionId, preciseFailure.reason);
+    }
     try {
       return await joinRoleRunObservations(settled, this.ports.store, {
         sessionId,
@@ -842,10 +874,6 @@ export class EpochGuardService {
         ],
       });
     } catch (error) {
-      const preciseFailure = settled.find(
-        (item): item is PromiseRejectedResult =>
-          item.status === "rejected" && item.reason instanceof RunAdapterError,
-      );
       throw preciseFailure?.reason ?? error;
     }
   }

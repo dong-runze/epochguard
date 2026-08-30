@@ -14,6 +14,7 @@ import {
   sha256Digest,
   type CreateSessionRequest,
   type Role,
+  type SessionDashboardSnapshot,
 } from "./types.js";
 import { WorldLedger } from "./world-ledger.js";
 
@@ -96,6 +97,8 @@ class TestAgentRuntime {
   private failSecondBudgetRun = false;
   private rejectSecondBudgetOutput = false;
   private allowSecondBudgetDecision = false;
+  private holdInitialRunRole: Role | null = null;
+  private rejectInitialOutputRole: Role | null = null;
   private initialFanOutBarrier: InitialFanOutBarrier | null = null;
 
   constructor(private readonly workspaces: TestWorkspace) {}
@@ -170,9 +173,11 @@ class TestAgentRuntime {
       role === "budget" &&
       this.dispatchCounts.budget === 2;
     const shouldRejectOutput =
-      this.rejectSecondBudgetOutput &&
-      role === "budget" &&
-      this.dispatchCounts.budget === 2;
+      (this.rejectInitialOutputRole === role &&
+        this.dispatchCounts[role] === 1) ||
+      (this.rejectSecondBudgetOutput &&
+        role === "budget" &&
+        this.dispatchCounts.budget === 2);
     const completed: AgentRun = {
       ...queued,
       status: shouldFail ? "failed" : "completed",
@@ -198,9 +203,11 @@ class TestAgentRuntime {
       queued,
       completed,
       held:
-        this.holdSecondBudgetRun &&
-        role === "budget" &&
-        this.dispatchCounts.budget === 2,
+        (this.holdInitialRunRole === role &&
+          this.dispatchCounts[role] === 1) ||
+        (this.holdSecondBudgetRun &&
+          role === "budget" &&
+          this.dispatchCounts.budget === 2),
     });
     return { run: structuredClone(queued) };
   }
@@ -221,6 +228,14 @@ class TestAgentRuntime {
 
   rejectRefreshBudgetOutput(): void {
     this.rejectSecondBudgetOutput = true;
+  }
+
+  holdInitialRun(role: Role): void {
+    this.holdInitialRunRole = role;
+  }
+
+  rejectInitialOutput(role: Role): void {
+    this.rejectInitialOutputRole = role;
   }
 
   allowRefreshBudgetDecision(): void {
@@ -269,6 +284,10 @@ class TestAgentRuntime {
   }
 
   releaseRefreshBudgetRun(): void {
+    for (const stored of this.runs.values()) stored.held = false;
+  }
+
+  releaseInitialRuns(): void {
     for (const stored of this.runs.values()) stored.held = false;
   }
 
@@ -411,30 +430,88 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
   throw new Error("Timed out waiting for the controlled service state");
 }
 
+async function waitForSessionState(
+  service: EpochGuardService,
+  sessionId: string,
+  states: readonly SessionDashboardSnapshot["sessionState"][],
+): Promise<SessionDashboardSnapshot> {
+  let snapshot: SessionDashboardSnapshot | null = null;
+  await waitUntil(() => {
+    const candidate = service.getSnapshot(sessionId);
+    if (!states.includes(candidate.sessionState)) return false;
+    snapshot = candidate;
+    return true;
+  });
+  return snapshot!;
+}
+
 describe("EpochGuardService", () => {
   it("runs the Normal chain and makes concurrent/lost Commit responses exactly-once", async () => {
-    const { service, store, requestFor, agents } = await createHarness();
-    const ready = await service.createSession(requestFor("normal-world-v1"));
+    const { service, store, requestFor, agents, workspaces } =
+      await createHarness();
+    agents.holdInitialRun("budget");
+    const created = await service.createSession(requestFor("normal-world-v1"));
+    expect(created.sessionState).toBe("DISPATCHING");
+    expect(created.sessionId).toMatch(/^session_/);
+    expect(workspaces.packs.size).toBe(0);
+    expect(agents.dispatchCounts).toEqual({
+      inventory: 0,
+      budget: 0,
+      policy: 0,
+    });
 
-    expect(ready.sessionState).toBe("READY_AT_CURRENT_HEAD");
-    expect(ready.metrics.allowDecisions).toBe(3);
-    expect(ready.gate.effectsInSession).toBe(0);
+    let ready: SessionDashboardSnapshot | null = null;
+    try {
+      await waitUntil(() => {
+        const snapshot = service.getSnapshot(created.sessionId);
+        const budgetAttempt = snapshot.agents.find(
+          (agent) => agent.role === "budget",
+        )!.inFlightAttempt;
+        return (
+          agents.dispatchCounts.inventory === 1 &&
+          agents.dispatchCounts.budget === 1 &&
+          agents.dispatchCounts.policy === 1 &&
+          snapshot.sessionState === "COLLECTING" &&
+          (budgetAttempt?.status === "QUEUED" ||
+            budgetAttempt?.status === "RUNNING")
+        );
+      });
+      const collecting = service.getSnapshot(created.sessionId);
+      expect(collecting.sessionState).toBe("COLLECTING");
+      expect(
+        collecting.agents.find((agent) => agent.role === "budget")!
+          .inFlightAttempt?.status,
+      ).toMatch(/QUEUED|RUNNING/);
+      await expect(service.resetDemo()).rejects.toMatchObject({
+        statusCode: 409,
+        body: { error: "AGENTS_BUSY" },
+      });
+    } finally {
+      agents.releaseInitialRuns();
+      ready = await waitForSessionState(service, created.sessionId, [
+        "READY_AT_CURRENT_HEAD",
+      ]);
+    }
+
+    expect(ready!.sessionState).toBe("READY_AT_CURRENT_HEAD");
+    expect(ready!.metrics.allowDecisions).toBe(3);
+    expect(ready!.gate.effectsInSession).toBe(0);
     expect(agents.dispatchCounts).toEqual({ inventory: 1, budget: 1, policy: 1 });
     const issuedPermits = store
       .snapshot()
-      .permits.filter((permit) => permit.sessionId === ready.sessionId);
+      .permits.filter((permit) => permit.sessionId === ready!.sessionId);
     expect(issuedPermits).toHaveLength(1);
     expect(issuedPermits[0]).toMatchObject({
       status: "ISSUED",
       consumedAt: null,
     });
 
-    const request = { expectedSessionRevision: ready.sessionRevision };
+    const request = { expectedSessionRevision: ready!.sessionRevision };
     const [left, right] = await Promise.all([
-      service.commit(ready.sessionId, request),
-      service.commit(ready.sessionId, request),
+      service.commit(ready!.sessionId, request),
+      service.commit(ready!.sessionId, request),
     ]);
-    const lostResponseRetry = await service.commit(ready.sessionId, request);
+    const lostResponseRetry = await service.commit(ready!.sessionId, request);
 
     expect(left.status).toBe("COMMITTED");
     expect(right.status).toBe("COMMITTED");
@@ -453,7 +530,7 @@ describe("EpochGuardService", () => {
     const committedDatabase = store.snapshot();
     expect(committedDatabase.effects).toHaveLength(1);
     const consumedPermits = committedDatabase.permits.filter(
-      (permit) => permit.sessionId === ready.sessionId,
+      (permit) => permit.sessionId === ready!.sessionId,
     );
     expect(consumedPermits).toHaveLength(1);
     expect(consumedPermits[0]).toMatchObject({
@@ -461,12 +538,15 @@ describe("EpochGuardService", () => {
       status: "CONSUMED",
     });
     expect(consumedPermits[0]!.consumedAt).not.toBeNull();
-    expect(service.getSnapshot(ready.sessionId).gate.effectsInSession).toBe(1);
+    expect(service.getSnapshot(ready!.sessionId).gate.effectsInSession).toBe(1);
   });
 
   it("fails a stale-head Commit as COMMIT_RACE with an exact transient diagnostic", async () => {
     const { service, store, requestFor } = await createHarness();
-    const ready = await service.createSession(requestFor("normal-world-v1"));
+    const created = await service.createSession(requestFor("normal-world-v1"));
+    const ready = await waitForSessionState(service, created.sessionId, [
+      "READY_AT_CURRENT_HEAD",
+    ]);
     const ledger = new WorldLedger({ now: () => NOW });
     await store.mutate((database) => {
       ledger.commit(database, {
@@ -535,9 +615,13 @@ describe("EpochGuardService", () => {
 
   it("blocks the Impossible first cut, refreshes only Budget, and ends DENY with no Effect", async () => {
     const { service, store, requestFor, agents } = await createHarness();
-    const blocked = await service.createSession(
+    const created = await service.createSession(
       requestFor("impossible-collage-v1"),
     );
+    expect(created.sessionState).toBe("DISPATCHING");
+    const blocked = await waitForSessionState(service, created.sessionId, [
+      "BLOCKED_NO_CUT",
+    ]);
 
     expect(blocked.sessionState).toBe("BLOCKED_NO_CUT");
     expect(blocked.metrics.allowDecisions).toBe(3);
@@ -601,9 +685,12 @@ describe("EpochGuardService", () => {
 
   it("retains the completed selective RefreshPlan through READY and Commit", async () => {
     const { service, store, requestFor, agents } = await createHarness();
-    const blocked = await service.createSession(
+    const created = await service.createSession(
       requestFor("impossible-collage-v1"),
     );
+    const blocked = await waitForSessionState(service, created.sessionId, [
+      "BLOCKED_NO_CUT",
+    ]);
     agents.allowRefreshBudgetDecision();
 
     const ready = await service.refresh(blocked.sessionId, {
@@ -672,9 +759,12 @@ describe("EpochGuardService", () => {
 
   it("exposes a lost Refresh as CLAIMED and rejects a duplicate without a second Run", async () => {
     const { service, store, requestFor, agents } = await createHarness();
-    const blocked = await service.createSession(
+    const created = await service.createSession(
       requestFor("impossible-collage-v1"),
     );
+    const blocked = await waitForSessionState(service, created.sessionId, [
+      "BLOCKED_NO_CUT",
+    ]);
     const beforeClaim = store.snapshot();
     const initialBudgetAssignmentIds = new Set(
       beforeClaim.runAssignments
@@ -800,9 +890,12 @@ describe("EpochGuardService", () => {
 
   it("keeps a terminal claimed Budget refresh publicly visible after Run failure", async () => {
     const { service, store, requestFor, agents } = await createHarness();
-    const blocked = await service.createSession(
+    const created = await service.createSession(
       requestFor("impossible-collage-v1"),
     );
+    const blocked = await waitForSessionState(service, created.sessionId, [
+      "BLOCKED_NO_CUT",
+    ]);
     agents.failRefreshBudgetRun();
 
     await expect(
@@ -834,9 +927,12 @@ describe("EpochGuardService", () => {
 
   it("keeps a rejected refresh output attached to its claimed Budget Attempt", async () => {
     const { service, store, requestFor, agents } = await createHarness();
-    const blocked = await service.createSession(
+    const created = await service.createSession(
       requestFor("impossible-collage-v1"),
     );
+    const blocked = await waitForSessionState(service, created.sessionId, [
+      "BLOCKED_NO_CUT",
+    ]);
     agents.rejectRefreshBudgetOutput();
 
     const failed = await service.refresh(blocked.sessionId, {
@@ -868,17 +964,23 @@ describe("EpochGuardService", () => {
     const { service, store, requestFor, agents } = await createHarness();
     agents.prepareInitialFanOutDispatchFailure("budget");
 
-    const creating = service.createSession(requestFor("normal-world-v1"));
-    await agents.waitForInitialFanOutDispatches();
-    expect(agents.initialFanOutStartedRoles()).toEqual(new Set(ROLES));
-    expect(agents.dispatchCounts).toEqual({
-      inventory: 1,
-      budget: 1,
-      policy: 1,
-    });
-    agents.releaseInitialFanOutDispatches();
+    const created = await service.createSession(requestFor("normal-world-v1"));
+    expect(created.sessionState).toBe("DISPATCHING");
+    try {
+      await agents.waitForInitialFanOutDispatches();
+      expect(agents.initialFanOutStartedRoles()).toEqual(new Set(ROLES));
+      expect(agents.dispatchCounts).toEqual({
+        inventory: 1,
+        budget: 1,
+        policy: 1,
+      });
+    } finally {
+      agents.releaseInitialFanOutDispatches();
+    }
 
-    const failed = await creating;
+    const failed = await waitForSessionState(service, created.sessionId, [
+      "FAILED",
+    ]);
     expect(failed.sessionState).toBe("FAILED");
     expect(failed.gate.effectsInSession).toBe(0);
     expect(failed.latestDiagnostics).toEqual(
@@ -890,6 +992,14 @@ describe("EpochGuardService", () => {
           role: "budget",
         }),
       ]),
+    );
+    await waitUntil(() =>
+      store
+        .snapshot()
+        .runAssignments.filter(
+          (assignment) => assignment.sessionId === created.sessionId,
+        )
+        .every((assignment) => assignment.status === "REJECTED"),
     );
     const database = store.snapshot();
     expect(database.sessions).toHaveLength(1);
@@ -921,7 +1031,48 @@ describe("EpochGuardService", () => {
         }),
       ]),
     );
-    expect(service.getSnapshot(session.sessionId)).toEqual(failed);
+    expect(service.getSnapshot(session.sessionId)).toMatchObject({
+      sessionId: failed.sessionId,
+      sessionRevision: failed.sessionRevision,
+      sessionState: "FAILED",
+      gate: { effectsInSession: 0 },
+    });
+  });
+
+  it("contains malformed initial output in the background and exposes a FAILED snapshot", async () => {
+    const { service, store, requestFor, agents } = await createHarness();
+    agents.rejectInitialOutput("policy");
+
+    const created = await service.createSession(requestFor("normal-world-v1"));
+    expect(created.sessionState).toBe("DISPATCHING");
+    const failed = await waitForSessionState(service, created.sessionId, [
+      "FAILED",
+    ]);
+
+    expect(failed.sessionId).toBe(created.sessionId);
+    expect(failed.gate).toMatchObject({
+      state: "FAILED",
+      effectsInSession: 0,
+    });
+    expect(failed.latestDiagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "SYSTEM_FAILURE",
+          stage: "PARSE",
+          reasonCode: "OUTPUT_MALFORMED",
+          role: "policy",
+        }),
+      ]),
+    );
+    expect(agents.dispatchCounts).toEqual({
+      inventory: 1,
+      budget: 1,
+      policy: 1,
+    });
+    const database = store.snapshot();
+    expect(database.rejectedOutputArtifacts).toHaveLength(1);
+    expect(database.permits).toHaveLength(0);
+    expect(database.effects).toHaveLength(0);
   });
 
   it("reserves one concurrent Create and returns AGENTS_BUSY before duplicate dispatch", async () => {
@@ -940,12 +1091,23 @@ describe("EpochGuardService", () => {
       statusCode: 409,
       body: { error: "AGENTS_BUSY" },
     });
+    const created = settled.find(
+      (item): item is PromiseFulfilledResult<SessionDashboardSnapshot> =>
+        item.status === "fulfilled",
+    )!.value;
+    expect(created.sessionState).toBe("DISPATCHING");
+    await waitForSessionState(service, created.sessionId, [
+      "READY_AT_CURRENT_HEAD",
+    ]);
     expect(agents.dispatchCounts).toEqual({ inventory: 1, budget: 1, policy: 1 });
   });
 
   it("recovers a persisted DISPATCHING Session as an idempotent public INTERRUPTED snapshot", async () => {
     const { service, restartService, store, requestFor } = await createHarness();
-    const ready = await service.createSession(requestFor("normal-world-v1"));
+    const created = await service.createSession(requestFor("normal-world-v1"));
+    const ready = await waitForSessionState(service, created.sessionId, [
+      "READY_AT_CURRENT_HEAD",
+    ]);
     await store.mutate((database) => {
       const session = database.sessions.find(
         (candidate) => candidate.sessionId === ready.sessionId,
@@ -1012,9 +1174,12 @@ describe("EpochGuardService", () => {
   it("preserves BLOCKED_NO_CUT across restart and can still refresh to DENY", async () => {
     const { agents, forkPersistedService, service, requestFor } =
       await createHarness();
-    const blocked = await service.createSession(
+    const created = await service.createSession(
       requestFor("impossible-collage-v1"),
     );
+    const blocked = await waitForSessionState(service, created.sessionId, [
+      "BLOCKED_NO_CUT",
+    ]);
     const restarted = await forkPersistedService();
     await restarted.service.initialize();
 
@@ -1037,7 +1202,10 @@ describe("EpochGuardService", () => {
 
   it("preserves READY_AT_CURRENT_HEAD across restart and commits exactly once", async () => {
     const { forkPersistedService, service, requestFor } = await createHarness();
-    const ready = await service.createSession(requestFor("normal-world-v1"));
+    const created = await service.createSession(requestFor("normal-world-v1"));
+    const ready = await waitForSessionState(service, created.sessionId, [
+      "READY_AT_CURRENT_HEAD",
+    ]);
     const restarted = await forkPersistedService();
     await restarted.service.initialize();
 
@@ -1078,9 +1246,12 @@ describe("EpochGuardService", () => {
   it("recovers a persisted REOBSERVING claim while preserving its historical Plan and Attempt", async () => {
     const { agents, forkPersistedService, service, store, requestFor } =
       await createHarness();
-    const blocked = await service.createSession(
+    const created = await service.createSession(
       requestFor("impossible-collage-v1"),
     );
+    const blocked = await waitForSessionState(service, created.sessionId, [
+      "BLOCKED_NO_CUT",
+    ]);
     agents.failRefreshBudgetRun();
     agents.holdRefreshBudgetRun();
     const refresh = service.refresh(blocked.sessionId, {
@@ -1173,8 +1344,13 @@ describe("EpochGuardService", () => {
 
   it("uses sessionRevision for CAS rather than global snapshotRevision", async () => {
     const first = await createHarness();
-    const ready = await first.service.createSession(
+    const firstCreated = await first.service.createSession(
       first.requestFor("normal-world-v1"),
+    );
+    const ready = await waitForSessionState(
+      first.service,
+      firstCreated.sessionId,
+      ["READY_AT_CURRENT_HEAD"],
     );
     const globalBefore = first.store.snapshot().snapshotRevision;
     await first.store.mutate(() => undefined);
@@ -1186,8 +1362,13 @@ describe("EpochGuardService", () => {
     ).resolves.toMatchObject({ status: "COMMITTED" });
 
     const second = await createHarness();
-    const anotherReady = await second.service.createSession(
+    const secondCreated = await second.service.createSession(
       second.requestFor("normal-world-v1"),
+    );
+    const anotherReady = await waitForSessionState(
+      second.service,
+      secondCreated.sessionId,
+      ["READY_AT_CURRENT_HEAD"],
     );
     await second.store.mutate((database) => {
       database.sessions[0]!.sessionRevision += 1;
