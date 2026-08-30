@@ -1512,6 +1512,13 @@ describe("EpochGuardService", () => {
       const session = database.sessions.find(
         (candidate) => candidate.sessionId === ready.sessionId,
       )!;
+      const permit = database.permits.find(
+        (candidate) => candidate.permitId === session.activePermitId,
+      )!;
+      expect(permit.status).toBe("ISSUED");
+      permit.status = "REVOKED";
+      permit.consumedAt = null;
+      session.activePermitId = null;
       session.state = "DISPATCHING";
       session.sessionRevision += 1;
       session.stateUpdatedAt = NOW;
@@ -1767,6 +1774,13 @@ describe("EpochGuardService", () => {
       session.sessionRevision += 1;
       session.stateUpdatedAt = NOW;
     });
+    const beforeRecovery = restarted.store.snapshot();
+    const completedPlanBeforeRecovery = structuredClone(
+      beforeRecovery.refreshPlans.find(
+        (plan) => plan.refreshPlanId === ready.refreshPlan!.refreshPlanId,
+      )!,
+    );
+    const dispatchCountsBeforeRecovery = structuredClone(agents.dispatchCounts);
 
     await restarted.service.initialize();
     const interrupted = restarted.service.getSnapshot(ready.sessionId);
@@ -1790,7 +1804,8 @@ describe("EpochGuardService", () => {
       recoveredDatabase.refreshPlans.find(
         (plan) => plan.refreshPlanId === ready.refreshPlan!.refreshPlanId,
       ),
-    ).toMatchObject({ status: "COMPLETED" });
+    ).toEqual(completedPlanBeforeRecovery);
+    expect(agents.dispatchCounts).toEqual(dispatchCountsBeforeRecovery);
     expect(
       recoveredDatabase.permits.find(
         (permit) => permit.sessionId === ready.sessionId,
@@ -1801,6 +1816,34 @@ describe("EpochGuardService", () => {
     await restarted.service.initialize();
     expect(restarted.store.snapshot()).toEqual(recoveredDatabase);
     expect(restarted.service.getSnapshot(ready.sessionId)).toEqual(interrupted);
+  });
+
+  it("rejects an active issued Permit outside COMMITTING without publishing recovery", async () => {
+    const { forkPersistedService, service, requestFor } = await createHarness();
+    const created = await service.createSession(requestFor("normal-world-v1"));
+    const ready = await waitForSessionState(service, created.sessionId, [
+      "READY_AT_CURRENT_HEAD",
+    ]);
+    const malformed = await forkPersistedService();
+    await malformed.store.initialize();
+    await malformed.store.mutate((database) => {
+      const session = database.sessions.find(
+        (candidate) => candidate.sessionId === ready.sessionId,
+      )!;
+      const permit = database.permits.find(
+        (candidate) => candidate.permitId === session.activePermitId,
+      )!;
+      expect(permit.status).toBe("ISSUED");
+      session.state = "VALIDATING";
+      session.sessionRevision += 1;
+      session.stateUpdatedAt = NOW;
+    });
+    const beforeRecovery = malformed.store.snapshot();
+
+    await expect(malformed.service.initialize()).rejects.toThrow(
+      "In-flight Session active Permit is restricted to COMMITTING",
+    );
+    expect(malformed.store.snapshot()).toEqual(beforeRecovery);
   });
 
   it("rejects an in-flight Session whose active Permit is not ISSUED without publishing recovery", async () => {

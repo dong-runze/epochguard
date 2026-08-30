@@ -512,6 +512,11 @@ export class EpochGuardService {
       if (permits[0]!.status !== "ISSUED") {
         throw new Error("In-flight Session active Permit is not ISSUED");
       }
+      if (session.state !== "COMMITTING") {
+        throw new Error(
+          "In-flight Session active Permit is restricted to COMMITTING",
+        );
+      }
       permits[0]!.status = "REVOKED";
       permits[0]!.consumedAt = null;
     }
