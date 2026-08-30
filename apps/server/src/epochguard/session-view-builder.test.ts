@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -1574,6 +1576,125 @@ describe("single-snapshot isolation and fail-closed projection", () => {
 });
 
 describe("fixed redaction boundary", () => {
+  it("projects default prefixed UUID system IDs through a complete runtime chain", () => {
+    const database = makeDatabase();
+    const prefixedSessionId = `session_${randomUUID()}`;
+    const session = database.sessions[0]!;
+    session.sessionId = prefixedSessionId;
+    session.action.sessionId = prefixedSessionId;
+    session.action.idempotencyKey = `${prefixedSessionId}:${session.actionHash}`;
+    for (const assignment of database.runAssignments) {
+      assignment.sessionId = prefixedSessionId;
+    }
+    for (const receipt of database.receipts) {
+      receipt.sessionId = prefixedSessionId;
+    }
+    for (const attempt of database.attempts) {
+      attempt.sessionId = prefixedSessionId;
+    }
+    for (const decision of database.decisions) {
+      decision.sessionId = prefixedSessionId;
+    }
+    for (const validation of database.validations) {
+      validation.sessionId = prefixedSessionId;
+    }
+    for (const certificate of database.jointValidityCertificates) {
+      certificate.sessionId = prefixedSessionId;
+    }
+    for (const permit of database.permits) {
+      permit.sessionId = prefixedSessionId;
+      permit.idempotencyKey = session.action.idempotencyKey;
+    }
+    for (const event of database.auditEvents) {
+      event.sessionId = prefixedSessionId;
+    }
+
+    const idsByRole = new Map<
+      Role,
+      { assignmentId: string; attemptId: string; runId: string }
+    >();
+    for (const role of ROLES) {
+      const ids = {
+        assignmentId: `assignment_${randomUUID()}`,
+        attemptId: `attempt_${randomUUID()}`,
+        runId: `run_${randomUUID()}`,
+      };
+      idsByRole.set(role, ids);
+      const assignment = database.runAssignments.find(
+        (candidate) => candidate.role === role,
+      )!;
+      const receipt = database.receipts.find(
+        (candidate) => candidate.role === role,
+      )!;
+      const attempt = database.attempts.find(
+        (candidate) => candidate.role === role,
+      )!;
+      const decision = database.decisions.find(
+        (candidate) => candidate.role === role,
+      )!;
+      assignment.assignmentId = ids.assignmentId;
+      assignment.boundRunId = ids.runId;
+      assignment.evidencePackRelativePath =
+        `.epochguard/sessions/${prefixedSessionId}/${role}/${ids.assignmentId}.json`;
+      receipt.runAssignmentId = ids.assignmentId;
+      attempt.attemptId = ids.attemptId;
+      attempt.assignmentId = ids.assignmentId;
+      attempt.runId = ids.runId;
+      decision.runAssignmentId = ids.assignmentId;
+      decision.runId = ids.runId;
+    }
+
+    const result = buildSessionDashboardSnapshotFromSnapshot(
+      database,
+      prefixedSessionId,
+      NOW,
+    );
+    expect(result.sessionId).toBe(prefixedSessionId);
+    for (const agent of result.agents) {
+      const ids = idsByRole.get(agent.role)!;
+      expect(agent.activeDecision?.runId).toBe(ids.runId);
+      expect(agent.activeDecision?.runtimeProof).toMatchObject({
+        assignmentId: ids.assignmentId,
+        evidencePackRelativePath:
+          `.epochguard/sessions/${prefixedSessionId}/${agent.role}/${ids.assignmentId}.json`,
+      });
+    }
+
+    const collecting = makeCollectingDatabase();
+    const prefixedAttemptId = `attempt_${randomUUID()}`;
+    collecting.attempts[0]!.attemptId = prefixedAttemptId;
+    collecting.sessions[0]!.activeAttemptIds.inventory = prefixedAttemptId;
+    expect(snapshot(collecting).agents[0]!.inFlightAttempt?.attemptId).toBe(
+      prefixedAttemptId,
+    );
+  });
+
+  it("keeps explicit secrets blocked inside structured ID fields", () => {
+    const patDatabase = makeDatabase();
+    patDatabase.auditEvents[0]!.eventId =
+      `ghp_${"Ab3Cd5Ef7Gh9Jk2Mn4Pq6Rs8Tu0Vw1Xy"}`;
+    expect(() => snapshot(patDatabase)).toThrowError(SessionViewBuilderError);
+
+    const keyDatabase = makeDatabase();
+    const secretRunId = `sk-${"Ab3Cd5Ef7Gh9Jk2Mn4Pq6"}`;
+    keyDatabase.runAssignments[0]!.boundRunId = secretRunId;
+    keyDatabase.attempts[0]!.runId = secretRunId;
+    keyDatabase.decisions[0]!.runId = secretRunId;
+    expect(() => snapshot(keyDatabase)).toThrowError(SessionViewBuilderError);
+  });
+
+  it("still redacts a prefixed UUID when it appears in free display text", () => {
+    const database = makeDatabase();
+    const freeTextId = `session_${randomUUID()}`;
+    database.runAssignments[0]!.agentNameAtAssignment = freeTextId;
+    database.auditEvents[0]!.status = freeTextId;
+
+    const result = snapshot(database);
+    expect(JSON.stringify(result)).not.toContain(freeTextId);
+    expect(result.agents[0]!.agentNameAtAssignment).toBe("inventory Agent");
+    expect(result.events[0]!.status).toBe("REDACTED");
+  });
+
   it("redacts bare lowercase 64-hex while preserving typed digest and ID fields", () => {
     const freeTextHex64 = "a3c7e1f5".repeat(8);
     const structuredIdHex64 = "b4d8f2a6".repeat(8);

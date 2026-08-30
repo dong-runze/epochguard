@@ -198,6 +198,7 @@ function containsHighEntropySecret(
   value: string,
   context: SensitiveTextContext,
 ): boolean {
+  if (context.allowSystemId) return false;
   const isAllowedSha256Digest =
     context.allowSha256Digest && /^sha256:[0-9a-f]{64}$/.test(value);
   if (
