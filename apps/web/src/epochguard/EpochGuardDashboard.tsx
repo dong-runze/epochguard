@@ -40,6 +40,74 @@ const EVIDENCE_COPY = {
   INVALID_AT_HEAD: "Invalid at current head",
 } as const;
 
+const REQUIRED_RUNTIME_RUNS = 3;
+
+type ActiveDecision = NonNullable<
+  SessionDashboardSnapshot["agents"][number]["activeDecision"]
+>;
+type UsageField =
+  | "inputTokens"
+  | "cachedInputTokens"
+  | "outputTokens";
+
+function summarizeUsage(
+  decisions: readonly ActiveDecision[],
+  field: UsageField,
+): { total: number; reported: number } {
+  const reportedValues = decisions.flatMap((decision) => {
+    const value = decision.runtimeProof.usage?.[field];
+    return value === undefined ? [] : [value];
+  });
+  return {
+    total: reportedValues.reduce((total, value) => total + value, 0),
+    reported: reportedValues.length,
+  };
+}
+
+function formatUsageTotal(summary: { total: number; reported: number }): string {
+  return summary.reported === 0
+    ? "—"
+    : new Intl.NumberFormat("en-US").format(summary.total);
+}
+
+function formatOverlapDuration(milliseconds: number): string {
+  if (milliseconds < 1_000) return `${milliseconds} ms`;
+  return `${new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: 3,
+  }).format(milliseconds / 1_000)} s`;
+}
+
+function activeOverlapLabel(
+  snapshot: SessionDashboardSnapshot,
+  decisions: readonly ActiveDecision[],
+): string {
+  if (decisions.length !== REQUIRED_RUNTIME_RUNS) return "pending";
+
+  const intervals = decisions.flatMap((decision) => {
+    const { runStartedAt, runCompletedAt } = decision.runtimeProof;
+    if (runStartedAt === null || runCompletedAt === null) return [];
+    const start = Date.parse(runStartedAt);
+    const end = Date.parse(runCompletedAt);
+    return Number.isFinite(start) && Number.isFinite(end)
+      ? [{ start, end }]
+      : [];
+  });
+  if (intervals.length !== REQUIRED_RUNTIME_RUNS) return "unavailable";
+
+  const latestStart = Math.max(...intervals.map(({ start }) => start));
+  const earliestEnd = Math.min(...intervals.map(({ end }) => end));
+  const overlapMilliseconds = earliestEnd - latestStart;
+  if (overlapMilliseconds > 0) {
+    return `shared active overlap ${formatOverlapDuration(overlapMilliseconds)}`;
+  }
+
+  const selectiveRefreshHasStarted =
+    snapshot.refreshPlan !== null && snapshot.refreshPlan.status !== "AVAILABLE";
+  return selectiveRefreshHasStarted
+    ? "active overlap unavailable after refresh"
+    : "active overlap unavailable";
+}
+
 export interface EpochGuardDashboardProps {
   source: EpochGuardSessionSource;
   sessionId: string;
@@ -98,6 +166,93 @@ function freshnessMessage(
     return "Resolved safely. The protected effect was not released.";
   }
   return `${GATE_COPY[snapshot.gate.state]}. Effects in this session: ${snapshot.gate.effectsInSession}.`;
+}
+
+function RuntimeEvidence({
+  snapshot,
+}: {
+  snapshot: SessionDashboardSnapshot;
+}) {
+  const activeDecisions = snapshot.agents.flatMap((agent) =>
+    agent.activeDecision === null ? [] : [agent.activeDecision],
+  );
+  const uniqueActiveRunCount = new Set(
+    activeDecisions.map((decision) => decision.runId),
+  ).size;
+  const recordedThreadCount = activeDecisions.filter(
+    (decision) => decision.runtimeProof.threadId !== null,
+  ).length;
+  const usage = [
+    {
+      field: "inputTokens" as const,
+      label: "Input",
+      note: null,
+    },
+    {
+      field: "cachedInputTokens" as const,
+      label: "Cached input",
+      note: "input subset",
+    },
+    {
+      field: "outputTokens" as const,
+      label: "Output",
+      note: null,
+    },
+  ].map((item) => ({
+    ...item,
+    summary: summarizeUsage(activeDecisions, item.field),
+  }));
+
+  return (
+    <section
+      className="eg-runtime-evidence"
+      aria-label="Authoritative runtime evidence"
+    >
+      <header className="eg-runtime-evidence-header">
+        <div>
+          <h2>Authoritative runtime evidence</h2>
+          <p>Current Snapshot projection · opaque identifiers withheld</p>
+        </div>
+        <span className="eg-read-only-badge">Read only</span>
+      </header>
+      <dl
+        className="eg-runtime-evidence-list"
+        aria-label="Projected runtime evidence facts"
+      >
+        <div className="eg-runtime-fanout">
+          <dt>Initial fan-out</dt>
+          <dd>{snapshot.coordinationMode}</dd>
+        </div>
+        <div>
+          <dt>Unique active runs</dt>
+          <dd>{uniqueActiveRunCount}/{REQUIRED_RUNTIME_RUNS}</dd>
+        </div>
+        <div>
+          <dt>Threads recorded</dt>
+          <dd>{recordedThreadCount}/{REQUIRED_RUNTIME_RUNS}</dd>
+        </div>
+        <div className="eg-runtime-timing">
+          <dt>Current active timing</dt>
+          <dd>{activeOverlapLabel(snapshot, activeDecisions)}</dd>
+        </div>
+        <div className="eg-runtime-usage-item">
+          <dt>Token usage</dt>
+          <dd className="eg-runtime-usage">
+            {usage.map(({ field, label, note, summary }) => (
+              <span key={field}>
+                <b>{label}</b>
+                <strong>{formatUsageTotal(summary)}</strong>
+                <small>
+                  {note === null ? "" : `${note} · `}reported {summary.reported}/
+                  {REQUIRED_RUNTIME_RUNS}
+                </small>
+              </span>
+            ))}
+          </dd>
+        </div>
+      </dl>
+    </section>
+  );
 }
 
 function AgentCard({
@@ -329,6 +484,8 @@ export function EpochGuardDashboard({
               </button>
             </div>
           ) : null}
+
+          <RuntimeEvidence snapshot={snapshot} />
 
           <div className="eg-summary-grid">
             <article className="eg-summary-card">
