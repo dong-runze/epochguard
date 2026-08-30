@@ -146,6 +146,8 @@ const SENSITIVE_TEXT_PATTERNS = [
   /\b(?:password|secret|api[_-]?key|token|credential|private[_-]?key)\s*[:=]\s*\S+/i,
   /\b[A-Z][A-Z0-9_]{2,}\s*=\s*\S+/,
   /\bBearer\s+[A-Za-z0-9._~+\/-]+/i,
+  /\bBasic\s+[A-Za-z0-9+/=]+/i,
+  /\b(?:Proxy-)?Authorization\s*[:=]\s*\S+(?:\s+\S+)?/i,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
   /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/i,
   /\bsk-(?:proj-|svcacct-|ant-)?[A-Za-z0-9_-]{8,}/i,
@@ -174,23 +176,39 @@ function tokenEntropy(value: string): number {
   return entropy;
 }
 
-function isKnownStructuredToken(
-  value: string,
-  containingValue: string,
-  offset: number,
-): boolean {
-  if (/^[0-9A-HJKMNP-TV-Z]{26}$/.test(value)) return true;
-  if (/^[0-9a-f]{64}$/i.test(value)) {
-    return containingValue.slice(Math.max(0, offset - 7), offset) === "sha256:";
-  }
-  return false;
-}
+type SensitiveTextContext = {
+  readonly allowSystemId: boolean;
+  readonly allowSha256Digest: boolean;
+};
 
-function containsHighEntropySecret(value: string): boolean {
+const FREE_TEXT_CONTEXT: SensitiveTextContext = {
+  allowSystemId: false,
+  allowSha256Digest: false,
+};
+
+const SYSTEM_ID_CONTEXT: SensitiveTextContext = {
+  allowSystemId: true,
+  allowSha256Digest: false,
+};
+
+function containsHighEntropySecret(
+  value: string,
+  context: SensitiveTextContext,
+): boolean {
   for (const match of value.matchAll(/[A-Za-z0-9+_=-]{24,}/g)) {
     const token = match[0];
     const offset = match.index ?? 0;
-    if (isKnownStructuredToken(token, value, offset)) continue;
+    if (/^[0-9A-HJKMNP-TV-Z]{26}$/.test(token)) {
+      if (context.allowSystemId) continue;
+      return true;
+    }
+    if (
+      /^[0-9a-f]{64}$/i.test(token) &&
+      value.slice(Math.max(0, offset - 7), offset) === "sha256:"
+    ) {
+      if (context.allowSha256Digest) continue;
+      return true;
+    }
     const characterClasses = [
       /[a-z]/.test(token),
       /[A-Z]/.test(token),
@@ -208,10 +226,13 @@ function containsHighEntropySecret(value: string): boolean {
   return false;
 }
 
-function containsSensitiveText(value: string): boolean {
+function containsSensitiveText(
+  value: string,
+  context: SensitiveTextContext = FREE_TEXT_CONTEXT,
+): boolean {
   return (
     SENSITIVE_TEXT_PATTERNS.some((pattern) => pattern.test(value)) ||
-    containsHighEntropySecret(value)
+    containsHighEntropySecret(value, context)
   );
 }
 
@@ -234,7 +255,7 @@ function sanitizeEventToken(value: string, fallback: string): string {
 }
 
 function sanitizeOpaqueDisplayId(value: string, fallback: string): string {
-  return containsSensitiveText(value) ||
+  return containsSensitiveText(value, SYSTEM_ID_CONTEXT) ||
     !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value)
     ? fallback
     : value;
@@ -243,18 +264,64 @@ function sanitizeOpaqueDisplayId(value: string, fallback: string): string {
 function sanitizeThreadId(value: string | null): string | null {
   if (value === null) return null;
   const normalized = value.trim();
-  return !containsSensitiveText(normalized) &&
+  return !containsSensitiveText(normalized, SYSTEM_ID_CONTEXT) &&
     /^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/.test(normalized)
     ? normalized
     : null;
 }
 
+function isSafeStructuredEvidencePackPath(value: string): boolean {
+  const match =
+    /^\.epochguard\/sessions\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/(inventory|budget|policy)\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\.json$/.exec(
+      value,
+    );
+  return (
+    match !== null &&
+    match[1] !== undefined &&
+    match[3] !== undefined &&
+    !containsSensitiveText(match[1], SYSTEM_ID_CONTEXT) &&
+    !containsSensitiveText(match[3], SYSTEM_ID_CONTEXT)
+  );
+}
+
 function assertSnapshotContainsNoSensitiveMaterial(
   snapshot: SessionDashboardSnapshot,
 ): void {
-  const visit = (value: unknown, path: string): void => {
+  const isSystemIdField = (
+    key: string | null,
+    parent: Record<string, unknown> | null,
+  ): boolean =>
+    key !== null &&
+    (/Ids?$/.test(key) ||
+      key === "roleProfileVersion" ||
+      key === "promptTemplateVersion" ||
+      (key === "id" &&
+        typeof parent?.kind === "string" &&
+        parent.kind !== "ENVELOPE_DIGEST"));
+  const isDigestField = (
+    key: string | null,
+    parent: Record<string, unknown> | null,
+  ): boolean =>
+    key !== null &&
+    (/(?:Hash|Digest)$/.test(key) ||
+      (key === "id" && parent?.kind === "ENVELOPE_DIGEST"));
+  const visit = (
+    value: unknown,
+    path: string,
+    key: string | null,
+    parent: Record<string, unknown> | null,
+  ): void => {
     if (typeof value === "string") {
-      if (containsSensitiveText(value)) {
+      if (
+        !(
+          key === "evidencePackRelativePath" &&
+          isSafeStructuredEvidencePackPath(value)
+        ) &&
+        containsSensitiveText(value, {
+          allowSystemId: isSystemIdField(key, parent),
+          allowSha256Digest: isDigestField(key, parent),
+        })
+      ) {
         projectionFailure(
           snapshot.sessionId,
           snapshot.snapshotRevision,
@@ -264,16 +331,19 @@ function assertSnapshotContainsNoSensitiveMaterial(
       return;
     }
     if (Array.isArray(value)) {
-      value.forEach((item, index) => visit(item, `${path}[${index}]`));
+      value.forEach((item, index) =>
+        visit(item, `${path}[${index}]`, key, parent),
+      );
       return;
     }
     if (value !== null && typeof value === "object") {
-      for (const [key, childValue] of Object.entries(value)) {
-        visit(childValue, `${path}.${key}`);
+      const record = value as Record<string, unknown>;
+      for (const [childKey, childValue] of Object.entries(record)) {
+        visit(childValue, `${path}.${childKey}`, childKey, record);
       }
     }
   };
-  visit(snapshot, "snapshot");
+  visit(snapshot, "snapshot", null, null);
 }
 
 function parseDatabase(input: unknown, sessionId: string): EpochDatabase {
@@ -1246,11 +1316,68 @@ function activePermit(
   return permit;
 }
 
+function assertEffectLedgerClosure(
+  database: EpochDatabase,
+  session: EpochSession,
+): void {
+  const sessionPermits = database.permits.filter(
+    (permit) => permit.sessionId === session.sessionId,
+  );
+  const sessionEffects = database.effects.filter(
+    (effect) => effect.sessionId === session.sessionId,
+  );
+  for (const permit of sessionPermits) {
+    const linkedEffects = database.effects.filter(
+      (effect) => effect.permitId === permit.permitId,
+    );
+    const consumed = permit.status === "CONSUMED";
+    const effect = linkedEffects[0] ?? null;
+    if (
+      permit.actionHash !== session.actionHash ||
+      permit.idempotencyKey !== session.action.idempotencyKey ||
+      consumed !== (permit.consumedAt !== null) ||
+      linkedEffects.length !== (consumed ? 1 : 0) ||
+      (permit.consumedAt !== null &&
+        Date.parse(permit.consumedAt) < Date.parse(permit.issuedAt)) ||
+      (effect !== null &&
+        (permit.consumedAt === null ||
+          effect.sessionId !== session.sessionId ||
+          effect.actionHash !== session.actionHash ||
+          effect.idempotencyKey !== session.action.idempotencyKey ||
+          effect.idempotencyKey !== permit.idempotencyKey ||
+          effect.dependencySetHash !== permit.dependencySetHash ||
+          effect.jointValidityCertificateId !==
+            permit.jointValidityCertificateId ||
+          effect.createdAt !== permit.consumedAt))
+    ) {
+      projectionFailure(
+        session.sessionId,
+        database.snapshotRevision,
+        "Effect ledger contains a Permit without an exact atomic consumption closure.",
+      );
+    }
+  }
+  if (
+    sessionEffects.some(
+      (effect) =>
+        sessionPermits.filter((permit) => permit.permitId === effect.permitId)
+          .length !== 1,
+    )
+  ) {
+    projectionFailure(
+      session.sessionId,
+      database.snapshotRevision,
+      "Effect ledger contains an Effect outside the Session's Permit chain.",
+    );
+  }
+}
+
 function buildGate(
   context: ProjectionContext,
   latestReason: SessionDashboardSnapshot["gate"]["reasonCode"],
 ): SessionDashboardSnapshot["gate"] {
   const { database, session, jointValidity } = context;
+  assertEffectLedgerClosure(database, session);
   const permit = activePermit(database, session);
   const effects = database.effects.filter(
     (effect) => effect.sessionId === session.sessionId,
@@ -1276,9 +1403,23 @@ function buildGate(
     );
   }
   if (permit !== null && permitAllowed) {
+    const permitEffects = database.effects.filter(
+      (candidate) => candidate.permitId === permit.permitId,
+    );
+    const idempotentEffects = database.effects.filter(
+      (candidate) =>
+        candidate.idempotencyKey === session.action.idempotencyKey,
+    );
+    const consumed = permit.status === "CONSUMED";
     if (
       permit.validatedHead !== database.headSeq ||
       permit.status !== (session.state === "COMMITTED" ? "CONSUMED" : "ISSUED") ||
+      permit.idempotencyKey !== session.action.idempotencyKey ||
+      consumed !== (permit.consumedAt !== null) ||
+      (permit.consumedAt !== null &&
+        Date.parse(permit.consumedAt) < Date.parse(permit.issuedAt)) ||
+      permitEffects.length !== (session.state === "COMMITTED" ? 1 : 0) ||
+      idempotentEffects.length !== (session.state === "COMMITTED" ? 1 : 0) ||
       context.activeValidation?.jointValidityCertificateId !==
         permit.jointValidityCertificateId ||
       context.activeValidation?.dependencySetHash !== permit.dependencySetHash
@@ -1294,10 +1435,15 @@ function buildGate(
     if (
       effect === null ||
       permit === null ||
+      permit.consumedAt === null ||
       effect.permitId !== permit.permitId ||
+      effect.sessionId !== session.sessionId ||
       effect.actionHash !== session.actionHash ||
+      effect.idempotencyKey !== session.action.idempotencyKey ||
+      effect.idempotencyKey !== permit.idempotencyKey ||
       effect.dependencySetHash !== permit.dependencySetHash ||
-      effect.jointValidityCertificateId !== permit.jointValidityCertificateId
+      effect.jointValidityCertificateId !== permit.jointValidityCertificateId ||
+      effect.createdAt !== permit.consumedAt
     ) {
       projectionFailure(
         session.sessionId,

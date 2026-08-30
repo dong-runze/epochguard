@@ -19,7 +19,10 @@ import {
   SessionViewBuilderError,
   buildSessionDashboardSnapshotFromSnapshot,
 } from "./session-view-builder.js";
-import { assertSafetyDiagnosticCausalChains } from "./safety-diagnostics.js";
+import {
+  SafetyDiagnosticIntegrityError,
+  assertSafetyDiagnosticCausalChains,
+} from "./safety-diagnostics.js";
 
 const SESSION_ID = "session_eg05";
 const HEAD = 21;
@@ -298,7 +301,7 @@ function makeDatabase(
               dependencySetHash,
               jointValidityCertificateId: "jvc_current",
               validatedHead: HEAD,
-              idempotencyKey: `${SESSION_ID}:permit_current`,
+              idempotencyKey: ACTION.idempotencyKey,
               status: "ISSUED",
               issuedAt: LATER,
               consumedAt: null,
@@ -501,6 +504,92 @@ function makeNoCutDatabase(): EpochDatabase {
     },
   ];
   database.auditEvents[0]!.status = "BLOCKED_NO_CUT";
+  return EpochDatabaseSchema.parse(database);
+}
+
+function makeHistoricalStaleDatabase(): EpochDatabase {
+  const database = makeDatabase();
+  database.snapshotRevision = 205;
+  const session = database.sessions[0]!;
+  session.state = "HISTORICAL_STALE";
+  session.sessionRevision = 8;
+  session.activeValidationId = "validation_historical";
+  session.activeRefreshPlanId = "refresh_historical_budget";
+  session.activePermitId = null;
+  const budgetVersion = database.resourceVersions.find(
+    (version) => version.resourceId === "resource_budget",
+  )!;
+  budgetVersion.validUntilSeq = 20;
+  const decisionIds = ROLES.map((role) => certificateId(role)) as [
+    string,
+    string,
+    string,
+  ];
+  const dependencySetHash = snapshotReceiptDependencySetHash(
+    ROLES.map((role) => receiptId(role)),
+  );
+  database.validations = [
+    {
+      validationId: "validation_historical",
+      sessionId: SESSION_ID,
+      actionHash: GOLDEN_ACTION_HASH,
+      baseSessionRevision: 7,
+      decisionCertificateIds: decisionIds,
+      dependencySetHash,
+      validatedHead: HEAD,
+      outcome: "HISTORICAL_BUT_STALE_NOW",
+      lowerBound: 12,
+      upperBound: 20,
+      jointValidityCertificateId: null,
+      noCutProofId: null,
+      refreshPlanId: "refresh_historical_budget",
+      verificationLatencyMs: 6,
+      createdAt: LATER,
+    },
+  ];
+  database.jointValidityCertificates = [];
+  database.permits = [];
+  database.refreshPlans = [
+    {
+      refreshPlanId: "refresh_historical_budget",
+      sessionId: SESSION_ID,
+      baseSessionRevision: 7,
+      validatedHead: HEAD,
+      dependencySetHash,
+      activeDecisionCertificateIds: decisionIds,
+      agentIds: [roleAgentId("budget")],
+      status: "AVAILABLE",
+      claimedAttemptId: null,
+    },
+  ];
+  database.diagnostics = [
+    {
+      diagnosticId: "diagnostic_historical",
+      sessionId: SESSION_ID,
+      actionHash: GOLDEN_ACTION_HASH,
+      sessionRevision: 8,
+      fixtureRef: null,
+      kind: "EXPECTED_BLOCK",
+      stage: "VALIDATE",
+      reasonCode: "HISTORICAL_BUT_STALE_NOW",
+      role: null,
+      attemptId: null,
+      assignmentId: null,
+      runId: null,
+      artifactRefs: [
+        { kind: "VALIDATION", id: "validation_historical" },
+        { kind: "REFRESH_PLAN", id: "refresh_historical_budget" },
+        { kind: "RECEIPT", id: receiptId("budget") },
+      ],
+      causedByDiagnosticIds: [],
+      expected: null,
+      actual: null,
+      rejectedOutputArtifactId: null,
+      auditSeq: 1,
+      recommendedAction: "REOBSERVE_INVALID",
+    },
+  ];
+  database.auditEvents[0]!.status = "HISTORICAL_STALE";
   return EpochDatabaseSchema.parse(database);
 }
 
@@ -811,7 +900,7 @@ function makeCommittedDatabase(): EpochDatabase {
     {
       effectId: "effect_campaign",
       type: "PUBLISH_CAMPAIGN",
-      idempotencyKey: `${SESSION_ID}:effect_campaign`,
+      idempotencyKey: ACTION.idempotencyKey,
       permitId: permit.permitId,
       sessionId: SESSION_ID,
       actionHash: GOLDEN_ACTION_HASH,
@@ -942,6 +1031,65 @@ describe("SessionViewBuilder golden projections", () => {
 });
 
 describe("single-snapshot isolation and fail-closed projection", () => {
+  it("rejects damaged Effect-to-Permit consumption ledgers", () => {
+    const corruptions: Array<{
+      name: string;
+      apply: (database: EpochDatabase) => void;
+    }> = [
+      {
+        name: "Permit idempotency differs from Action",
+        apply: (database) => {
+          database.permits[0]!.idempotencyKey = "fictional-permit-key";
+        },
+      },
+      {
+        name: "Effect idempotency differs from Permit and Action",
+        apply: (database) => {
+          database.effects[0]!.idempotencyKey = "fictional-effect-key";
+        },
+      },
+      {
+        name: "CONSUMED Permit has no consumedAt",
+        apply: (database) => {
+          database.permits[0]!.consumedAt = null;
+        },
+      },
+      {
+        name: "inactive CONSUMED Permit has no Effect closure",
+        apply: (database) => {
+          database.permits.push({
+            ...database.permits[0]!,
+            permitId: "permit_orphan_consumed",
+          });
+        },
+      },
+      {
+        name: "Effect is not atomically timestamped with Permit consumption",
+        apply: (database) => {
+          database.effects[0]!.createdAt = "2026-08-29T12:04:00.000Z";
+        },
+      },
+      {
+        name: "another Session reuses the consumed Permit",
+        apply: (database) => {
+          database.effects.push({
+            ...database.effects[0]!,
+            effectId: "effect_fictional_duplicate",
+            sessionId: "session_fictional_other",
+          });
+        },
+      },
+    ];
+
+    for (const corruption of corruptions) {
+      const database = makeCommittedDatabase();
+      corruption.apply(database);
+      expect(() => snapshot(database), corruption.name).toThrowError(
+        SessionViewBuilderError,
+      );
+    }
+  });
+
   it("reads Store once, clones immediately, and cannot mix a concurrently mutated revision", () => {
     const firstRevision = makeDatabase();
     const nextRevision = makeCommittedDatabase();
@@ -1042,12 +1190,113 @@ describe("single-snapshot isolation and fail-closed projection", () => {
     );
   });
 
+  it("rejects future-head and forged No-Cut RefreshPlan owner closures", () => {
+    const corruptions: Array<{
+      name: string;
+      apply: (database: EpochDatabase) => void;
+    }> = [
+      {
+        name: "future validated head",
+        apply: (database) => {
+          database.validations[0]!.validatedHead = HEAD + 1;
+          database.noCutProofs[0]!.validatedAtHead = HEAD + 1;
+          database.refreshPlans[0]!.validatedHead = HEAD + 1;
+        },
+      },
+      {
+        name: "Proof refresh owner differs from canonical invalid owner",
+        apply: (database) => {
+          database.noCutProofs[0]!.refreshAgentIds = [
+            roleAgentId("inventory"),
+          ];
+        },
+      },
+      {
+        name: "RefreshPlan base revision differs from Validation",
+        apply: (database) => {
+          database.refreshPlans[0]!.baseSessionRevision += 1;
+        },
+      },
+      {
+        name: "RefreshPlan dependency differs from Validation",
+        apply: (database) => {
+          database.refreshPlans[0]!.dependencySetHash = sha256Digest(
+            "fictional refresh dependency",
+          );
+        },
+      },
+      {
+        name: "RefreshPlan Decision tuple is reordered",
+        apply: (database) => {
+          database.refreshPlans[0]!.activeDecisionCertificateIds = [
+            certificateId("budget"),
+            certificateId("inventory"),
+            certificateId("policy"),
+          ];
+        },
+      },
+      {
+        name: "RefreshPlan owner differs from invalid evidence owner",
+        apply: (database) => {
+          database.refreshPlans[0]!.agentIds = [roleAgentId("inventory")];
+        },
+      },
+    ];
+
+    for (const corruption of corruptions) {
+      const database = makeNoCutDatabase();
+      corruption.apply(database);
+      expect(() => snapshot(database), corruption.name).toThrowError(
+        SessionViewBuilderError,
+      );
+    }
+  });
+
+  it("closes historical-stale and consistent-DENY reason semantics", () => {
+    expect(() => snapshot(makeHistoricalStaleDatabase())).not.toThrow();
+    expect(() =>
+      snapshot(
+        makeDatabase({
+          inventory: "ALLOW",
+          budget: "ALLOW",
+          policy: "DENY",
+        }),
+      ),
+    ).not.toThrow();
+
+    const forgedHistorical = makeHistoricalStaleDatabase();
+    forgedHistorical.refreshPlans[0]!.agentIds = [roleAgentId("inventory")];
+    expect(() => snapshot(forgedHistorical)).toThrowError(
+      SessionViewBuilderError,
+    );
+
+    const forgedDenyOutcome = makeRecoveredDenyDatabase();
+    forgedDenyOutcome.validations.find(
+      (validation) => validation.validationId === "validation_recovered_deny",
+    )!.outcome = "VALID_CURRENT_ALLOW";
+    expect(() => snapshot(forgedDenyOutcome)).toThrowError(
+      SessionViewBuilderError,
+    );
+
+    const unrelatedDenyReceipt = makeRecoveredDenyDatabase();
+    unrelatedDenyReceipt.diagnostics.find(
+      (diagnostic) => diagnostic.diagnosticId === "diagnostic_recovered_deny",
+    )!.artifactRefs = [
+      { kind: "VALIDATION", id: "validation_recovered_deny" },
+      { kind: "REFRESH_PLAN", id: "refresh_budget" },
+      { kind: "RECEIPT", id: receiptId("inventory") },
+    ];
+    expect(() => snapshot(unrelatedDenyReceipt)).toThrowError(
+      SessionViewBuilderError,
+    );
+  });
+
   it("accepts the authoritative COMMIT_RACE chain and rejects an unrelated Permit", () => {
     const diagnostic = {
       diagnosticId: "diagnostic_commit_race",
       sessionId: SESSION_ID,
       actionHash: GOLDEN_ACTION_HASH,
-      sessionRevision: 8,
+      sessionRevision: 9,
       fixtureRef: null,
       kind: "TRANSIENT_RACE" as const,
       stage: "COMMIT" as const,
@@ -1067,32 +1316,159 @@ describe("single-snapshot isolation and fail-closed projection", () => {
       auditSeq: 2,
       recommendedAction: "NONE" as const,
     };
-    const valid = makeDatabase();
-    valid.diagnostics.push(diagnostic);
+    const makeRaceDatabase = (): EpochDatabase => {
+      const database = makeDatabase();
+      database.snapshotRevision = 401;
+      database.headSeq = HEAD + 1;
+      database.resourceVersions[0]!.validUntilSeq = HEAD + 1;
+      const session = database.sessions[0]!;
+      session.state = "COMMIT_RACE";
+      session.sessionRevision = 9;
+      session.activePermitId = null;
+      session.stateUpdatedAt = "2026-08-29T12:02:00.000Z";
+      database.permits[0]!.status = "REVOKED";
+      database.permits[0]!.consumedAt = null;
+      database.diagnostics.push(diagnostic);
+      database.auditEvents.push({
+        eventId: "event_commit_race",
+        sessionId: SESSION_ID,
+        actionHash: GOLDEN_ACTION_HASH,
+        sessionRevision: 9,
+        auditSeq: 11,
+        type: "SESSION_STATE",
+        status: "COMMIT_RACE",
+        role: null,
+        artifactRefs: [
+          { kind: "VALIDATION", id: "validation_current" },
+          { kind: "PERMIT", id: "permit_current" },
+        ],
+        createdAt: "2026-08-29T12:02:00.000Z",
+      });
+      return database;
+    };
+
+    const valid = makeRaceDatabase();
     expect(() => snapshot(valid)).not.toThrow();
 
-    const advancedHead = makeDatabase();
-    advancedHead.headSeq = HEAD + 1;
-    advancedHead.resourceVersions[0]!.validUntilSeq = HEAD + 1;
-    advancedHead.diagnostics.push(diagnostic);
-    expect(() =>
-      assertSafetyDiagnosticCausalChains(advancedHead, SESSION_ID),
-    ).not.toThrow();
+    const retainedRevokedPermitPointer = makeRaceDatabase();
+    retainedRevokedPermitPointer.sessions[0]!.activePermitId = "permit_current";
+    expect(() => snapshot(retainedRevokedPermitPointer)).not.toThrow();
 
-    const unrelated = makeDatabase();
+    const corruptions: Array<{
+      name: string;
+      apply: (database: EpochDatabase) => void;
+    }> = [
+      {
+        name: "one Decision is not ALLOW",
+        apply: (database) => {
+          database.decisions[0]!.verdict = "DENY";
+        },
+      },
+      {
+        name: "Validation L is forged",
+        apply: (database) => {
+          database.validations[0]!.lowerBound! += 1;
+        },
+      },
+      {
+        name: "JVC Receipt interval is forged",
+        apply: (database) => {
+          database.jointValidityCertificates[0]!.intervals[0]!.from += 1;
+        },
+      },
+      {
+        name: "JVC Receipt interval is missing",
+        apply: (database) => {
+          database.jointValidityCertificates[0]!.intervals.pop();
+        },
+      },
+      {
+        name: "JVC selectedCut is not the validated head",
+        apply: (database) => {
+          database.jointValidityCertificates[0]!.selectedCutSeq = HEAD - 1;
+        },
+      },
+      {
+        name: "JVC denies current-head coverage",
+        apply: (database) => {
+          database.jointValidityCertificates[0]!.currentHeadCovered = false;
+        },
+      },
+      {
+        name: "frozen registration digest differs",
+        apply: (database) => {
+          database.roleAgentRegistrations[0]!.agentsMdDigest =
+            sha256Digest("fictional changed registration");
+        },
+      },
+      {
+        name: "Permit idempotency differs from Action",
+        apply: (database) => {
+          database.permits[0]!.idempotencyKey = "fictional-race-key";
+        },
+      },
+      {
+        name: "Permit was not revoked",
+        apply: (database) => {
+          database.permits[0]!.status = "ISSUED";
+        },
+      },
+      {
+        name: "Permit predates its Validation and JVC",
+        apply: (database) => {
+          database.permits[0]!.issuedAt = "2026-08-29T11:59:59.000Z";
+        },
+      },
+      {
+        name: "active Permit pointer names an unrelated ledger entry",
+        apply: (database) => {
+          database.permits.push({
+            ...database.permits[0]!,
+            permitId: "permit_unrelated_pointer",
+            dependencySetHash: sha256Digest("unrelated pointer dependency"),
+            jointValidityCertificateId: "jvc_unrelated_pointer",
+          });
+          database.sessions[0]!.activePermitId = "permit_unrelated_pointer";
+        },
+      },
+      {
+        name: "race lifecycle event is missing",
+        apply: (database) => {
+          database.auditEvents = database.auditEvents.filter(
+            (event) => event.eventId !== "event_commit_race",
+          );
+        },
+      },
+      {
+        name: "race lifecycle event references another Permit",
+        apply: (database) => {
+          database.auditEvents.at(-1)!.artifactRefs[1] = {
+            kind: "PERMIT",
+            id: "permit_unrelated_event",
+          };
+        },
+      },
+    ];
+    for (const corruption of corruptions) {
+      const database = makeRaceDatabase();
+      corruption.apply(database);
+      expect(
+        () => assertSafetyDiagnosticCausalChains(database, SESSION_ID),
+        corruption.name,
+      ).toThrowError(SafetyDiagnosticIntegrityError);
+    }
+
+    const unrelated = makeRaceDatabase();
     unrelated.permits.push({
       ...unrelated.permits[0]!,
       permitId: "permit_unrelated",
       dependencySetHash: sha256Digest("unrelated dependency set"),
       jointValidityCertificateId: "jvc_unrelated",
     });
-    unrelated.diagnostics.push({
-      ...diagnostic,
-      artifactRefs: [
-        { kind: "VALIDATION", id: "validation_current" },
-        { kind: "PERMIT", id: "permit_unrelated" },
-      ],
-    });
+    unrelated.diagnostics[0]!.artifactRefs = [
+      { kind: "VALIDATION", id: "validation_current" },
+      { kind: "PERMIT", id: "permit_unrelated" },
+    ];
 
     expect(() => snapshot(unrelated)).toThrowError(SessionViewBuilderError);
   });
@@ -1136,6 +1512,33 @@ describe("single-snapshot isolation and fail-closed projection", () => {
 });
 
 describe("fixed redaction boundary", () => {
+  it("redacts fictitious Basic Authorization material from public text", () => {
+    const database = makeDatabase();
+    const placeholder = "Basic RklDVElUSU9VU1BST1hZ";
+    database.runAssignments[0]!.runtimeLabelAtDispatch = placeholder;
+
+    const result = snapshot(database);
+    expect(JSON.stringify(result)).not.toContain(placeholder);
+    expect(result.agents[0]!.activeDecision?.runtimeProof.runtimeLabel).toBe(
+      "redacted-runtime",
+    );
+  });
+
+  it("allows a Crockford ID only in explicit system-ID fields", () => {
+    const placeholderUlid = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    const database = makeDatabase();
+    database.runAssignments[0]!.agentNameAtAssignment = placeholderUlid;
+    database.auditEvents[0]!.status = placeholderUlid;
+    database.attempts[2]!.threadId = placeholderUlid;
+
+    const result = snapshot(database);
+    expect(result.agents[0]!.agentNameAtAssignment).toBe("inventory Agent");
+    expect(result.events[0]!.status).toBe("REDACTED");
+    expect(result.agents[2]!.activeDecision?.runtimeProof.threadId).toBe(
+      placeholderUlid,
+    );
+  });
+
   it("redacts a bare GitHub PAT from an Agent display name", () => {
     const database = makeDatabase();
     const secret = `ghp_${"Ab3Cd5Ef7Gh9Jk2Mn4Pq6Rs8Tu0Vw1Xy"}`;

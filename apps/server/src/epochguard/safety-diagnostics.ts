@@ -9,8 +9,10 @@ import {
   snapshotReceiptDependencySetHash,
   type ArtifactRef,
   type EpochDatabase,
+  type RefreshPlan,
   type SafetyDiagnostic,
   type SafetyDiagnosticView,
+  type ValidationRecord,
 } from "./types.js";
 
 export type SafetyDiagnosticIntegrityCode =
@@ -31,6 +33,12 @@ export class SafetyDiagnosticIntegrityError extends Error {
 
 const refKey = (reference: ArtifactRef): string =>
   `${reference.kind}:${reference.id}`;
+
+const ROLE_ASSIGNMENT_KEYS = {
+  inventory: "inventoryAgentId",
+  budget: "budgetAgentId",
+  policy: "policyAgentId",
+} as const;
 
 function integrityFailure(
   code: SafetyDiagnosticIntegrityCode,
@@ -451,11 +459,13 @@ function resolveDecisionReceiptEvidence(
     assignment.boundRunId !== decision.runId ||
     assignment.status !== "CONSUMED" ||
     assignment.consumedByDecisionCertificateId !== decision.certificateId ||
+    assignment.consumedAt === null ||
     attempt.sessionId !== diagnostic.sessionId ||
     attempt.actionHash !== diagnostic.actionHash ||
     attempt.agentId !== decision.agentId ||
     attempt.role !== decision.role ||
-    attempt.status !== "ACCEPTED"
+    attempt.status !== "ACCEPTED" ||
+    attempt.runCompletedAt === null
   ) {
     integrityFailure(
       "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
@@ -490,9 +500,23 @@ function resolveDecisionReceiptEvidence(
     database.roleQuerySpecs,
     (candidate) => candidate.queryHash === receipt.queryHash,
   );
+  const registration = singleMatch(
+    database.roleAgentRegistrations,
+    (candidate) =>
+      candidate.role === decision.role &&
+      candidate.agentId === decision.agentId,
+  );
   if (
     session === null ||
     query === null ||
+    registration === null ||
+    session.actionHash !== diagnostic.actionHash ||
+    session.action.sessionId !== diagnostic.sessionId ||
+    session.action.actionHash !== diagnostic.actionHash ||
+    session.frozenAssignments[ROLE_ASSIGNMENT_KEYS[decision.role]] !==
+      decision.agentId ||
+    assignment.roleProfileVersion !== registration.roleProfileVersion ||
+    assignment.agentsMdDigest !== registration.agentsMdDigest ||
     canonicalJson(query) !==
       canonicalJson(buildRoleQuerySpec(session.action, receipt.role)) ||
     query.actionHash !== diagnostic.actionHash ||
@@ -524,7 +548,186 @@ function resolveDecisionReceiptEvidence(
       "Diagnostic Receipt does not close over one authoritative ResourceVersion.",
     );
   }
-  return { decision, receipt, version };
+  return { assignment, attempt, decision, receipt, registration, version };
+}
+
+type ResolvedDiagnosticEvidence = ReturnType<
+  typeof resolveDecisionReceiptEvidence
+>;
+
+type ValidationEvidenceClosure = {
+  readonly evidence: ResolvedDiagnosticEvidence[];
+  readonly lowerBound: number;
+  readonly upperBound: number;
+  readonly invalidAgentIds: string[];
+};
+
+function intervalUntilAtHead(
+  version: ResolvedDiagnosticEvidence["version"],
+  head: number,
+): number | null {
+  return version.validUntilSeq !== null && version.validUntilSeq <= head
+    ? version.validUntilSeq
+    : null;
+}
+
+function resolveValidationEvidenceClosure(
+  database: EpochDatabase,
+  diagnostic: SafetyDiagnostic,
+  validation: ValidationRecord,
+): ValidationEvidenceClosure {
+  if (
+    validation.sessionId !== diagnostic.sessionId ||
+    validation.actionHash !== diagnostic.actionHash ||
+    validation.validatedHead > database.headSeq
+  ) {
+    integrityFailure(
+      "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
+      "Diagnostic Validation crosses its Session/Action or references a future head.",
+    );
+  }
+  const evidence = validation.decisionCertificateIds.map((decisionId, index) =>
+    resolveDecisionReceiptEvidence(database, diagnostic, decisionId, index),
+  );
+  if (
+    evidence.some(
+      ({ receipt, version }) =>
+        receipt.observedAtSeq > validation.validatedHead ||
+        version.validFromSeq > validation.validatedHead,
+    )
+  ) {
+    integrityFailure(
+      "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
+      "Diagnostic Validation depends on evidence from after its validated head.",
+    );
+  }
+  const receiptIds = evidence.map(({ receipt }) => receipt.receiptId);
+  const lowerBound = Math.max(
+    ...evidence.map(({ version }) => version.validFromSeq),
+  );
+  const upperBound = Math.min(
+    ...evidence.map(({ version }) =>
+      intervalUntilAtHead(version, validation.validatedHead) ??
+      validation.validatedHead + 1,
+    ),
+  );
+  if (
+    validation.dependencySetHash !==
+      snapshotReceiptDependencySetHash(receiptIds) ||
+    validation.lowerBound !== lowerBound ||
+    validation.upperBound !== upperBound
+  ) {
+    integrityFailure(
+      "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
+      "Diagnostic Validation does not match its Receipt dependency set and interval bounds.",
+    );
+  }
+  const invalidAgentIds = evidence
+    .filter(
+      ({ version }) =>
+        version.validFromSeq > validation.validatedHead ||
+        (version.validUntilSeq !== null &&
+          validation.validatedHead >= version.validUntilSeq),
+    )
+    .map(({ decision }) => decision.agentId);
+  return { evidence, lowerBound, upperBound, invalidAgentIds };
+}
+
+function assertJointValidityCertificateClosure(
+  database: EpochDatabase,
+  diagnostic: SafetyDiagnostic,
+  validation: ValidationRecord,
+  closure: ValidationEvidenceClosure,
+): EpochDatabase["jointValidityCertificates"][number] {
+  if (validation.jointValidityCertificateId === null) {
+    integrityFailure(
+      "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
+      "Current-world Diagnostic Validation is missing its JointValidityCertificate.",
+    );
+  }
+  const certificate = singleMatch(
+    database.jointValidityCertificates,
+    (candidate) =>
+      candidate.certificateId === validation.jointValidityCertificateId,
+  );
+  if (
+    certificate === null ||
+    certificate.validationId !== validation.validationId ||
+    certificate.sessionId !== diagnostic.sessionId ||
+    certificate.actionHash !== diagnostic.actionHash ||
+    certificate.dependencySetHash !== validation.dependencySetHash ||
+    certificate.validatedAtHead !== validation.validatedHead ||
+    certificate.selectedCutSeq !== validation.validatedHead ||
+    certificate.currentHeadCovered !== true ||
+    certificate.selectedCutSeq < closure.lowerBound ||
+    certificate.selectedCutSeq >= closure.upperBound ||
+    !sameOrderedIds(
+      certificate.decisionCertificateIds,
+      validation.decisionCertificateIds,
+    ) ||
+    certificate.intervals.length !== closure.evidence.length ||
+    certificate.intervals.some((interval, index) => {
+      const item = closure.evidence[index];
+      return (
+        item === undefined ||
+        interval.receiptId !== item.receipt.receiptId ||
+        interval.source !== item.receipt.source ||
+        interval.sourceRevision !== item.receipt.sourceRevision ||
+        interval.from !== item.version.validFromSeq ||
+        interval.until !==
+          intervalUntilAtHead(item.version, validation.validatedHead)
+      );
+    })
+  ) {
+    integrityFailure(
+      "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
+      "Diagnostic JointValidityCertificate does not close over its current-world Validation.",
+    );
+  }
+  return certificate;
+}
+
+function assertOriginRefreshPlanClosure(
+  database: EpochDatabase,
+  diagnostic: SafetyDiagnostic,
+  validation: ValidationRecord,
+  closure: ValidationEvidenceClosure,
+): RefreshPlan {
+  const refreshRef = requireExactRef(diagnostic, "REFRESH_PLAN");
+  if (
+    validation.refreshPlanId === null ||
+    refreshRef.id !== validation.refreshPlanId
+  ) {
+    integrityFailure(
+      "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
+      "Diagnostic RefreshPlan reference does not match its origin Validation.",
+    );
+  }
+  const plan = singleMatch(
+    database.refreshPlans,
+    (candidate) => candidate.refreshPlanId === validation.refreshPlanId,
+  );
+  if (
+    plan === null ||
+    plan.sessionId !== diagnostic.sessionId ||
+    plan.baseSessionRevision !== validation.baseSessionRevision ||
+    plan.validatedHead !== validation.validatedHead ||
+    plan.dependencySetHash !== validation.dependencySetHash ||
+    !sameOrderedIds(
+      plan.activeDecisionCertificateIds,
+      validation.decisionCertificateIds,
+    ) ||
+    !sameIdSet(plan.agentIds, closure.invalidAgentIds) ||
+    (plan.status === "AVAILABLE" && plan.claimedAttemptId !== null) ||
+    ((plan.status === "CLAIMED" || plan.status === "COMPLETED") &&
+      plan.claimedAttemptId === null)
+  ) {
+    integrityFailure(
+      "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
+      "Diagnostic RefreshPlan does not bind its revision, head, dependency, Decisions, and invalid owners.",
+    );
+  }
+  return plan;
 }
 
 function assertNoCutDiagnosticClosure(
@@ -581,34 +784,25 @@ function assertNoCutDiagnosticClosure(
     );
   }
 
-  const refreshRefs = refsOfKind(diagnostic, "REFRESH_PLAN");
-  if (
-    (validation.refreshPlanId === null && refreshRefs.length !== 0) ||
-    (validation.refreshPlanId !== null &&
-      (refreshRefs.length !== 1 || refreshRefs[0]?.id !== validation.refreshPlanId))
-  ) {
-    integrityFailure(
-      "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
-      "No-Cut Diagnostic RefreshPlan reference does not match its Validation.",
-    );
-  }
-
-  const evidence = proof.decisionCertificateIds.map((decisionId, index) =>
-    resolveDecisionReceiptEvidence(database, diagnostic, decisionId, index),
+  const closure = resolveValidationEvidenceClosure(
+    database,
+    diagnostic,
+    validation,
   );
+  const plan = assertOriginRefreshPlanClosure(
+    database,
+    diagnostic,
+    validation,
+    closure,
+  );
+  const { evidence, lowerBound, upperBound } = closure;
   const receiptIds = evidence.map(({ receipt }) => receipt.receiptId);
-  const lowerBound = Math.max(
-    ...evidence.map(({ version }) => version.validFromSeq),
-  );
   const effectiveUpper = evidence.map(({ version, receipt }) => ({
     receiptId: receipt.receiptId,
     value:
-      version.validUntilSeq !== null &&
-      version.validUntilSeq <= proof.validatedAtHead
-        ? version.validUntilSeq
-        : proof.validatedAtHead + 1,
+      intervalUntilAtHead(version, proof.validatedAtHead) ??
+      proof.validatedAtHead + 1,
   }));
-  const upperBound = Math.min(...effectiveUpper.map(({ value }) => value));
   const earliestEndingReceiptId = [...effectiveUpper].sort(
     (left, right) =>
       left.value - right.value ||
@@ -639,6 +833,8 @@ function assertNoCutDiagnosticClosure(
     lowerBound < upperBound ||
     proof.earliestEndingReceiptId !== earliestEndingReceiptId ||
     proof.latestStartingReceiptId !== latestStartingReceiptId ||
+    !sameIdSet(proof.refreshAgentIds, closure.invalidAgentIds) ||
+    !sameIdSet(proof.refreshAgentIds, plan.agentIds) ||
     !sameOrderedIds(proof.conflictWitnessReceiptIds, canonicalWitness) ||
     !sameIdSet(
       receiptRefs.map((reference) => reference.id),
@@ -667,19 +863,46 @@ function assertCommitRaceDiagnosticClosure(
     database.permits,
     (candidate) => candidate.permitId === permitRef.id,
   );
+  const session = singleMatch(
+    database.sessions,
+    (candidate) => candidate.sessionId === diagnostic.sessionId,
+  );
+  const raceEvent = singleMatch(
+    database.auditEvents,
+    (candidate) =>
+      candidate.sessionId === diagnostic.sessionId &&
+      candidate.actionHash === diagnostic.actionHash &&
+      candidate.sessionRevision === diagnostic.sessionRevision &&
+      candidate.type === "SESSION_STATE" &&
+      candidate.status === "COMMIT_RACE",
+  );
   if (
     validation === null ||
     permit === null ||
+    session === null ||
+    raceEvent === null ||
     validation.sessionId !== diagnostic.sessionId ||
     validation.actionHash !== diagnostic.actionHash ||
     validation.outcome !== "VALID_CURRENT_ALLOW" ||
+    validation.noCutProofId !== null ||
     validation.jointValidityCertificateId === null ||
+    validation.validatedHead >= database.headSeq ||
     permit.sessionId !== diagnostic.sessionId ||
     permit.actionHash !== diagnostic.actionHash ||
     permit.jointValidityCertificateId !==
       validation.jointValidityCertificateId ||
     permit.dependencySetHash !== validation.dependencySetHash ||
-    permit.validatedHead !== validation.validatedHead
+    permit.validatedHead !== validation.validatedHead ||
+    permit.idempotencyKey !== session.action.idempotencyKey ||
+    permit.status !== "REVOKED" ||
+    permit.consumedAt !== null ||
+    Date.parse(raceEvent.createdAt) < Date.parse(permit.issuedAt) ||
+    diagnostic.sessionRevision > session.sessionRevision ||
+    (diagnostic.sessionRevision === session.sessionRevision &&
+      (session.state !== "COMMIT_RACE" ||
+        session.activeValidationId !== validation.validationId ||
+        (session.activePermitId !== null &&
+          session.activePermitId !== permit.permitId)))
   ) {
     integrityFailure(
       "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
@@ -702,55 +925,219 @@ function assertCommitRaceDiagnosticClosure(
       "Commit-race Diagnostic must reference the unique Permit for its Validation chain.",
     );
   }
-  const certificate = singleMatch(
-    database.jointValidityCertificates,
-    (candidate) =>
-      candidate.certificateId === validation.jointValidityCertificateId,
+  const closure = resolveValidationEvidenceClosure(
+    database,
+    diagnostic,
+    validation,
   );
+  const certificate = assertJointValidityCertificateClosure(
+    database,
+    diagnostic,
+    validation,
+    closure,
+  );
+  const raceEventRefKeys = raceEvent.artifactRefs.map(refKey);
+  const expectedRaceEventRefKeys = [
+    refKey({ kind: "VALIDATION", id: validation.validationId }),
+    refKey({ kind: "PERMIT", id: permit.permitId }),
+  ];
+  const activeDecisionIds = ROLES.flatMap((role) => {
+    const decisionId = session.activeDecisionCertificateIds[role];
+    return decisionId === null ? [] : [decisionId];
+  });
   if (
-    certificate === null ||
-    certificate.validationId !== validation.validationId ||
-    certificate.sessionId !== diagnostic.sessionId ||
-    certificate.actionHash !== diagnostic.actionHash ||
-    certificate.dependencySetHash !== validation.dependencySetHash ||
-    certificate.validatedAtHead !== validation.validatedHead ||
-    !sameOrderedIds(
-      certificate.decisionCertificateIds,
-      validation.decisionCertificateIds,
+    closure.lowerBound >= closure.upperBound ||
+    !sameIdSet(raceEventRefKeys, expectedRaceEventRefKeys) ||
+    Date.parse(permit.issuedAt) < Date.parse(validation.createdAt) ||
+    Date.parse(permit.issuedAt) < Date.parse(certificate.createdAt) ||
+    !closure.evidence.every(
+      ({ decision }) => decision.verdict === "ALLOW",
     ) ||
-    certificate.dependencySetHash !==
-      snapshotReceiptDependencySetHash(
-        certificate.intervals.map((interval) => interval.receiptId),
-      )
+    (diagnostic.sessionRevision === session.sessionRevision &&
+      !sameOrderedIds(activeDecisionIds, validation.decisionCertificateIds)) ||
+    database.effects.some(
+      (effect) =>
+        effect.permitId === permit.permitId ||
+        (effect.idempotencyKey === permit.idempotencyKey &&
+          Date.parse(effect.createdAt) <= Date.parse(raceEvent.createdAt)),
+    )
   ) {
     integrityFailure(
       "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
-      "Commit-race Diagnostic does not close Validation through its JointValidityCertificate.",
+      "Commit-race Diagnostic does not close three ALLOW Decisions or its no-effect race lifecycle.",
     );
   }
-  const evidence = certificate.decisionCertificateIds.map((decisionId, index) =>
-    resolveDecisionReceiptEvidence(database, diagnostic, decisionId, index),
+}
+
+function assertHistoricalStaleDiagnosticClosure(
+  database: EpochDatabase,
+  diagnostic: SafetyDiagnostic,
+): void {
+  assertOnlyRefKinds(diagnostic, ["VALIDATION", "REFRESH_PLAN", "RECEIPT"]);
+  const validationRef = requireExactRef(diagnostic, "VALIDATION");
+  const validation = singleMatch(
+    database.validations,
+    (candidate) => candidate.validationId === validationRef.id,
   );
   if (
-    certificate.intervals.some((interval, index) => {
-      const item = evidence[index];
-      return (
-        item === undefined ||
-        interval.receiptId !== item.receipt.receiptId ||
-        interval.source !== item.receipt.source ||
-        interval.sourceRevision !== item.receipt.sourceRevision ||
-        interval.from !== item.version.validFromSeq ||
-        interval.until !==
-          (item.version.validUntilSeq !== null &&
-          item.version.validUntilSeq <= certificate.validatedAtHead
-            ? item.version.validUntilSeq
-            : null)
-      );
-    })
+    validation === null ||
+    validation.outcome !== "HISTORICAL_BUT_STALE_NOW" ||
+    validation.noCutProofId !== null ||
+    validation.jointValidityCertificateId !== null
   ) {
     integrityFailure(
       "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
-      "Commit-race JointValidityCertificate intervals do not match its Decision evidence.",
+      "Historical-stale Diagnostic must reference its matching historical Validation.",
+    );
+  }
+  const closure = resolveValidationEvidenceClosure(
+    database,
+    diagnostic,
+    validation,
+  );
+  const plan = assertOriginRefreshPlanClosure(
+    database,
+    diagnostic,
+    validation,
+    closure,
+  );
+  const currentCovered =
+    closure.lowerBound <= validation.validatedHead &&
+    validation.validatedHead < closure.upperBound;
+  const invalidReceiptIds = closure.evidence
+    .filter(({ decision }) => plan.agentIds.includes(decision.agentId))
+    .map(({ receipt }) => receipt.receiptId);
+  const referencedReceiptIds = refsOfKind(diagnostic, "RECEIPT").map(
+    (reference) => reference.id,
+  );
+  if (
+    closure.lowerBound >= closure.upperBound ||
+    currentCovered ||
+    closure.invalidAgentIds.length === 0 ||
+    (referencedReceiptIds.length > 0 &&
+      !sameIdSet(referencedReceiptIds, invalidReceiptIds))
+  ) {
+    integrityFailure(
+      "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
+      "Historical-stale Diagnostic does not close its past cut and current invalid owners.",
+    );
+  }
+}
+
+function assertConsistentDenyDiagnosticClosure(
+  database: EpochDatabase,
+  diagnostic: SafetyDiagnostic,
+): void {
+  assertOnlyRefKinds(diagnostic, ["VALIDATION", "REFRESH_PLAN", "RECEIPT"]);
+  const validationRef = requireExactRef(diagnostic, "VALIDATION");
+  const validation = singleMatch(
+    database.validations,
+    (candidate) => candidate.validationId === validationRef.id,
+  );
+  if (
+    validation === null ||
+    validation.outcome !== "CONSISTENT_DENY" ||
+    validation.noCutProofId !== null
+  ) {
+    integrityFailure(
+      "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
+      "Consistent-DENY Diagnostic must reference its matching Validation.",
+    );
+  }
+  const closure = resolveValidationEvidenceClosure(
+    database,
+    diagnostic,
+    validation,
+  );
+  assertJointValidityCertificateClosure(
+    database,
+    diagnostic,
+    validation,
+    closure,
+  );
+  if (
+    closure.lowerBound >= closure.upperBound ||
+    !closure.evidence.some(({ decision }) => decision.verdict === "DENY")
+  ) {
+    integrityFailure(
+      "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
+      "Consistent-DENY Diagnostic does not close a valid cut containing a DENY Decision.",
+    );
+  }
+
+  const refreshRefs = refsOfKind(diagnostic, "REFRESH_PLAN");
+  const receiptRefs = refsOfKind(diagnostic, "RECEIPT");
+  if (validation.refreshPlanId === null) {
+    if (refreshRefs.length !== 0 || receiptRefs.length !== 0) {
+      integrityFailure(
+        "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
+        "Initial Consistent-DENY Diagnostic cannot reference unrelated refresh artifacts.",
+      );
+    }
+    return;
+  }
+
+  const originValidation = singleMatch(
+    database.validations,
+    (candidate) =>
+      candidate.refreshPlanId === validation.refreshPlanId &&
+      (candidate.outcome === "NO_VALID_OBSERVED_WORLD_CUT" ||
+        candidate.outcome === "HISTORICAL_BUT_STALE_NOW"),
+  );
+  if (originValidation === null) {
+    integrityFailure(
+      "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
+      "Refreshed Consistent-DENY Diagnostic is missing its origin Validation.",
+    );
+  }
+  const originClosure = resolveValidationEvidenceClosure(
+    database,
+    diagnostic,
+    originValidation,
+  );
+  const plan = assertOriginRefreshPlanClosure(
+    database,
+    diagnostic,
+    originValidation,
+    originClosure,
+  );
+  const refreshedEvidence = closure.evidence.filter(({ decision }, index) => {
+    const origin = originClosure.evidence[index];
+    return (
+      origin !== undefined &&
+      plan.agentIds.includes(decision.agentId) &&
+      decision.certificateId !== origin.decision.certificateId
+    );
+  });
+  const retainedEvidenceIsStable = closure.evidence.every(
+    ({ decision }, index) => {
+      const origin = originClosure.evidence[index];
+      return (
+        origin !== undefined &&
+        (plan.agentIds.includes(decision.agentId) ||
+          decision.certificateId === origin.decision.certificateId)
+      );
+    },
+  );
+  if (
+    plan.status !== "COMPLETED" ||
+    plan.claimedAttemptId === null ||
+    !sameIdSet(
+      refreshedEvidence.map(({ decision }) => decision.agentId),
+      plan.agentIds,
+    ) ||
+    !retainedEvidenceIsStable ||
+    !refreshedEvidence.some(
+      ({ attempt }) => attempt.attemptId === plan.claimedAttemptId,
+    ) ||
+    !sameIdSet(
+      receiptRefs.map((reference) => reference.id),
+      refreshedEvidence.map(({ receipt }) => receipt.receiptId),
+    )
+  ) {
+    integrityFailure(
+      "INVALID_DIAGNOSTIC_CAUSAL_CHAIN",
+      "Refreshed Consistent-DENY Diagnostic does not close its completed selective refresh.",
     );
   }
 }
@@ -764,6 +1151,12 @@ function assertReasonSpecificClosure(
   }
   if (diagnostic.reasonCode === "COMMIT_RACE") {
     assertCommitRaceDiagnosticClosure(database, diagnostic);
+  }
+  if (diagnostic.reasonCode === "HISTORICAL_BUT_STALE_NOW") {
+    assertHistoricalStaleDiagnosticClosure(database, diagnostic);
+  }
+  if (diagnostic.reasonCode === "CONSISTENT_DENY") {
+    assertConsistentDenyDiagnosticClosure(database, diagnostic);
   }
 }
 
