@@ -91,7 +91,7 @@ Devpost 通用评分与 Track 1 专项要求是两层规则，不能混写成同
 
 ### 1.5 新旧代码边界
 
-官方规则要求项目在正式赛段内新建，或对已有项目进行显著更新。核对源码时，官方 Starter Kit 的实现代码处于干净基线；目前只新增了本设计文档，尚未开始功能实现：
+官方规则要求项目在正式赛段内新建，或对已有项目进行显著更新。首次核对源码时，官方 Starter Kit 的实现代码处于干净基线；下列内容保留为赛段开始时的历史证据：
 
 ```text
 baseline commit: 8d0bd4f14ad1e453d984149aebcdd0bcb4f74178
@@ -100,9 +100,11 @@ implementation changes: none
 design artifact: docs/EPOCHGUARD_FINAL_DESIGN.md
 ```
 
+当前实现已推进至阶段 7/9 完成：冻结合同 v7、Store、World/Evidence、Decision/JV、Refresh/Effect、Diagnostics/Snapshot/Run Adapter、Coordinator/Routes 均已由独立 worktree 实现并合入 `epochguard/staging@e6e58ba`；Dashboard Mock Preview 已合入，EG-09 正在完成唯一生产接线。该状态仍不等于最终端到端比赛演示，真实 Ark、合并后 WSL、生产浏览器和发布门仍未完成。
+
 正式实现应把赛段开始后的新增代码、测试、README 和演示材料保留为清晰的 Git 历史；不要把赛前概念文档冒充实现成果。
 
-当前两个运行硬阻塞也必须显式记录：**Docker daemon 尚未启动，`ARK_API_KEY` / `ARK_MODEL` 尚未完成真实 Agent Run 验证。** WSL 基线通过不等于模型 Runtime 已经通过；它们是开工后 90 分钟内必须清除的 Go/No-Go。
+当前运行硬阻塞必须显式记录：**Docker daemon 尚未完成最终候选验证，`ARK_API_KEY` / `ARK_MODEL` 尚未完成真实 Agent Run 验证。** WSL2 Ubuntu 24.04 与 Node 22 环境已经完成预检，但环境可用不等于模型 Runtime 已通过；真实运行仍是发布前 Go/No-Go。
 
 ### 1.6 资格和提交可用性自检
 
@@ -1522,13 +1524,15 @@ stateDiagram-v2
     READY_AT_CURRENT_HEAD --> COMMITTING
     COMMITTING --> COMMITTED
     COMMITTING --> COMMIT_RACE
-    COMMIT_RACE --> VALIDATING
 
     CONSISTENT_DENY --> [*]
     COMMITTED --> [*]
+    COMMIT_RACE --> [*]
     UNSTABLE_WORLD --> [*]
     FAILED --> [*]
 ```
+
+P0 将 `COMMIT_RACE` 视为当前业务 Session 的终态：服务端持久化 `TRANSIENT_RACE / COMMIT` Diagnostic，保持 effect=0，不在原 Session 内自动回到 `VALIDATING`。恢复方式是 reset 后新建 Session；前端只能 GET 权威 Snapshot，不得自动重放 Commit。
 
 单 Agent Attempt：
 
@@ -1948,7 +1952,7 @@ P0 界面只显示当前 Session 最新的 `stage + reasonCode + relevant IDs`�
 | API 断开或 Snapshot 超时 | 保留最后确认值并显示 `VIEW STALE` | 禁止 refresh / commit |
 | `409 STALE_VIEW` | 保留旧画面，提示 `Session changed; refreshed before action` | GET 新 Snapshot，不自动重放 |
 | `404 SESSION_NOT_FOUND` / 不支持 Schema | 清空全部可执行动作并显示不可恢复原因 | New Demo Session |
-| `COMMIT_RACE` | Gate 保持锁定，显示服务端正在重新验证 | 前端不自动重复 commit |
+| `COMMIT_RACE` | Gate 保持锁定，显示当前 Session 因提交竞态安全终止，effect=0 | reset 后新建 Session；前端不自动重复 commit |
 
 Dashboard 打开期间约每 900ms 固定轮询；写入 UI 前必须同时核对 Session ID、request generation 和 revision，不能只依赖 Abort。连续三次失败或距离最后成功 HTTP Snapshot 超过 3 秒时标记 `VIEW STALE` 并禁用动作；command pending 期间也禁用所有 mutation 按钮，但继续 GET。所有面板必须标注同一个 `snapshotRevision`、`sessionRevision` 和 `generatedAt`。
 
@@ -2070,7 +2074,7 @@ Badcase 使用 `sessionId + actionHash + sessionRevision` 固定现场，从 `Se
 | AH-01 | Permit 后修改任一 Action 参数 | `ACTION_HASH_MISMATCH`，effect=0 |
 | DP-01 | 缺决定、重复 Role 或非法 Envelope | Session blocked，effect=0；malformed 输出归因 `PARSE` 并可从受限脱敏 Artifact 重放，缺失/重复 Role 归因 `COMPOSE` |
 | EG-01 | 两个并发或重试 Commit | 两次返回同一 Effect，count 始终为 1 |
-| EG-02 | 验证后、Commit 前 head 前进 | `COMMIT_RACE`，effect=0；Diagnostic=`TRANSIENT_RACE/COMMIT` 且 Validation/Permit refs 可解析 |
+| EG-02 | 验证后、Commit 前 head 前进 | 终态 `COMMIT_RACE`，effect=0；Diagnostic=`TRANSIENT_RACE/COMMIT` 且 Validation/Permit refs 可解析；原 Session 不自动回到 `VALIDATING` |
 | RF-01 | 选择性刷新并得到 DENY | 仅 Budget runCount +1；旧 ALLOW 不复用；effect=0 |
 | RT-01 | 三个真实正常 Run | 三个不同 Run ID，正常发布一次 |
 | RT-02 | 三个真实冲突 Run + Budget re-observation | 初始三个 ALLOW 被阻断，最终安全 DENY，后端与 UI 均为 0 发布 |

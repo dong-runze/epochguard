@@ -1,9 +1,10 @@
 # EpochGuard 并行 Session 执行与验收流程
 
-> 状态：待用户批准启动  
-> 当前 Starter 基线：`8d0bd4f`  
+> 状态：执行中——阶段 7/9 已完成，阶段 8/9 Production Integration 进行中
+> 当前集成基线：`epochguard/staging@e6e58ba`
+> 冻结合同：`epochguard-contract-v7`，`schemaVersion=1`
 > 产品设计来源：[`EPOCHGUARD_FINAL_DESIGN.md`](./EPOCHGUARD_FINAL_DESIGN.md)  
-> 本文档范围：只定义任务编排、审核、校验、测试和合并流程，不代表功能已实现。
+> 本文档范围：定义任务编排、审核、校验、测试和合并流程，并记录实际执行证据。当前已具备 Service/Routes 与 network-free Mock Preview；EG-09 和阶段 9 完成前仍不是最终端到端比赛演示。
 
 ---
 
@@ -73,24 +74,24 @@
 
 ## 4. Gate 0：并行开工前的必要条件
 
-### 4.1 共同基线
+### 4.1 共同基线完成记录
 
-当前 `docs/EPOCHGUARD_FINAL_DESIGN.md` 尚未被 Git 跟踪。在创建任何 worktree 前必须：
+Gate 0 已完成：
 
-1. 创建 `epochguard/staging`；
-2. 将最终设计文档和本流程文档作为共同基线提交；
-3. 记录基线 SHA；
-4. 后续执行 Session 全部从同一 staging SHA 创建 worktree。
+1. 原始官方 Starter 基线：`8d0bd4f14ad1e453d984149aebcdd0bcb4f74178`；
+2. 设计与流程共同基线：`475cb93e832f56219bb4bdfdefff3d6aac1e7784`；
+3. 可视化灰度与执行任务登记基线：`c6e07b85baf56b59e44d0b728fd1d0ef5c0e5f9d`；
+4. `epochguard/staging` 只接收经中央审核的提交；EG-00～EG-09 使用独立 worktree 与独立分支；
+5. 当前已验收集成基线为 `e6e58ba399a97a396b69056423fbf432594d0c8b`。
 
-### 4.2 基线测试事实
+### 4.2 当前集成测试事实
 
-当前已知：
+在 `e6e58ba` 上已验证：
 
-- TypeScript 检查通过；
-- Web 和 Server 构建通过；
-- Windows 环境中服务端 12 项测试通过 11 项；
-- 唯一失败是 Container Runner 测试把 `/tmp/codex-home` 按 POSIX 路径断言，而 Windows 的 `path.resolve()` 会生成 Windows 路径；
-- 最终全量门必须在 WSL/Linux 运行，不得将该已知平台差异误报为 EpochGuard 回归。
+- EpochGuard：**286/286 PASS**；
+- 全工作区 TypeScript 检查、Web 与 Server production build：**PASS**；
+- Windows 全 Server：**311/312**；唯一失败仍是 Container Runner 测试硬编码 `/tmp/codex-home`，与 EpochGuard 变更无关；
+- WSL2 Ubuntu 24.04、Node `v22.22.3`、npm `10.9.8` 已完成环境预检；最终全量 Linux 门仍须在 EG-09 合并后的同一候选 SHA 上执行。
 
 ### 4.3 EG-00 必须冻结的合同
 
@@ -98,21 +99,21 @@
 2. Action 与 Role Query 的 canonicalization 及 Golden Hash；
 3. Session、Attempt、Assignment、Decision、Validation、Permit、Effect 状态；
 4. `FailureCode`、Diagnostic kind/stage 和闭合枚举；
-5. `409 STALE_VIEW`、`409 ALREADY_REOBSERVING`、`409 AGENTS_BUSY` 的精确响应体；
+5. 九个公开错误的精确状态码和 strict 响应体：`STALE_VIEW`、`ALREADY_REOBSERVING`、`AGENTS_BUSY`、`MISSING_ACTION_FIELDS`、`SESSION_NOT_FOUND`、`UNSUPPORTED_SCHEMA`、`PROJECTION_MISMATCH`、`UNSTABLE_WORLD`、`ROLE_PROFILE_MISMATCH`；
 6. `ArtifactRef.kind` 及每种引用的解析目标；
 7. `SessionDashboardSnapshot` 与运行时 decoder；
 8. Normal / Impossible 固定 fixture manifest；
 9. `contractVersion + contractDigest`；
 10. 新旧 Store 记录的 nullable/default 兼容行为。
 
-### 4.4 待用户批准的 P0 语义
+v7 只在既有七种公开错误之外新增两种 canonical 409：`UNSTABLE_WORLD` 精确携带 opaque-or-null `sessionId` 与非负整数 `actualWorldHead`；`ROLE_PROFILE_MISMATCH` 精确携带 `role` 与 `agentId`。原七种错误的字段、状态码和固定消息保持不变。
 
-默认建议：
+### 4.4 已批准并冻结的 P0 语义
 
 1. **同一组 Role Agent 冲突：**两个业务 Session 同时使用同一组三个 Role Agent 时，第二个在 dispatch 前返回 `409 AGENTS_BUSY`；P0 不实现排队，不留下部分 Assignment。
 2. **幂等范围：**P0 只承诺同一 `Session + Action` 内 exactly-once；跨 Session 的业务去重不在本次比赛范围内，必须在文案和测试中如实标明。
 
-如果用户否决任一默认，必须先修订设计合同，再启动 EG-00。
+以上两项已由用户批准并冻结；任何改变都必须先修订合同、重新计算 digest 并重跑 Gate A。
 
 ---
 
@@ -130,6 +131,8 @@
 | `apps/server/src/app.ts` | EG-09 |
 | `apps/server/src/index.ts` | EG-09 |
 | `apps/server/src/app.test.ts` | EG-09 |
+| `apps/server/src/epochguard/dual-scenario-service.ts` | EG-09 |
+| `apps/server/src/epochguard/dual-scenario-service.test.ts` | EG-09 |
 | `apps/web/src/App.tsx` | EG-09 |
 | `apps/web/src/api.ts` | EG-09 |
 | `apps/web/src/main.tsx` | EG-09 |
@@ -294,7 +297,7 @@ apps/server/src/epochguard/*对应单测
 - Failure fixture 只刷新 Budget；
 - 两个同 RefreshPlan 请求只创建一个 Assignment/Attempt/Run；
 - 两个并发 Commit 的 effect count 始终为 1；
-- 验证后、Commit 前 head 前进必须 `COMMIT_RACE` 且 effect=0；
+- 验证后、Commit 前 head 前进时，Session 必须持久化进入终态 `COMMIT_RACE`，写入 `TRANSIENT_RACE / COMMIT` Diagnostic 且 effect=0；P0 不在原 Session 内自动回到 `VALIDATING`，恢复方式为 reset 后新建 Session，前端不得自动重放 Commit；
 - Action/Permit/JVC/dependency/head 任一不符都 effect=0。
 
 ### 6.6 EG-05 —— Diagnostics & Single Snapshot Projection
@@ -469,7 +472,7 @@ GET  /api/epochguard/effects/:campaignId
 
 **前置依赖**
 
-EG-07 和 EG-08 通过中央审核。
+EG-07 和 EG-08 已通过中央审核并合入 `e6e58ba`；EG-09 已从该精确 SHA 激活。
 
 **唯一允许修改热点文件的 Session**
 
@@ -477,15 +480,19 @@ EG-07 和 EG-08 通过中央审核。
 apps/server/src/index.ts
 apps/server/src/app.ts
 apps/server/src/app.test.ts
+apps/server/src/epochguard/dual-scenario-service.ts
+apps/server/src/epochguard/dual-scenario-service.test.ts
 apps/web/src/App.tsx
 apps/web/src/api.ts
-apps/web/src/main.tsx
 apps/web/src/styles.css
+apps/web/src/main.tsx（仅确有必要时）
 ```
 
 **交付**
 
-- 实例化 EpochStore/EpochGuardService；
+- 使用两个独立 EpochStore 与两个 EpochGuardService 隔离 Normal / Impossible 场景，并由一个 composite 协调共享 Role Agent；
+- 首次启动只创建三个 Role Agent；双库注册复制、身份一致性、场景分区、重复 Session 和跨库活跃状态均 fail closed；
+- 所有异步 mutation 使用同一全局串行队列，GET/refresh/commit 每次扫描持久 Store，不依赖内存 Session 路由表；
 - 注册 EpochGuard routes；
 - 保持 Starter 认证和现有 API 行为；
 - `Agent Chat / Session Safety` 模式切换；
@@ -498,6 +505,8 @@ apps/web/src/styles.css
 
 - 现有 Chat/Agent CRUD 回归通过；
 - EpochGuard API 仍处于 Bearer 认证边界；
+- production 仅四条正式 EpochGuard API，reset/world/effects/validate/debug 均为 JSON 404；
+- 两场景持久化文件严格分区，并发 Create 在任何第二组 dispatch 前得到唯一成功者；
 - Chat/Safety 往返不丢 Session；
 - 真实后端 Snapshot 是 Dashboard 唯一数据源；
 - Web/Server typecheck 和 build 通过。
@@ -674,7 +683,7 @@ EG-01～EG-07 可以同时开发，但必须按上述顺序逐个审核并合入
 必须阻断合并的用例：
 
 1. 两个同 Commit 同时进入，返回同一 `effectId`，Ledger 仅一条，Permit 只消费一次；
-2. 验证后暂停 Commit，推进 head 再释放，必须 `COMMIT_RACE` 且 effect=0；
+2. 验证后暂停 Commit，推进 head 再释放，必须持久化终态 `COMMIT_RACE`、写入 `TRANSIENT_RACE / COMMIT` Diagnostic 且 effect=0；只能 reset 后新建 Session，前端不得自动重放 Commit；
 3. 两个请求同时领取一个 RefreshPlan，只有一个 Assignment/Attempt/Run；
 4. Assignment/Decision 重复消费不能创建第二个 Certificate；
 5. 任一 Run 失败后无 Permit、无 Effect；
@@ -802,20 +811,34 @@ npm run check
 
 ## 15. 状态表
 
+### 15.0 九阶段进度
+
+| 阶段 | 状态 | 证据 |
+| --- | --- | --- |
+| 1 Contract | COMPLETE | `0d677a2` / `c4927e4`，v7 合同 28/28 |
+| 2 Store | COMPLETE | `a7ba259` / `b5576dc` |
+| 3 World / Evidence | COMPLETE | `1ff733d` / `9b14f0c` |
+| 4 Decision / Joint Validity | COMPLETE | `4f80a20` / `77e0ce9` |
+| 5 Refresh / Effect Gate | COMPLETE | `e651618` / `16c03d9` |
+| 6 Diagnostics / Snapshot / Run Adapter | COMPLETE | `c49fc7f`、`6df7feb` / `82a4f8e`、`7b81d68` |
+| 7 Coordinator / Routes | COMPLETE | `c091886` / `e6e58ba`，EpochGuard 286/286 |
+| 8 Dashboard + Production Integration | IN_PROGRESS | EG-07 已由 `cb09293` 合入；EG-09 在 `e6e58ba` 上 ACTIVE |
+| 9 WSL / Real Ark / Browser / Release | PENDING | WSL2 环境预检完成；最终候选验证尚未执行 |
+
 | ID | 名称 | 状态 | Base SHA | Commit SHA | 中央门 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
-| CONTROL | 规划/审核/测试 | ACTIVE | `c6e07b8` | `c5818f8` | — | 本 Session，位于 `epochguard/staging`；负责 worktree 初始化与故障恢复 |
+| CONTROL | 规划/审核/测试 | ACTIVE | `e6e58ba` | `e6e58ba` | — | 阶段 7/9 COMPLETE；阶段 8/9 IN_PROGRESS；负责审核、合并、文档、测试与 worktree 基础设施 |
 | EG-CANARY | 可视化 Session 只读灰度 | ACCEPTED | `475cb93` | — | Visibility / Read-only | 可视化机制通过；worktree 隔离未通过 |
-| EG-00 | Contracts & Starter Seams | MERGED | `c6e07b8` | `d0f7861` | Gate A **PASS** | 已合入 `epochguard/staging@e5f0b3a` |
+| EG-00 | Contracts & Starter Seams | MERGED | `7b81d68` | `0d677a2` | Gate A **PASS** | v7 合同已由 `c4927e4` 合入 |
 | EG-01 | EpochStore | MERGED | `e5f0b3a` | `a7ba259` | Gate B Store **PASS** | 已合入 `epochguard/staging@b5576dc` |
 | EG-02 | World / Receipt / Evidence | MERGED | `e5f0b3a` | `1ff733d` | Gate B World/Evidence **PASS** | 已合入 `epochguard/staging@9b14f0c` |
-| EG-03 | Decision / Joint Validity | MERGED | `e5f0b3a` | `ee86f75` | Gate B Decision/Validity **PASS** | 主模块与 PGP hotfix 已合入 `epochguard/staging@c5818f8` |
-| EG-04 | Refresh / Effect Gate | MERGED | `e5f0b3a` | `63a8ee6` | Gate B/C Refresh/Effect **PASS** | 已合入 `epochguard/staging@5109ecb` |
-| EG-05 | Diagnostics / Snapshot | MERGED | `e5f0b3a` | `0a824b4` | Gate B/D Projection **PASS** | 已合入 `epochguard/staging@e5f5f67` |
-| EG-06 | Role Profiles / Run Adapter | MERGED | `e5f0b3a` | `5e4a5db` | Gate B/E Run Adapter **PASS** | 已合入 `epochguard/staging@1e1dce5` |
-| EG-07 | Dashboard Preview | ACCEPTED | `e5f0b3a` | `bac3f6d` | Gate D Preview **PASS** | 逻辑与真实浏览器验收通过；按依赖顺序等待 EG-08 后合入 |
-| EG-08 | Coordinator / Routes | RUNNING | `e5f5f67` | — | Gate B/C | 第一波已稳定；更新独立 worktree 基线后激活 |
-| EG-09 | Production Integration | NOT_STARTED | `c6e07b8` | — | Gate D/F | 等待 EG-07/08 后再更新基线并激活 |
+| EG-03 | Decision / Joint Validity | MERGED | `e5f0b3a` | `4f80a20` | Gate B Decision/Validity **PASS** | 最新接缝修复已由 `77e0ce9` 纳入中央历史 |
+| EG-04 | Refresh / Effect Gate | MERGED | `e5f0b3a` | `e651618` | Gate B/C Refresh/Effect **PASS** | 最新接缝修复已由 `16c03d9` 纳入中央历史 |
+| EG-05 | Diagnostics / Snapshot | MERGED | `e5f0b3a` | `c49fc7f` | Gate B/D Projection **PASS** | 最新接缝修复已由 `82a4f8e` 纳入中央历史 |
+| EG-06 | Role Profiles / Run Adapter | MERGED | `e5f0b3a` | `6df7feb` | Gate B/E Run Adapter **PASS** | 最新接缝修复已由 `7b81d68` 纳入中央历史 |
+| EG-07 | Dashboard Preview | MERGED | `e5f0b3a` | `bac3f6d` | Gate D Preview **PASS** | 浏览器验收通过；由 `cb09293` 合入，仍是 network-free Mock Preview |
+| EG-08 | Coordinator / Routes | MERGED | `c4927e4` | `c091886` | Gate B/C **PASS** | 由 `e6e58ba` 合入；恢复闭包、canonical HTTP 与后台 owner 门通过 |
+| EG-09 | Production Integration | RUNNING | `e6e58ba` | — | Gate D/F | 独立 worktree 已快进并 ACTIVATE；实现双场景生产接线 |
 
 状态只使用：
 
@@ -853,41 +876,41 @@ BLOCKED
 3. 灰度任务能读取 `epochguard/staging@475cb93` 或其后续已批准基线；
 4. 只有 worktree 灰度通过后，EG-00 才可以进入 `RUNNING`。
 
-后续处置：由于 Codex 项目注册暂未能直接选择子仓库，中央 Session 在 `C:\Users\董润泽\Desktop\hackathon\.epochguard-worktrees` 手动创建了 EG-00～EG-09 十个真实 Git worktree 和独立分支。每个可视化任务都必须在任何命令前核对自己的绝对 worktree 路径、分支和基线；中央抽查已证明十个 worktree 均为不同绝对路径、不同分支。EG-00 通过 Gate A 后，EG-01～EG-07 已由中央 Session 干净快进至 `e5f0b3a`。
+后续处置：由于 Codex 项目注册暂未能直接选择子仓库，中央 Session 在 `C:\Users\董润泽\Desktop\hackathon\.epochguard-worktrees` 手动维护 EG-00～EG-09 十个正式注册 Git worktree 和独立分支。每个可视化任务都必须在任何命令前核对自己的绝对 worktree 路径、分支和基线；中央抽查已证明十个正式 worktree 均为不同绝对路径、不同分支。遗留的 `eg-00-v5` 不属于正式 EG-00～EG-09 注册表，不能作为交付证据。
 
-工作树的创建、路径/分支/基线校准、初始化失败、锁冲突和损坏恢复统一由中央 Session 负责。执行 Session 只报告故障并停止写入，不得自行重建、移动、删除 worktree，也不得切换到共享 checkout。此前失败的异步 fork 未形成正式任务或 Git worktree，已废弃；当前首批七个执行任务均运行在上述手工维护的真实 worktree 中。
+工作树的创建、路径/分支/基线校准、初始化失败、锁冲突和损坏恢复统一由中央 Session 负责。执行 Session 只报告故障并停止写入，不得自行重建、移动、删除 worktree，也不得切换到共享 checkout。此前失败的异步 fork 未形成正式任务或 Git worktree，已废弃；当前所有正式执行任务的阶段均以下方注册表为准。
 
 ### 15.2 可视化执行 Session 注册表
 
 | ID | Thread ID | Branch | Worktree | 当前阶段 |
 | --- | --- | --- | --- | --- |
-| EG-00 | `01a04d0c-953a-78e3-a118-0822248058b4` | `epochguard/eg-00-contracts` | `.epochguard-worktrees/eg-00` | MERGED / GATE A PASS |
+| EG-00 | `01a04d0c-953a-78e3-a118-0822248058b4` | `epochguard/eg-00-contracts` | `.epochguard-worktrees/eg-00` | MERGED / CONTRACT V7 / GATE A PASS |
 | EG-01 | `01a04d0c-9c28-7ec3-83d1-29404eec12dc` | `epochguard/eg-01-store` | `.epochguard-worktrees/eg-01` | MERGED / GATE B STORE PASS |
 | EG-02 | `01a04d0c-a19c-7a61-a104-dfde763c48de` | `epochguard/eg-02-evidence` | `.epochguard-worktrees/eg-02` | MERGED / GATE B WORLD-EVIDENCE PASS |
 | EG-03 | `01a04d0c-a7a7-7742-80f2-7d8414726909` | `epochguard/eg-03-validity` | `.epochguard-worktrees/eg-03` | MERGED / GATE B DECISION-VALIDITY PASS |
 | EG-04 | `01a04d0c-ad8e-7e10-a74e-e3b97f8414f6` | `epochguard/eg-04-gate` | `.epochguard-worktrees/eg-04` | MERGED / GATE B-C REFRESH-EFFECT PASS |
 | EG-05 | `01a04d0c-b41b-7621-8890-ae88ddeaa17c` | `epochguard/eg-05-snapshot` | `.epochguard-worktrees/eg-05` | MERGED / GATE B-D PROJECTION PASS |
 | EG-06 | `01a04d0c-ba9a-75d0-8b42-3c1fe87973ca` | `epochguard/eg-06-run-adapter` | `.epochguard-worktrees/eg-06` | MERGED / GATE B-E RUN ADAPTER PASS |
-| EG-07 | `01a04d0c-bff2-7670-b5a3-dce3c6a66246` | `epochguard/eg-07-dashboard` | `.epochguard-worktrees/eg-07` | ACCEPTED / GATE D PREVIEW PASS |
-| EG-08 | `01a04d0c-c522-72d2-8db5-9c92c7042784` | `epochguard/eg-08-service-routes` | `.epochguard-worktrees/eg-08` | ACTIVE IMPLEMENTATION |
-| EG-09 | `01a04d0c-caae-7e72-9c22-696dcfe0c9ad` | `epochguard/eg-09-integration` | `.epochguard-worktrees/eg-09` | PREP_ONLY |
+| EG-07 | `01a04d0c-bff2-7670-b5a3-dce3c6a66246` | `epochguard/eg-07-dashboard` | `.epochguard-worktrees/eg-07` | MERGED / GATE D PREVIEW PASS |
+| EG-08 | `01a04d0c-c522-72d2-8db5-9c92c7042784` | `epochguard/eg-08-service-routes` | `.epochguard-worktrees/eg-08` | MERGED / GATE B-C PASS |
+| EG-09 | `01a04d0c-caae-7e72-9c22-696dcfe0c9ad` | `epochguard/eg-09-integration` | `.epochguard-worktrees/eg-09` | ACTIVE PRODUCTION INTEGRATION |
 
 ### 15.3 EG-00 / Gate A 验收记录
 
 | 字段 | 结果 |
 | --- | --- |
-| 合同提交 | `d0f7861b2a8ae105117474bef749875c8a36dcb7` |
-| staging 合并提交 | `e5f0b3ab2161bc0dafaf710d247afde98d7ab8a0` |
-| 合同版本 | `epochguard-contract-v6` |
-| 合同摘要 | `sha256:5bdce49d3daa3764bbc67dcafb26c231b328d92b184e59e56d01a90eddc59dbf` |
-| 合同测试 | Windows / WSL 均为 **27/27 PASS** |
-| Linux Server | **53/53 PASS**，typecheck 与 build PASS |
-| Windows Server | 除既知 POSIX `/tmp/codex-home` 路径断言外 **52/52 PASS**；typecheck、build、编译后 `/api/health` smoke PASS |
-| 独立语义审核 | 8,118 个 mutation candidates、479 个标注 snapshots、17,356 次 Server/Web decoder 调用；0 throw、0 divergence、0 data difference |
-| Schema/Digest parity | 67 个 Server schemas、22 个共享 schemas、32 条语义不变量、5 组 projection 全部匹配 |
+| 合同提交 | `0d677a22107786308865de647354f5e3a30ee094` |
+| staging 合并提交 | `c4927e49379d0f321a642c8900f32ff852173cc3` |
+| 合同版本 | `epochguard-contract-v7`，`schemaVersion=1` |
+| 合同摘要 | `sha256:4dfbeb9e55de7ca17a19f5fb8f99494b17e441af0f877767027284d3ae646361` |
+| 合同测试 | **28/28 PASS** |
+| 当前中央 EpochGuard | `e6e58ba` 上 **286/286 PASS** |
+| 当前 Windows Server | **311/312**；唯一失败为既知 POSIX `/tmp/codex-home` 路径断言 |
+| 构建门 | 全工作区 typecheck、Web/Server production build **PASS** |
+| v7 独立审核 | Server/Web 版本、digest、九种错误、strict schema、状态码、四个 Golden Snapshot hash 完全对称；三路 digest 复算一致 |
 | Gate A | **PASS** |
 
-已知非 Gate A 阻断项：Windows 上单个测试硬编码 POSIX `/tmp` 路径；`npm audit` 报告 1 个 moderate 与 5 个 high 的既有依赖风险，需在发布门前单独跟踪，不得与合同语义正确性混为一项。
+v6 的 8,118 个 mutation candidates、479 个标注 snapshots、17,356 次 decoder 调用属于历史合同证据，不能冒充 v7 的当前统计。已知非 Gate A 阻断项仍是 Windows 上单个测试硬编码 POSIX `/tmp` 路径；依赖审计需在发布门前单独跟踪，不得与合同语义正确性混为一项。
 
 ### 15.4 EG-01 / EpochStore 验收记录
 
@@ -898,7 +921,7 @@ BLOCKED
 | 变更边界 | 1 个线性提交；只新增 `epoch-store.ts` 与 `epoch-store.test.ts` |
 | 中央聚焦测试 | Contracts + EpochStore **33/33 PASS** |
 | 构建门 | Server typecheck / build **PASS** |
-| 独立边界审核 | 合同文件与 v6 digest 不变；allowlist、提交拓扑、公开 API、初始化闭合均 **PASS** |
+| 独立边界审核 | 模块提交未修改合同；随后已在 `c4927e4` 的 v7 合同下完成中央回归；allowlist、提交拓扑、公开 API、初始化闭合均 **PASS** |
 | 独立故障矩阵 | 64 路并发、10 次失败队列、callback/write/rename/serialization 故障、alias 隔离、损坏文件与重启恢复均 **PASS** |
 | Gate B Store 子项 | **PASS** |
 
@@ -929,8 +952,9 @@ BLOCKED
 | 拒绝产物修复 | `2ce27440b9ac0df2bdbf6ce904cd634705620f94` |
 | 脱敏重放修复 | `4d6e9b5b3fc25f148791696a568ff66e8e0dc20a`、`2fe94c41080f376347da9078edce558bb108d197`、`fe8a15ffb1a638a57353e1c41ebf35a94187d82c` |
 | PGP 格式 hotfix | `ee86f754729f91d842469c263badc5ab3810d1a7` |
-| staging 合并提交 | `8fc3bb4`、`c5818f8` |
-| 变更边界 | 6 个线性提交；始终只修改 EG-03 allowlist 内 4 个实现/测试文件；contracts v6 与 digest 未变 |
+| 最终接缝修复 | `4f80a20b2897e67dead782670542c0cd75d2ff24` |
+| staging 合并提交 | `8fc3bb4`、`c5818f8`、`77e0ce9` |
+| 变更边界 | 始终只修改 EG-03 allowlist 内 4 个实现/测试文件；模块分支未修改合同，随后已在 `c4927e4` 的 v7 合同下完成中央回归 |
 | 中央累计测试 | 首次合并 **80/80 PASS**；第一波后 hotfix 累计 **236/236 PASS** |
 | 构建门 | 全工作区 typecheck；Web/Server production build **PASS** |
 | Decision 绑定 | Session、Action、Assignment、Role、Receipt、nonce、Attempt output digest 与冻结 Registration 全部从权威记录闭合 |
@@ -945,8 +969,9 @@ BLOCKED
 | --- | --- |
 | 初始模块提交 | `fc8f465b5321a6d331809a5c52e1057aa4d728f8` |
 | 闭包修复提交 | `c72319f626ee4f048ea24141a025db696bf3535c`、`27fcbc2383e1d77effb17c07df3a4a610ae7f685`、`247f11fc01348e529c9fa96b173b8f58b63e2673`、`63a8ee68af86eed219741b4d86f0bca6042852c9` |
-| staging 合并提交 | `5109ecb1653179e2bfe2db6bbf56f8cf99a082c1` |
-| 变更边界 | 5 个线性提交；恰好只新增 EG-04 allowlist 内 4 个实现/测试文件；contracts v6 与 digest 未变 |
+| 最终接缝修复 | `e65161847b52c1af8bc555b1a5ed39c98dffd4f1` |
+| staging 合并提交 | `5109ecb1653179e2bfe2db6bbf56f8cf99a082c1`、`16c03d9` |
+| 变更边界 | 只修改 EG-04 allowlist 内实现/测试文件；模块分支未修改合同，随后已在 `c4927e4` 的 v7 合同下完成中央回归 |
 | 中央累计测试 | Contracts + EG-01～04 **164/164 PASS** |
 | 构建门 | 全工作区 typecheck；Web/Server production build **PASS** |
 | Refresh | AVAILABLE/CLAIMED/COMPLETED、Session pointer、revision/head/dependency/Decision/Proof 与 Assignment/Attempt/Run 全闭合；合法 COLLECTING/终态重试保持幂等 |
@@ -961,8 +986,9 @@ BLOCKED
 | --- | --- |
 | 初始模块提交 | `eeec63e2f23bd66f80072bd8761bb7eb012934e7` |
 | 因果/展示修复 | `ad625df603dfb763b7ef6166efc5c218a9f4c87b`、`1c8ae447a03fdde9c6c72ca0368cf81b3a0a44f5`、`592408173b206949c8fdc2e33000b5f7c4e72537`、`0a824b4fc21d7896f418c423c41d1f21dbd226dd` |
-| staging 合并提交 | `e5f5f676830205a18d9f88aa2a6ffd8c36c9feaf` |
-| 变更边界 | 5 个线性提交；恰好只新增 EG-05 allowlist 内 4 个实现/测试文件；contracts v6 与 digest 未变 |
+| 最终接缝修复 | `c49fc7f07305bbf0e684feda1ac68932ec534384` |
+| staging 合并提交 | `e5f5f676830205a18d9f88aa2a6ffd8c36c9feaf`、`82a4f8e` |
+| 变更边界 | 只修改 EG-05 allowlist 内实现/测试文件；模块分支未修改合同，随后已在 `c4927e4` 的 v7 合同下完成中央回归 |
 | 中央累计测试 | Contracts + EG-01～06 **235/235 PASS** |
 | 构建门 | 全工作区 typecheck；Web/Server production build **PASS** |
 | 单快照纪律 | Store 只读取一次并立即深拷贝；active Decision 与 in-flight Attempt 独立投影；Effect count 按 Session 派生 |
@@ -978,8 +1004,9 @@ BLOCKED
 | 初始模块提交 | `cc2855c9d598a0d6ef78f59c46260a34b134120a` |
 | Join / failure 修复 | `2e844e28611383426d8a6320f619b8fa18cbd78b` |
 | Timestamp 合同修复 | `5e4a5db3c6fa88ba9c3073cff52a65fb6e38a149` |
-| staging 合并提交 | `1e1dce5da80a23d59888978a11e7e605e4b55f69` |
-| 变更边界 | 3 个线性提交；恰好只新增 EG-06 allowlist 内 4 个实现/测试文件；contracts v6 与 digest 未变 |
+| 最终接缝修复 | `6df7febfd5d7212f5cc25284a446300b4f5352a9` |
+| staging 合并提交 | `1e1dce5da80a23d59888978a11e7e605e4b55f69`、`7b81d68` |
+| 变更边界 | 只修改 EG-06 allowlist 内实现/测试文件；模块分支未修改合同，随后已在 `c4927e4` 的 v7 合同下完成中央回归 |
 | 聚焦测试 | Contracts + Run Adapter **55/55 PASS** |
 | 构建门 | Server typecheck / build **PASS** |
 | Run 绑定 | Role profile、Assignment、Attempt、Run、兄弟任务终止和并发 Store mutation 均闭合 |
@@ -994,17 +1021,38 @@ BLOCKED
 | 初始模块提交 | `3a4c55b2efda9376c7986c1b0d6eb82d2339d965` |
 | 逻辑修复提交 | `d92000688ee1b943d9a32eb1e92187a793e79924` |
 | 404 修复提交 | `bac3f6d92f2c9740291461133d56b38ea8c3528d` |
+| staging 合并提交 | `cb09293` |
 | 变更边界 | 3 个线性提交；恰好只新增 EG-07 allowlist 内 10 个 Web Preview 文件 |
-| 静态门 | Contracts **27/27 PASS**；Web typecheck / production build **PASS** |
+| 静态门 | 候选分支的 v6 Contracts **27/27 PASS** 为历史证据；合入 v7 后 Contracts **28/28 PASS**，Web typecheck / production build **PASS** |
 | 投影纪律 | 单一 frozen Snapshot；前端不计算 L/U、witness、Gate、Effect count 或 refresh owner |
 | Fail-closed | 首次 body-less typed 404、unsupported schema、projection mismatch、stale/command pending 均禁用 mutation；404 清空可执行 Snapshot |
 | Refresh owner | 严格从 `snapshot.refreshPlan.agentIds` 映射当前 Agent 卡；P0 Preview 为 Budget-only |
 | 浏览器桌面门 | Normal Commit `0→1`；Impossible `effect=0`；Recovered DENY `effect=0`；首次 404 显示 `Actions disabled` |
 | 浏览器窄屏门 | 390×844 的顶部、Agent 卡、No-Cut/Effect Gate、Refresh 与 Ledger 分段截图均可读，页面无整体横向溢出 |
 | 截图证据 | `C:\Users\董润泽\Desktop\hackathon\.epochguard-audits\eg07-bac3f6d` |
-| Gate D Preview 子项 | **PASS / ACCEPTED，尚未合入** |
+| Gate D Preview 子项 | **PASS / MERGED** |
 
 非阻断可用性提示：窄屏 Preview 的场景选择器和 interval table 使用局部横向滚动；测试控件高度约 27～31 px，满足最小点击目标但低于舒适的 44 px 触控建议。它们不改变 Dashboard 安全投影或 Gate D P0 结论，生产接线后的最终屏幕仍需在 EG-09 候选 SHA 上复验。
+
+### 15.11 EG-08 / Coordinator 与 Routes 验收记录
+
+| 字段 | 结果 |
+| --- | --- |
+| 初始协调器与路由 | `1b28d0552a338371f1795c7346c9c772023a0228` |
+| 重启稳定态修复 | `c0c6123e624e105051e3b40128a499cc750aa3f4` |
+| 非阻塞 Create | `884d091525761b76d6e926534a118c136a36d97c` |
+| v7 合同合并 | `e72933199a03af29f51e44e18740412564cf1672` |
+| canonical HTTP 修复 | `a4e365682abd8aab6e17c5ed17e6dec9a7836cc1` |
+| 恢复与 owner 闭包 | `3da8ac1`、`55a7100`、`94a227c`、`c091886ee2a611dac3859a83f6f4bca3ce79ce95` |
+| staging 合并提交 | `e6e58ba399a97a396b69056423fbf432594d0c8b` |
+| Create 行为 | 先返回权威 `DISPATCHING` Snapshot；模型 Run 在 service-owned background task 中继续，Dashboard 可轮询 queued/running/validating |
+| 冷启动恢复 | 稳定可操作态原样保留；真实 in-flight Attempt/Assignment/CLAIMED Plan/ISSUED Permit 在单次 Store mutation 内闭合；非法 Plan/Permit 正反组合原子拒绝 |
+| 后台失败 | 持久化失败重试一次；持续失败仅上报固定 `code + sessionId` 并保留 fail-closed owner latch；已落盘终态不执行冗余闭合 |
+| HTTP 门 | v7 canonical errors；客户端 Zod=400；未知内部错误脱敏 500；production 仅四条正式 API，不存在 `/validate` 或 debug route |
+| Commit race | `COMMIT_RACE` 为终态，写入 `TRANSIENT_RACE / COMMIT`，effect=0；reset 后可新建 Session |
+| 聚焦测试 | Service **30/30 PASS**；全部 EpochGuard **286/286 PASS** |
+| 全量门 | typecheck / build **PASS**；Windows Server **311/312**，唯一失败为既知 `/tmp/codex-home` 平台断言 |
+| Gate B/C | **PASS / MERGED** |
 
 ---
 
@@ -1013,7 +1061,7 @@ BLOCKED
 在任何执行 Session 被创建前，需要用户确认：
 
 - [x] 接受“1 个中央 Session + 10 个执行 Session”的编排；
-- [x] 接受 EG-00 完成并审核后才启动第一并行波（EG-01～EG-07 已在 Gate A 后激活，EG-08/09 仍为 PREP_ONLY）；
+- [x] 接受 EG-00 完成并审核后才启动第一并行波（EG-00～EG-08 已完成并合入；EG-09 已从 `e6e58ba` 激活）；
 - [x] 接受每个执行 Session 使用独立 worktree；
 - [x] 接受文件 allowlist 和唯一 Owner 制度；
 - [x] 接受同 Role Agent triple 冲突时 `409 AGENTS_BUSY` 的 P0 策略；
@@ -1024,16 +1072,16 @@ BLOCKED
 
 ---
 
-## 17. 批准后的激活顺序
+## 17. 已执行至 EG-09 的批准后激活顺序
 
-1. 当前 Session 创建 `epochguard/staging`并提交设计/流程文档；
-2. 记录新 base SHA；
-3. 只创建可视化任务 **EG-00 Contracts & Starter Seams**；
-4. 当前 Session 审核 EG-00、重跑 Gate A，合入 staging；
-5. 从新 staging SHA 同时创建 EG-01～EG-07；
-6. 执行 Session 完成后提交标准交付模板；
-7. 当前 Session 按第 10.2 节顺序审核和合入；
-8. EG-01～EG-06 稳定后创建 EG-08；
-9. EG-07/08 稳定后创建 EG-09；
-10. 当前 Session 在合并后候选 SHA 上依次运行 Gate B～F；
-11. 全部通过后才将 staging 晋升为最终候选版本。
+1. [x] 当前 Session 创建 `epochguard/staging` 并提交设计/流程文档；
+2. [x] 记录共同 base SHA；
+3. [x] 创建并验收 **EG-00 Contracts & Starter Seams**；
+4. [x] 重跑 Gate A 并合入 staging；
+5. [x] 从冻结 staging 创建 EG-01～EG-07；
+6. [x] 执行 Session 使用标准交付模板提交；
+7. [x] 当前 Session 按第 10.2 节顺序审核和合入 EG-01～EG-08；
+8. [x] EG-01～EG-06 稳定后激活 EG-08；
+9. [x] EG-07/08 稳定并合入后，以 `e6e58ba` 激活 EG-09；
+10. [ ] EG-09 候选合入后，当前 Session 在同一 SHA 上依次运行 Gate B～F、WSL、真实 Ark 与最终浏览器门；
+11. [ ] 全部通过后才将 staging 晋升为最终候选版本。
