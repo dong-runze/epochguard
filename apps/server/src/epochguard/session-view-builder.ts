@@ -192,13 +192,19 @@ const SYSTEM_ID_CONTEXT: SensitiveTextContext = {
 };
 
 const BARE_RANDOM_HEX_SECRET_PATTERN =
-  /(?:^|[^0-9A-Fa-f])(?:[0-9A-Fa-f]{40}|[0-9A-Fa-f]{32})(?=$|[^0-9A-Fa-f])/;
+  /(?:^|[^0-9A-Fa-f])(?:[0-9A-Fa-f]{64}|[0-9A-Fa-f]{40}|[0-9A-Fa-f]{32})(?=$|[^0-9A-Fa-f])/;
 
 function containsHighEntropySecret(
   value: string,
   context: SensitiveTextContext,
 ): boolean {
-  if (!context.allowSystemId && BARE_RANDOM_HEX_SECRET_PATTERN.test(value)) {
+  const isAllowedSha256Digest =
+    context.allowSha256Digest && /^sha256:[0-9a-f]{64}$/.test(value);
+  if (
+    !context.allowSystemId &&
+    !isAllowedSha256Digest &&
+    BARE_RANDOM_HEX_SECRET_PATTERN.test(value)
+  ) {
     return true;
   }
   for (const match of value.matchAll(/[A-Za-z0-9+_=-]{24,}/g)) {

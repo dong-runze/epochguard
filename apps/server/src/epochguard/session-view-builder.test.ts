@@ -1559,6 +1559,25 @@ describe("single-snapshot isolation and fail-closed projection", () => {
 });
 
 describe("fixed redaction boundary", () => {
+  it("redacts bare lowercase 64-hex while preserving typed digest and ID fields", () => {
+    const freeTextHex64 = "a3c7e1f5".repeat(8);
+    const structuredIdHex64 = "b4d8f2a6".repeat(8);
+    const database = makeDatabase();
+    database.runAssignments[0]!.agentNameAtAssignment = freeTextHex64;
+    database.attempts[2]!.threadId = structuredIdHex64;
+
+    const result = snapshot(database);
+    expect(JSON.stringify(result)).not.toContain(freeTextHex64);
+    expect(result.agents[0]!.agentNameAtAssignment).toBe("inventory Agent");
+    expect(result.agents[2]!.activeDecision?.runtimeProof.threadId).toBe(
+      structuredIdHex64,
+    );
+    expect(result.actionHash).toBe(GOLDEN_ACTION_HASH);
+    expect(result.agents[2]!.activeDecision?.runtimeProof.outputDigest).toBe(
+      database.attempts[2]!.outputDigest,
+    );
+  });
+
   it("redacts bare 32/40-hex secrets only from free display text", () => {
     const freeAgentHex32 = "a7c3e9f1".repeat(4);
     const freeRuntimeHex40 = "b8d4f0a2".repeat(5);
