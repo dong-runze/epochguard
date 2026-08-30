@@ -475,17 +475,27 @@ export class EpochGuardService {
         throw new Error("In-flight Session active RefreshPlan binding is invalid");
       }
       const plan = plans[0]!;
-      if (plan.status !== "CLAIMED") {
-        throw new Error("In-flight Session active RefreshPlan is not CLAIMED");
-      }
-      if (
-        plan.claimedAttemptId === null ||
-        !referencedAttemptIds.has(plan.claimedAttemptId)
+      if (plan.status === "CLAIMED") {
+        if (
+          (session.state !== "REOBSERVING" &&
+            session.state !== "COLLECTING") ||
+          plan.claimedAttemptId === null ||
+          !referencedAttemptIds.has(plan.claimedAttemptId)
+        ) {
+          throw new Error(
+            "In-flight Session CLAIMED RefreshPlan ownership is invalid",
+          );
+        }
+        plan.status = "INVALIDATED";
+        plan.claimedAttemptId = null;
+      } else if (
+        plan.status !== "COMPLETED" ||
+        (session.state !== "VALIDATING" && session.state !== "COMMITTING")
       ) {
-        throw new Error("Claimed RefreshPlan has no active owner Attempt");
+        throw new Error(
+          "In-flight Session active RefreshPlan state/status is invalid",
+        );
       }
-      plan.status = "INVALIDATED";
-      plan.claimedAttemptId = null;
     }
 
     if (session.activePermitId !== null) {

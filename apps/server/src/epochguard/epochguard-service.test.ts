@@ -1723,9 +1723,84 @@ describe("EpochGuardService", () => {
     const beforeRecovery = malformed.store.snapshot();
 
     await expect(malformed.service.initialize()).rejects.toThrow(
-      "In-flight Session active RefreshPlan is not CLAIMED",
+      "In-flight Session active RefreshPlan state/status is invalid",
     );
     expect(malformed.store.snapshot()).toEqual(beforeRecovery);
+  });
+
+  it("recovers COMMITTING with a completed selective RefreshPlan and issued Permit", async () => {
+    const { agents, forkPersistedService, service, requestFor } =
+      await createHarness();
+    const created = await service.createSession(
+      requestFor("impossible-collage-v1"),
+    );
+    const blocked = await waitForSessionState(service, created.sessionId, [
+      "BLOCKED_NO_CUT",
+    ]);
+    agents.allowRefreshBudgetDecision();
+    const ready = await service.refresh(blocked.sessionId, {
+      expectedSessionRevision: blocked.sessionRevision,
+      refreshPlanId: blocked.refreshPlan!.refreshPlanId,
+    });
+    expect(ready).toMatchObject({
+      sessionState: "READY_AT_CURRENT_HEAD",
+      refreshPlan: { status: "COMPLETED" },
+      gate: { state: "READY", effectsInSession: 0 },
+    });
+
+    const restarted = await forkPersistedService();
+    await restarted.store.initialize();
+    await restarted.store.mutate((database) => {
+      const session = database.sessions.find(
+        (candidate) => candidate.sessionId === ready.sessionId,
+      )!;
+      const plan = database.refreshPlans.find(
+        (candidate) =>
+          candidate.refreshPlanId === session.activeRefreshPlanId,
+      )!;
+      const permit = database.permits.find(
+        (candidate) => candidate.permitId === session.activePermitId,
+      )!;
+      expect(plan.status).toBe("COMPLETED");
+      expect(permit.status).toBe("ISSUED");
+      session.state = "COMMITTING";
+      session.sessionRevision += 1;
+      session.stateUpdatedAt = NOW;
+    });
+
+    await restarted.service.initialize();
+    const interrupted = restarted.service.getSnapshot(ready.sessionId);
+    expect(interrupted).toMatchObject({
+      sessionState: "INTERRUPTED",
+      gate: { state: "FAILED", effectsInSession: 0 },
+    });
+    const recoveredDatabase = restarted.store.snapshot();
+    const recoveredSession = recoveredDatabase.sessions.find(
+      (session) => session.sessionId === ready.sessionId,
+    )!;
+    expect(recoveredSession.activeAttemptIds).toEqual({
+      inventory: null,
+      budget: null,
+      policy: null,
+    });
+    expect(recoveredSession.activeValidationId).toBeNull();
+    expect(recoveredSession.activeRefreshPlanId).toBeNull();
+    expect(recoveredSession.activePermitId).toBeNull();
+    expect(
+      recoveredDatabase.refreshPlans.find(
+        (plan) => plan.refreshPlanId === ready.refreshPlan!.refreshPlanId,
+      ),
+    ).toMatchObject({ status: "COMPLETED" });
+    expect(
+      recoveredDatabase.permits.find(
+        (permit) => permit.sessionId === ready.sessionId,
+      ),
+    ).toMatchObject({ status: "REVOKED", consumedAt: null });
+    expect(recoveredDatabase.effects).toHaveLength(0);
+
+    await restarted.service.initialize();
+    expect(restarted.store.snapshot()).toEqual(recoveredDatabase);
+    expect(restarted.service.getSnapshot(ready.sessionId)).toEqual(interrupted);
   });
 
   it("rejects an in-flight Session whose active Permit is not ISSUED without publishing recovery", async () => {
