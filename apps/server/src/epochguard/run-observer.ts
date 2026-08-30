@@ -877,6 +877,7 @@ type JoinMutationOutcome =
       code: RunAdapterFailureCode;
       message: string;
       attempt: AgentAttempt | null;
+      rejectedProvenanceIndex: number | null;
     };
 
 function rejectedJoinOutcome(
@@ -885,6 +886,7 @@ function rejectedJoinOutcome(
   code: RunAdapterFailureCode,
   message: string,
   attempt: AgentAttempt | null = null,
+  rejectedProvenanceIndex: number | null = null,
 ): JoinMutationOutcome {
   const siblingIds = new Set(scope.assignmentIds);
   for (const assignment of database.runAssignments) {
@@ -897,7 +899,78 @@ function rejectedJoinOutcome(
       assignment.status = "REJECTED";
     }
   }
-  return { ok: false, code, message, attempt };
+  return {
+    ok: false,
+    code,
+    message,
+    attempt,
+    rejectedProvenanceIndex,
+  };
+}
+
+const terminalAttemptStatuses = new Set<AgentAttempt["status"]>([
+  "COMPLETED",
+  "FAILED",
+  "INTERRUPTED",
+  "OUTPUT_REJECTED",
+  "ACCEPTED",
+]);
+
+function firstTerminalRejectionIndex(
+  settled: readonly PromiseSettledResult<TerminalRunObservation>[],
+  database: RunAdapterStoreState,
+  scope: RoleRunJoinScope,
+): number | null {
+  if (settled.length !== ROLES.length) return null;
+  for (let index = 0; index < settled.length; index += 1) {
+    const result = settled[index]!;
+    if (result.status !== "rejected" || !(result.reason instanceof RunAdapterError)) {
+      continue;
+    }
+    const parsedAttempt = AgentAttemptSchema.safeParse(result.reason.attempt);
+    if (
+      !parsedAttempt.success ||
+      !terminalAttemptStatuses.has(parsedAttempt.data.status) ||
+      parsedAttempt.data.runId === null ||
+      parsedAttempt.data.runCompletedAt === null ||
+      parsedAttempt.data.assignmentId !== scope.assignmentIds[index]
+    ) {
+      continue;
+    }
+    const attempt = parsedAttempt.data;
+    const storedAttempts = database.attempts.filter(
+      (item) => item.attemptId === attempt.attemptId,
+    );
+    const storedAttempt =
+      storedAttempts.length === 1
+        ? AgentAttemptSchema.safeParse(storedAttempts[0])
+        : null;
+    const assignments = database.runAssignments.filter(
+      (item) => item.assignmentId === attempt.assignmentId,
+    );
+    const assignment =
+      assignments.length === 1
+        ? RunAssignmentSchema.safeParse(assignments[0])
+        : null;
+    if (
+      storedAttempt !== null &&
+      storedAttempt.success &&
+      JSON.stringify(storedAttempt.data) === JSON.stringify(attempt) &&
+      assignment !== null &&
+      assignment.success &&
+      assignment.data.sessionId === scope.sessionId &&
+      assignment.data.actionHash === scope.actionHash &&
+      assignment.data.sessionId === attempt.sessionId &&
+      assignment.data.actionHash === attempt.actionHash &&
+      assignment.data.role === attempt.role &&
+      assignment.data.agentId === attempt.agentId &&
+      assignment.data.boundRunId === attempt.runId &&
+      assignment.data.status !== "CONSUMED"
+    ) {
+      return index;
+    }
+  }
+  return null;
 }
 
 /**
@@ -914,11 +987,18 @@ export async function joinRoleRunObservations(
       settled.length !== ROLES.length ||
       settled.some((item) => item.status === "rejected")
     ) {
+      const rejectedProvenanceIndex = firstTerminalRejectionIndex(
+        settled,
+        database,
+        scope,
+      );
       return rejectedJoinOutcome(
         database,
         scope,
         "RUN_FAILED",
         "All three Role Runs must complete before Decision composition",
+        null,
+        rejectedProvenanceIndex,
       );
     }
     if (
@@ -1043,6 +1123,15 @@ export async function joinRoleRunObservations(
   });
 
   if (!outcome.ok) {
+    if (outcome.rejectedProvenanceIndex !== null) {
+      const rejected = settled[outcome.rejectedProvenanceIndex];
+      if (
+        rejected?.status === "rejected" &&
+        rejected.reason instanceof RunAdapterError
+      ) {
+        throw rejected.reason;
+      }
+    }
     throw new RunAdapterError(
       outcome.code,
       outcome.message,
