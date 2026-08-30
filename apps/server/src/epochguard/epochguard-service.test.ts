@@ -1,13 +1,14 @@
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Agent, AgentRun, CreateAgentInput } from "../types.js";
 import type { EvidencePack } from "./evidence-pack-writer.js";
 import { EpochStore } from "./epoch-store.js";
 import {
   EpochGuardService,
   EpochGuardServiceError,
+  type EpochGuardServiceOptions,
 } from "./epochguard-service.js";
 import {
   API_ERROR_STATUS,
@@ -17,6 +18,7 @@ import {
   makeUnstableWorldError,
   sha256Digest,
   type CreateSessionRequest,
+  type EpochDatabase,
   type Role,
   type SessionDashboardSnapshot,
 } from "./types.js";
@@ -25,6 +27,9 @@ import { WorldLedger } from "./world-ledger.js";
 const NOW = "2026-08-30T00:00:00.000Z";
 const STARTED = "2026-08-30T00:00:01.000Z";
 const COMPLETED = "2026-08-30T00:00:02.000Z";
+const RAW_BACKGROUND_FAILURE_SENTINEL =
+  "RAW_BACKGROUND_FAILURE_SENTINEL_PRIVATE_PATH";
+const RAW_REPORTER_FAILURE_SENTINEL = "RAW_REPORTER_FAILURE_SENTINEL";
 
 const temporaryDirectories: string[] = [];
 
@@ -39,6 +44,8 @@ afterEach(async () => {
 class TestWorkspace {
   readonly packs = new Map<string, Uint8Array>();
   private readonly digestOverrides = new Map<string, string>();
+  private remainingPackWriteFailures = 0;
+  private resolvePackWriteFailure: (() => void) | null = null;
 
   async readAgentsMdDigest(agentId: string): Promise<string> {
     return (
@@ -50,6 +57,13 @@ class TestWorkspace {
     this.digestOverrides.set(agentId, sha256Digest(`drifted:${agentId}`));
   }
 
+  failNextPackWrite(): Promise<void> {
+    this.remainingPackWriteFailures = 1;
+    return new Promise<void>((resolve) => {
+      this.resolvePackWriteFailure = resolve;
+    });
+  }
+
   async writeEvidencePackAtomic(
     _agentId: string,
     sessionId: string,
@@ -57,6 +71,12 @@ class TestWorkspace {
     assignmentId: string,
     canonicalPack: string | Uint8Array,
   ): Promise<string> {
+    if (this.remainingPackWriteFailures > 0) {
+      this.remainingPackWriteFailures -= 1;
+      this.resolvePackWriteFailure?.();
+      this.resolvePackWriteFailure = null;
+      throw new Error(RAW_BACKGROUND_FAILURE_SENTINEL);
+    }
     const relativePath =
       `.epochguard/sessions/${sessionId}/${role}/${assignmentId}.json`;
     if (this.packs.has(relativePath)) {
@@ -108,7 +128,7 @@ class TestAgentRuntime {
   private failSecondBudgetRun = false;
   private rejectSecondBudgetOutput = false;
   private allowSecondBudgetDecision = false;
-  private holdInitialRunRole: Role | null = null;
+  private readonly heldInitialRunRoles = new Set<Role>();
   private rejectInitialOutputRole: Role | null = null;
   private initialFanOutBarrier: InitialFanOutBarrier | null = null;
 
@@ -214,7 +234,7 @@ class TestAgentRuntime {
       queued,
       completed,
       held:
-        (this.holdInitialRunRole === role &&
+        (this.heldInitialRunRoles.has(role) &&
           this.dispatchCounts[role] === 1) ||
         (this.holdSecondBudgetRun &&
           role === "budget" &&
@@ -242,7 +262,11 @@ class TestAgentRuntime {
   }
 
   holdInitialRun(role: Role): void {
-    this.holdInitialRunRole = role;
+    this.heldInitialRunRoles.add(role);
+  }
+
+  holdAllInitialRuns(): void {
+    for (const role of ROLES) this.heldInitialRunRoles.add(role);
   }
 
   rejectInitialOutput(role: Role): void {
@@ -300,6 +324,7 @@ class TestAgentRuntime {
 
   releaseInitialRuns(): void {
     for (const stored of this.runs.values()) stored.held = false;
+    this.heldInitialRunRoles.clear();
   }
 
   private roleFromName(name: string): Role {
@@ -371,7 +396,9 @@ class FastTestClock {
   }
 }
 
-async function createHarness() {
+async function createHarness(
+  options: Pick<EpochGuardServiceOptions, "onBackgroundFailure"> = {},
+) {
   const directory = await mkdtemp(path.join(tmpdir(), "epochguard-eg08-"));
   temporaryDirectories.push(directory);
   const storePath = path.join(directory, "epochguard.json");
@@ -394,6 +421,7 @@ async function createHarness() {
           timeoutMs: 10_000_000,
           clock: new FastTestClock(),
         },
+        ...options,
       },
     );
   const service = makeService();
@@ -467,6 +495,39 @@ async function captureServiceError(
   }
   expect(caught).toBeInstanceOf(EpochGuardServiceError);
   return caught as EpochGuardServiceError;
+}
+
+function failNextStoreMutations(
+  store: EpochStore,
+  count: number,
+): {
+  enable: () => void;
+  failures: () => number;
+  restore: () => void;
+} {
+  const originalMutate = store.mutate.bind(store) as EpochStore["mutate"];
+  let enabled = false;
+  let failures = 0;
+  store.mutate = async <T>(
+    mutation: (database: EpochDatabase) => T | Promise<T>,
+  ): Promise<T> => {
+    if (enabled && failures < count) {
+      const shadow = store.snapshot();
+      await mutation(shadow);
+      failures += 1;
+      throw new Error(RAW_BACKGROUND_FAILURE_SENTINEL);
+    }
+    return originalMutate(mutation);
+  };
+  return {
+    enable: () => {
+      enabled = true;
+    },
+    failures: () => failures,
+    restore: () => {
+      store.mutate = originalMutate;
+    },
+  };
 }
 
 describe("EpochGuardService", () => {
@@ -1129,11 +1190,44 @@ describe("EpochGuardService", () => {
   });
 
   it("starts all three initial dispatches before one fails and closes the Session", async () => {
-    const { service, store, requestFor, agents } = await createHarness();
+    const reporter = vi.fn();
+    const { service, store, requestFor, agents } = await createHarness({
+      onBackgroundFailure: reporter,
+    });
     agents.prepareInitialFanOutDispatchFailure("budget");
 
     const created = await service.createSession(requestFor("normal-world-v1"));
     expect(created.sessionState).toBe("DISPATCHING");
+    const originalMutate = store.mutate.bind(store) as EpochStore["mutate"];
+    let terminalClosureObserved = false;
+    let redundantClosureMutations = 0;
+    store.mutate = async <T>(
+      mutation: (database: EpochDatabase) => T | Promise<T>,
+    ): Promise<T> => {
+      if (terminalClosureObserved) {
+        const shadow = store.snapshot();
+        await mutation(shadow);
+        redundantClosureMutations += 1;
+        throw new Error(RAW_BACKGROUND_FAILURE_SENTINEL);
+      }
+      const result = await originalMutate(mutation);
+      const database = store.snapshot();
+      const session = database.sessions.find(
+        (candidate) => candidate.sessionId === created.sessionId,
+      );
+      const assignments = database.runAssignments.filter(
+        (assignment) => assignment.sessionId === created.sessionId,
+      );
+      if (
+        session?.state === "FAILED" &&
+        assignments.length === ROLES.length &&
+        assignments.every((assignment) => assignment.status === "REJECTED")
+      ) {
+        terminalClosureObserved = true;
+      }
+      return result;
+    };
+    let fanOutReleased = false;
     try {
       await agents.waitForInitialFanOutDispatches();
       expect(agents.initialFanOutStartedRoles()).toEqual(new Set(ROLES));
@@ -1142,69 +1236,70 @@ describe("EpochGuardService", () => {
         budget: 1,
         policy: 1,
       });
-    } finally {
       agents.releaseInitialFanOutDispatches();
-    }
+      fanOutReleased = true;
 
-    const failed = await waitForSessionState(service, created.sessionId, [
-      "FAILED",
-    ]);
-    expect(failed.sessionState).toBe("FAILED");
-    expect(failed.gate.effectsInSession).toBe(0);
-    expect(failed.latestDiagnostics).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          kind: "SYSTEM_FAILURE",
-          stage: "DISPATCH",
-          reasonCode: "RUN_FAILED",
-          role: "budget",
-        }),
-      ]),
-    );
-    await waitUntil(() =>
-      store
-        .snapshot()
-        .runAssignments.filter(
-          (assignment) => assignment.sessionId === created.sessionId,
-        )
-        .every((assignment) => assignment.status === "REJECTED"),
-    );
-    const database = store.snapshot();
-    expect(database.sessions).toHaveLength(1);
-    const session = database.sessions[0]!;
-    expect(failed.sessionId).toBe(session.sessionId);
-    expect(session.state).toBe("FAILED");
-    expect(database.effects).toHaveLength(0);
-    expect(database.permits).toHaveLength(0);
-    expect(
-      database.runAssignments.filter(
-        (assignment) => assignment.sessionId === session.sessionId,
-      ),
-    ).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ role: "inventory", status: "REJECTED" }),
-        expect.objectContaining({ role: "budget", status: "REJECTED" }),
-        expect.objectContaining({ role: "policy", status: "REJECTED" }),
-      ]),
-    );
-    expect(database.diagnostics).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          sessionId: session.sessionId,
-          kind: "SYSTEM_FAILURE",
-          stage: "DISPATCH",
-          reasonCode: "RUN_FAILED",
-          role: "budget",
-          runId: null,
-        }),
-      ]),
-    );
-    expect(service.getSnapshot(session.sessionId)).toMatchObject({
-      sessionId: failed.sessionId,
-      sessionRevision: failed.sessionRevision,
-      sessionState: "FAILED",
-      gate: { effectsInSession: 0 },
-    });
+      const failed = await waitForSessionState(service, created.sessionId, [
+        "FAILED",
+      ]);
+      await waitUntil(() => terminalClosureObserved);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(redundantClosureMutations).toBe(0);
+      expect(reporter).not.toHaveBeenCalled();
+      expect(failed.sessionState).toBe("FAILED");
+      expect(failed.gate.effectsInSession).toBe(0);
+      expect(failed.latestDiagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "SYSTEM_FAILURE",
+            stage: "DISPATCH",
+            reasonCode: "RUN_FAILED",
+            role: "budget",
+          }),
+        ]),
+      );
+      const database = store.snapshot();
+      expect(database.sessions).toHaveLength(1);
+      const session = database.sessions[0]!;
+      expect(failed.sessionId).toBe(session.sessionId);
+      expect(session.state).toBe("FAILED");
+      expect(database.effects).toHaveLength(0);
+      expect(database.permits).toHaveLength(0);
+      expect(
+        database.runAssignments.filter(
+          (assignment) => assignment.sessionId === session.sessionId,
+        ),
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ role: "inventory", status: "REJECTED" }),
+          expect.objectContaining({ role: "budget", status: "REJECTED" }),
+          expect.objectContaining({ role: "policy", status: "REJECTED" }),
+        ]),
+      );
+      expect(database.diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionId: session.sessionId,
+            kind: "SYSTEM_FAILURE",
+            stage: "DISPATCH",
+            reasonCode: "RUN_FAILED",
+            role: "budget",
+            runId: null,
+          }),
+        ]),
+      );
+      expect(service.getSnapshot(session.sessionId)).toMatchObject({
+        sessionId: failed.sessionId,
+        sessionRevision: failed.sessionRevision,
+        sessionState: "FAILED",
+        gate: { effectsInSession: 0 },
+      });
+    } finally {
+      if (!fanOutReleased) agents.releaseInitialFanOutDispatches();
+      store.mutate = originalMutate;
+    }
+    await service.resetDemo();
+    expect(store.snapshot().sessions).toHaveLength(0);
   });
 
   it("contains malformed initial output in the background and exposes a FAILED snapshot", async () => {
@@ -1241,6 +1336,143 @@ describe("EpochGuardService", () => {
     expect(database.rejectedOutputArtifacts).toHaveLength(1);
     expect(database.permits).toHaveLength(0);
     expect(database.effects).toHaveLength(0);
+  });
+
+  it("retries failed background-failure persistence once and releases ownership after success", async () => {
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandledRejection);
+    const { service, store, requestFor, workspaces } = await createHarness();
+    const faults = failNextStoreMutations(store, 1);
+    const packWriteFailed = workspaces.failNextPackWrite();
+    const request = requestFor("normal-world-v1");
+
+    try {
+      const created = await service.createSession(request);
+      faults.enable();
+      await packWriteFailed;
+      const failed = await waitForSessionState(service, created.sessionId, [
+        "FAILED",
+      ]);
+      expect(faults.failures()).toBe(1);
+      expect(failed.gate.effectsInSession).toBe(0);
+      const failedDatabase = store.snapshot();
+      const failedSession = failedDatabase.sessions.find(
+        (session) => session.sessionId === created.sessionId,
+      )!;
+      expect(failedDatabase.effects).toHaveLength(0);
+      expect(failedDatabase.permits).toHaveLength(0);
+      expect(
+        failedDatabase.diagnostics.filter(
+          (diagnostic) =>
+            diagnostic.sessionId === created.sessionId &&
+            diagnostic.sessionRevision === failedSession.sessionRevision,
+        ),
+      ).toHaveLength(1);
+      const failureEvents = failedDatabase.auditEvents.filter(
+        (event) =>
+          event.sessionId === created.sessionId &&
+          event.sessionRevision === failedSession.sessionRevision,
+      );
+      expect(failureEvents).toHaveLength(1);
+      expect(failureEvents[0]).toMatchObject({
+        type: "SESSION_STATE",
+        status: "FAILED",
+      });
+
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandledRejections).toHaveLength(0);
+      await service.resetDemo();
+      expect(store.snapshot().sessions).toHaveLength(0);
+    } finally {
+      faults.restore();
+      process.off("unhandledRejection", onUnhandledRejection);
+    }
+  });
+
+  it("retains fail-closed ownership and emits only a sanitized report when both persistence attempts fail", async () => {
+    const reports: Array<{
+      code: "BACKGROUND_FAILURE_PERSISTENCE_FAILED";
+      sessionId: string;
+    }> = [];
+    const reporter = vi.fn(
+      (report: Readonly<(typeof reports)[number]>): Promise<void> => {
+        reports.push({ ...report });
+        return Promise.reject(new Error(RAW_REPORTER_FAILURE_SENTINEL));
+      },
+    );
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandledRejection);
+    const {
+      agents,
+      restartService,
+      service,
+      store,
+      requestFor,
+      workspaces,
+    } = await createHarness({ onBackgroundFailure: reporter });
+    const faults = failNextStoreMutations(store, 2);
+    const packWriteFailed = workspaces.failNextPackWrite();
+    const request = requestFor("normal-world-v1");
+
+    try {
+      const created = await service.createSession(request);
+      faults.enable();
+      await packWriteFailed;
+      await waitUntil(() => reports.length === 1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(faults.failures()).toBe(2);
+      expect(reporter).toHaveBeenCalledOnce();
+      expect(reports).toEqual([
+        {
+          code: "BACKGROUND_FAILURE_PERSISTENCE_FAILED",
+          sessionId: created.sessionId,
+        },
+      ]);
+      expect(JSON.stringify(reports)).not.toContain(
+        RAW_BACKGROUND_FAILURE_SENTINEL,
+      );
+      expect(JSON.stringify(reports)).not.toContain(
+        RAW_REPORTER_FAILURE_SENTINEL,
+      );
+      expect(unhandledRejections).toHaveLength(0);
+
+      faults.restore();
+      const restarted = restartService();
+      await restarted.initialize();
+      const interrupted = restarted.getSnapshot(created.sessionId);
+      expect(interrupted.sessionState).toBe("INTERRUPTED");
+      expect(interrupted.gate).toMatchObject({
+        state: "FAILED",
+        effectsInSession: 0,
+      });
+
+      const resetError = await captureServiceError(() => service.resetDemo());
+      expect({ statusCode: resetError.statusCode, body: resetError.body }).toEqual({
+        statusCode: API_ERROR_STATUS.AGENTS_BUSY,
+        body: makeAgentsBusyError(created.sessionId, request.assignments),
+      });
+
+      expect(agents.dispatchCounts).toEqual({
+        inventory: 0,
+        budget: 0,
+        policy: 0,
+      });
+      expect(store.snapshot().effects).toHaveLength(0);
+      expect(store.snapshot().permits).toHaveLength(0);
+      expect(unhandledRejections).toHaveLength(0);
+      await restarted.resetDemo();
+      expect(store.snapshot().sessions).toHaveLength(0);
+    } finally {
+      faults.restore();
+      process.off("unhandledRejection", onUnhandledRejection);
+    }
   });
 
   it("reserves one concurrent Create and returns AGENTS_BUSY before duplicate dispatch", async () => {
@@ -1339,6 +1571,197 @@ describe("EpochGuardService", () => {
     expect(restarted.getSnapshot(ready.sessionId)).toEqual(interrupted);
   });
 
+  it("closes every real persisted COLLECTING Attempt and Assignment without redispatch", async () => {
+    const { agents, forkPersistedService, service, store, requestFor } =
+      await createHarness();
+    agents.holdAllInitialRuns();
+    const created = await service.createSession(requestFor("normal-world-v1"));
+
+    try {
+      await waitUntil(() => {
+        const database = store.snapshot();
+        const session = database.sessions.find(
+          (candidate) => candidate.sessionId === created.sessionId,
+        );
+        if (session?.state !== "COLLECTING") return false;
+        return ROLES.every((role) => {
+          const attemptId = session.activeAttemptIds[role];
+          const attempt = database.attempts.find(
+            (candidate) => candidate.attemptId === attemptId,
+          );
+          const assignment = database.runAssignments.find(
+            (candidate) => candidate.assignmentId === attempt?.assignmentId,
+          );
+          return (
+            attempt?.runId !== null &&
+            attempt?.runId !== undefined &&
+            assignment?.status === "BOUND" &&
+            assignment.boundRunId === attempt.runId
+          );
+        });
+      });
+      const beforeRestart = store.snapshot();
+      const inFlightSession = beforeRestart.sessions.find(
+        (session) => session.sessionId === created.sessionId,
+      )!;
+      const activeAttemptIds = ROLES.map(
+        (role) => inFlightSession.activeAttemptIds[role]!,
+      );
+      const dispatchesBeforeRestart = structuredClone(agents.dispatchCounts);
+
+      const restarted = await forkPersistedService();
+      await restarted.service.initialize();
+      const interrupted = restarted.service.getSnapshot(created.sessionId);
+      expect(interrupted.sessionState).toBe("INTERRUPTED");
+      expect(interrupted.gate).toMatchObject({
+        state: "FAILED",
+        reasonCode: "RUN_FAILED",
+        effectsInSession: 0,
+      });
+      expect(agents.dispatchCounts).toEqual(dispatchesBeforeRestart);
+
+      const recoveredDatabase = restarted.store.snapshot();
+      const recoveredSession = recoveredDatabase.sessions.find(
+        (session) => session.sessionId === created.sessionId,
+      )!;
+      expect(recoveredSession.activeAttemptIds).toEqual({
+        inventory: null,
+        budget: null,
+        policy: null,
+      });
+      const recoveredAttempts = recoveredDatabase.attempts.filter((attempt) =>
+        activeAttemptIds.includes(attempt.attemptId),
+      );
+      expect(recoveredAttempts).toHaveLength(3);
+      expect(
+        recoveredAttempts.every(
+          (attempt) =>
+            attempt.status === "INTERRUPTED" &&
+            attempt.runCompletedAt !== null,
+        ),
+      ).toBe(true);
+      const recoveredAssignmentIds = new Set(
+        recoveredAttempts.map((attempt) => attempt.assignmentId),
+      );
+      expect(
+        recoveredDatabase.runAssignments
+          .filter((assignment) =>
+            recoveredAssignmentIds.has(assignment.assignmentId),
+          )
+          .every((assignment) => assignment.status === "REJECTED"),
+      ).toBe(true);
+      expect(recoveredDatabase.effects).toHaveLength(0);
+      expect(recoveredDatabase.permits).toHaveLength(0);
+      expect(
+        recoveredDatabase.diagnostics.filter(
+          (diagnostic) =>
+            diagnostic.sessionId === created.sessionId &&
+            diagnostic.sessionRevision === recoveredSession.sessionRevision,
+        ),
+      ).toHaveLength(1);
+      expect(
+        recoveredDatabase.auditEvents.filter(
+          (event) =>
+            event.sessionId === created.sessionId &&
+            event.sessionRevision === recoveredSession.sessionRevision,
+        ),
+      ).toHaveLength(1);
+
+      await restarted.service.initialize();
+      expect(restarted.store.snapshot()).toEqual(recoveredDatabase);
+      expect(restarted.service.getSnapshot(created.sessionId)).toEqual(
+        interrupted,
+      );
+    } finally {
+      agents.releaseInitialRuns();
+      await waitUntil(() => {
+        const database = store.snapshot();
+        const state = database.sessions.find(
+          (session) => session.sessionId === created.sessionId,
+        )?.state;
+        const assignments = database.runAssignments.filter(
+          (assignment) => assignment.sessionId === created.sessionId,
+        );
+        return (
+          state !== "DISPATCHING" &&
+          state !== "COLLECTING" &&
+          assignments.length === 3 &&
+          assignments.every(
+            (assignment) =>
+              assignment.status === "CONSUMED" ||
+              assignment.status === "REJECTED",
+          )
+        );
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  });
+
+  it("rejects an in-flight Session whose active RefreshPlan is not CLAIMED without publishing recovery", async () => {
+    const { forkPersistedService, service, requestFor } = await createHarness();
+    const created = await service.createSession(
+      requestFor("impossible-collage-v1"),
+    );
+    const blocked = await waitForSessionState(service, created.sessionId, [
+      "BLOCKED_NO_CUT",
+    ]);
+    const malformed = await forkPersistedService();
+    await malformed.store.initialize();
+    await malformed.store.mutate((database) => {
+      const session = database.sessions.find(
+        (candidate) => candidate.sessionId === blocked.sessionId,
+      )!;
+      const plan = database.refreshPlans.find(
+        (candidate) =>
+          candidate.refreshPlanId === session.activeRefreshPlanId,
+      )!;
+      expect(plan.status).toBe("AVAILABLE");
+      session.state = "REOBSERVING";
+      session.sessionRevision += 1;
+      session.stateUpdatedAt = NOW;
+    });
+    const beforeRecovery = malformed.store.snapshot();
+
+    await expect(malformed.service.initialize()).rejects.toThrow(
+      "In-flight Session active RefreshPlan is not CLAIMED",
+    );
+    expect(malformed.store.snapshot()).toEqual(beforeRecovery);
+  });
+
+  it("rejects an in-flight Session whose active Permit is not ISSUED without publishing recovery", async () => {
+    const { forkPersistedService, service, requestFor } = await createHarness();
+    const created = await service.createSession(requestFor("normal-world-v1"));
+    const ready = await waitForSessionState(service, created.sessionId, [
+      "READY_AT_CURRENT_HEAD",
+    ]);
+    const committed = await service.commit(ready.sessionId, {
+      expectedSessionRevision: ready.sessionRevision,
+    });
+    expect(committed).toMatchObject({ status: "COMMITTED", created: true });
+
+    const malformed = await forkPersistedService();
+    await malformed.store.initialize();
+    await malformed.store.mutate((database) => {
+      const session = database.sessions.find(
+        (candidate) => candidate.sessionId === ready.sessionId,
+      )!;
+      const permit = database.permits.find(
+        (candidate) => candidate.permitId === session.activePermitId,
+      )!;
+      expect(permit.status).toBe("CONSUMED");
+      expect(database.effects).toHaveLength(1);
+      session.state = "COMMITTING";
+      session.sessionRevision += 1;
+      session.stateUpdatedAt = NOW;
+    });
+    const beforeRecovery = malformed.store.snapshot();
+
+    await expect(malformed.service.initialize()).rejects.toThrow(
+      "In-flight Session active Permit is not ISSUED",
+    );
+    expect(malformed.store.snapshot()).toEqual(beforeRecovery);
+  });
+
   it("preserves BLOCKED_NO_CUT across restart and can still refresh to DENY", async () => {
     const { agents, forkPersistedService, service, requestFor } =
       await createHarness();
@@ -1369,7 +1792,8 @@ describe("EpochGuardService", () => {
   });
 
   it("preserves READY_AT_CURRENT_HEAD across restart and commits exactly once", async () => {
-    const { forkPersistedService, service, requestFor } = await createHarness();
+    const { forkPersistedService, restartService, service, requestFor } =
+      await createHarness();
     const created = await service.createSession(requestFor("normal-world-v1"));
     const ready = await waitForSessionState(service, created.sessionId, [
       "READY_AT_CURRENT_HEAD",
@@ -1386,7 +1810,9 @@ describe("EpochGuardService", () => {
       created: true,
       effectsInSession: 1,
     });
-    const duplicate = await restarted.service.commit(ready.sessionId, {
+    const secondRestart = restartService(restarted.store);
+    await secondRestart.initialize();
+    const duplicate = await secondRestart.commit(ready.sessionId, {
       expectedSessionRevision: ready.sessionRevision,
     });
     expect(duplicate).toMatchObject({
@@ -1457,6 +1883,15 @@ describe("EpochGuardService", () => {
         (plan) => plan.refreshPlanId === blocked.refreshPlan!.refreshPlanId,
       )!;
       const claimedAttemptId = claimedPlan.claimedAttemptId!;
+      const historicalDecisions = beforeRestart.decisions.filter(
+        (decision) => decision.sessionId === blocked.sessionId,
+      );
+      const historicalValidations = beforeRestart.validations.filter(
+        (validation) => validation.sessionId === blocked.sessionId,
+      );
+      const historicalProofs = beforeRestart.noCutProofs.filter(
+        (proof) => proof.sessionId === blocked.sessionId,
+      );
 
       const restarted = await forkPersistedService();
       await restarted.service.initialize();
@@ -1493,15 +1928,48 @@ describe("EpochGuardService", () => {
           (plan) => plan.refreshPlanId === claimedPlan.refreshPlanId,
         ),
       ).toMatchObject({
-        status: "CLAIMED",
-        claimedAttemptId,
+        status: "INVALIDATED",
+        claimedAttemptId: null,
+      });
+      const recoveredAttempt = recoveredDatabase.attempts.find(
+        (attempt) => attempt.attemptId === claimedAttemptId,
+      )!;
+      expect(recoveredAttempt).toMatchObject({
+        status: "INTERRUPTED",
+        runCompletedAt: expect.any(String),
       });
       expect(
-        recoveredDatabase.attempts.some(
-          (attempt) => attempt.attemptId === claimedAttemptId,
+        recoveredDatabase.runAssignments.find(
+          (assignment) =>
+            assignment.assignmentId === recoveredAttempt.assignmentId,
         ),
-      ).toBe(true);
+      ).toMatchObject({ status: "REJECTED" });
       expect(recoveredDatabase.effects).toHaveLength(0);
+      expect(recoveredDatabase.permits).toHaveLength(0);
+      expect(
+        recoveredDatabase.decisions.filter(
+          (decision) => decision.sessionId === blocked.sessionId,
+        ),
+      ).toEqual(historicalDecisions);
+      expect(
+        recoveredDatabase.validations.filter(
+          (validation) => validation.sessionId === blocked.sessionId,
+        ),
+      ).toEqual(historicalValidations);
+      expect(
+        recoveredDatabase.noCutProofs.filter(
+          (proof) => proof.sessionId === blocked.sessionId,
+        ),
+      ).toEqual(historicalProofs);
+      const recoveredSnapshotRevision = recoveredDatabase.snapshotRevision;
+      const recoveryDiagnosticCount = recoveredDatabase.diagnostics.length;
+      const recoveryEventCount = recoveredDatabase.auditEvents.length;
+      await restarted.service.initialize();
+      expect(restarted.store.snapshot()).toMatchObject({
+        snapshotRevision: recoveredSnapshotRevision,
+        diagnostics: { length: recoveryDiagnosticCount },
+        auditEvents: { length: recoveryEventCount },
+      });
     } finally {
       agents.releaseRefreshBudgetRun();
       const outcome = await refreshOutcome;

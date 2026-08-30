@@ -123,6 +123,17 @@ const IN_FLIGHT_SESSION_STATES = new Set<EpochSession["state"]>([
   "COMMITTING",
 ]);
 
+const TERMINAL_ATTEMPT_STATES = new Set<AgentAttempt["status"]>([
+  "COMPLETED",
+  "FAILED",
+  "INTERRUPTED",
+  "OUTPUT_REJECTED",
+  "ACCEPTED",
+]);
+
+const BACKGROUND_FAILURE_PERSISTENCE_FAILED =
+  "BACKGROUND_FAILURE_PERSISTENCE_FAILED" as const;
+
 type RuntimeAgentPort = AgentPort &
   Pick<AgentService, "systemInfo">;
 type RuntimeWorkspacePort = WorkspacePort &
@@ -140,6 +151,12 @@ export interface EpochGuardServiceOptions {
   createId?: (prefix: string) => string;
   nonceFactory?: () => string;
   runObserver?: RunObserverOptions;
+  onBackgroundFailure?: (
+    report: Readonly<{
+      code: typeof BACKGROUND_FAILURE_PERSISTENCE_FAILED;
+      sessionId: string;
+    }>,
+  ) => void | Promise<void>;
 }
 
 export class EpochGuardServiceError extends Error {
@@ -238,6 +255,9 @@ export class EpochGuardService {
   private readonly issuer: ReceiptIssuer;
   private readonly packWriter: EvidencePackWriter;
   private readonly viewBuilder: SessionViewBuilder;
+  private readonly onBackgroundFailure: NonNullable<
+    EpochGuardServiceOptions["onBackgroundFailure"]
+  >;
   private readonly backgroundTasks = new Map<string, Promise<void>>();
   private initializePromise: Promise<void> | null = null;
   private initialized = false;
@@ -261,6 +281,11 @@ export class EpochGuardService {
     this.createId =
       options.createId ?? ((prefix) => `${prefix}_${randomUUID()}`);
     this.runObserver = options.runObserver ?? {};
+    this.onBackgroundFailure =
+      options.onBackgroundFailure ??
+      ((report) => {
+        console.error(`[${report.code}] ${report.sessionId}`);
+      });
     this.rolePorts = {
       agents: ports.agents,
       store: ports.store,
@@ -295,39 +320,7 @@ export class EpochGuardService {
       await this.ports.store.mutate((database) => {
         for (const session of database.sessions) {
           if (!IN_FLIGHT_SESSION_STATES.has(session.state)) continue;
-          session.state = "INTERRUPTED";
-          session.sessionRevision += 1;
-          session.stateUpdatedAt = timestamp;
-          session.activeAttemptIds = {
-            inventory: null,
-            budget: null,
-            policy: null,
-          };
-          session.activeValidationId = null;
-          session.activeRefreshPlanId = null;
-          if (session.activePermitId !== null) {
-            const permit = database.permits.find(
-              (candidate) => candidate.permitId === session.activePermitId,
-            );
-            if (permit?.status === "ISSUED") {
-              permit.status = "REVOKED";
-              permit.consumedAt = null;
-            }
-            session.activePermitId = null;
-          }
-          this.appendDiagnostic(database, session, {
-            kind: "SYSTEM_FAILURE",
-            stage: "DISPATCH",
-            reasonCode: "RUN_FAILED",
-            role: null,
-            attemptId: null,
-            assignmentId: null,
-            runId: null,
-            artifactRefs: [],
-            rejectedOutputArtifactId: null,
-            recommendedAction: "NEW_SESSION",
-          });
-          this.appendEvent(database, session, "SESSION_STATE", "INTERRUPTED", []);
+          this.recoverInFlightSession(database, session, timestamp);
         }
       });
     }
@@ -348,6 +341,195 @@ export class EpochGuardService {
       throw error;
     }
     this.initialized = true;
+  }
+
+  private recoverInFlightSession(
+    database: EpochDatabase,
+    session: EpochSession,
+    timestamp: string,
+  ): void {
+    const referencedAttempts = ROLES.flatMap((role) => {
+      const attemptId = session.activeAttemptIds[role];
+      return attemptId === null ? [] : [{ role, attemptId }];
+    });
+    const referencedAttemptIds = new Set(
+      referencedAttempts.map(({ attemptId }) => attemptId),
+    );
+    if (referencedAttemptIds.size !== referencedAttempts.length) {
+      throw new Error("In-flight Session references a duplicate active Attempt");
+    }
+
+    const expectedAssignments = frozenAssignments(session);
+    for (const { role, attemptId } of referencedAttempts) {
+      const attempts = database.attempts.filter(
+        (candidate) => candidate.attemptId === attemptId,
+      );
+      if (attempts.length !== 1) {
+        throw new Error("In-flight Session active Attempt is missing or duplicated");
+      }
+      const attempt = attempts[0]!;
+      const expectedAgentId = expectedAssignments[role];
+      if (
+        attempt.sessionId !== session.sessionId ||
+        attempt.actionHash !== session.actionHash ||
+        attempt.role !== role ||
+        attempt.agentId !== expectedAgentId
+      ) {
+        throw new Error("In-flight Session active Attempt binding is invalid");
+      }
+
+      const assignments = database.runAssignments.filter(
+        (candidate) => candidate.assignmentId === attempt.assignmentId,
+      );
+      if (assignments.length !== 1) {
+        throw new Error(
+          "In-flight Session active Assignment is missing or duplicated",
+        );
+      }
+      const assignment = assignments[0]!;
+      if (
+        assignment.sessionId !== session.sessionId ||
+        assignment.actionHash !== session.actionHash ||
+        assignment.role !== role ||
+        assignment.agentId !== expectedAgentId ||
+        assignment.assignmentId !== attempt.assignmentId ||
+        assignment.boundRunId !== attempt.runId
+      ) {
+        throw new Error("In-flight Session active Assignment binding is invalid");
+      }
+      const unconsumed =
+        assignment.consumedByDecisionCertificateId === null &&
+        assignment.consumedAt === null;
+      const consumed =
+        assignment.consumedByDecisionCertificateId !== null &&
+        assignment.consumedAt !== null;
+      if (assignment.status === "CREATED") {
+        if (
+          !unconsumed ||
+          assignment.boundRunId !== null ||
+          assignment.boundAt !== null
+        ) {
+          throw new Error("Created active Assignment has an invalid timeline");
+        }
+        assignment.status = "REJECTED";
+      } else if (assignment.status === "BOUND") {
+        if (
+          !unconsumed ||
+          assignment.boundRunId === null ||
+          assignment.boundAt === null
+        ) {
+          throw new Error("Bound active Assignment has an invalid timeline");
+        }
+        assignment.status = "REJECTED";
+      } else if (
+        assignment.status === "CONSUMED" &&
+        (!consumed ||
+          assignment.boundRunId === null ||
+          assignment.boundAt === null ||
+          attempt.status !== "ACCEPTED")
+      ) {
+        throw new Error("Consumed active Assignment is not backed by acceptance");
+      } else if (assignment.status === "REJECTED") {
+        if (
+          !unconsumed ||
+          (assignment.boundRunId === null) !== (assignment.boundAt === null)
+        ) {
+          throw new Error("Rejected active Assignment has an invalid timeline");
+        }
+      }
+
+      if (!TERMINAL_ATTEMPT_STATES.has(attempt.status)) {
+        attempt.status = "INTERRUPTED";
+        if (attempt.runId !== null) {
+          attempt.runCompletedAt =
+            attempt.runStartedAt !== null &&
+            Date.parse(attempt.runStartedAt) > Date.parse(timestamp)
+              ? attempt.runStartedAt
+              : timestamp;
+        }
+      }
+      AgentAttemptSchema.parse(attempt);
+      RunAssignmentSchema.parse(assignment);
+    }
+
+    if (session.activeValidationId !== null) {
+      const validations = database.validations.filter(
+        (candidate) =>
+          candidate.validationId === session.activeValidationId,
+      );
+      if (
+        validations.length !== 1 ||
+        validations[0]!.sessionId !== session.sessionId ||
+        validations[0]!.actionHash !== session.actionHash
+      ) {
+        throw new Error("In-flight Session active Validation binding is invalid");
+      }
+    }
+
+    if (session.activeRefreshPlanId !== null) {
+      const plans = database.refreshPlans.filter(
+        (candidate) =>
+          candidate.refreshPlanId === session.activeRefreshPlanId,
+      );
+      if (plans.length !== 1 || plans[0]!.sessionId !== session.sessionId) {
+        throw new Error("In-flight Session active RefreshPlan binding is invalid");
+      }
+      const plan = plans[0]!;
+      if (plan.status !== "CLAIMED") {
+        throw new Error("In-flight Session active RefreshPlan is not CLAIMED");
+      }
+      if (
+        plan.claimedAttemptId === null ||
+        !referencedAttemptIds.has(plan.claimedAttemptId)
+      ) {
+        throw new Error("Claimed RefreshPlan has no active owner Attempt");
+      }
+      plan.status = "INVALIDATED";
+      plan.claimedAttemptId = null;
+    }
+
+    if (session.activePermitId !== null) {
+      const permits = database.permits.filter(
+        (candidate) => candidate.permitId === session.activePermitId,
+      );
+      if (
+        permits.length !== 1 ||
+        permits[0]!.sessionId !== session.sessionId ||
+        permits[0]!.actionHash !== session.actionHash
+      ) {
+        throw new Error("In-flight Session active Permit binding is invalid");
+      }
+      if (permits[0]!.status !== "ISSUED") {
+        throw new Error("In-flight Session active Permit is not ISSUED");
+      }
+      permits[0]!.status = "REVOKED";
+      permits[0]!.consumedAt = null;
+    }
+
+    session.activeAttemptIds = {
+      inventory: null,
+      budget: null,
+      policy: null,
+    };
+    session.activeValidationId = null;
+    session.activeRefreshPlanId = null;
+    session.activePermitId = null;
+    session.state = "INTERRUPTED";
+    session.sessionRevision += 1;
+    session.stateUpdatedAt = timestamp;
+    this.appendDiagnostic(database, session, {
+      kind: "SYSTEM_FAILURE",
+      stage: "DISPATCH",
+      reasonCode: "RUN_FAILED",
+      role: null,
+      attemptId: null,
+      assignmentId: null,
+      runId: null,
+      artifactRefs: [],
+      rejectedOutputArtifactId: null,
+      recommendedAction: "NEW_SESSION",
+    });
+    this.appendEvent(database, session, "SESSION_STATE", "INTERRUPTED", []);
   }
 
   async createSession(
@@ -840,6 +1022,7 @@ export class EpochGuardService {
     prepared: readonly PreparedPack[],
   ): void {
     if (this.backgroundTasks.has(sessionId)) return;
+    let releaseOwnership = false;
     const task = new Promise<void>((resolve) => setImmediate(resolve))
       .then(async () => {
         await Promise.all(
@@ -848,18 +1031,60 @@ export class EpochGuardService {
         await this.transitionToCollecting(sessionId);
         const observations = await this.runInitialFanOut(sessionId, prepared);
         await this.acceptAndValidate(sessionId, observations, null);
+        releaseOwnership = true;
       })
       .catch(async (error: unknown) => {
-        try {
-          await this.failSession(sessionId, error);
-        } catch {
-          // The background owner must never leak a rejected Promise.
-        }
+        releaseOwnership = await this.closeBackgroundFailure(sessionId, error);
       })
       .finally(() => {
-        this.backgroundTasks.delete(sessionId);
+        if (releaseOwnership) this.backgroundTasks.delete(sessionId);
       });
     this.backgroundTasks.set(sessionId, task);
+  }
+
+  private async closeBackgroundFailure(
+    sessionId: string,
+    error: unknown,
+  ): Promise<boolean> {
+    if (this.hasPersistedTerminalSession(sessionId)) return true;
+    try {
+      await this.failSession(sessionId, error);
+      return true;
+    } catch {
+      if (this.hasPersistedTerminalSession(sessionId)) return true;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (this.hasPersistedTerminalSession(sessionId)) return true;
+      try {
+        await this.failSession(sessionId, error);
+        return true;
+      } catch {
+        if (this.hasPersistedTerminalSession(sessionId)) return true;
+        this.reportBackgroundFailure(sessionId);
+        return false;
+      }
+    }
+  }
+
+  private hasPersistedTerminalSession(sessionId: string): boolean {
+    try {
+      const session = sessionById(this.ports.store.snapshot(), sessionId);
+      return session !== null && TERMINAL_SESSION_STATES.has(session.state);
+    } catch {
+      return false;
+    }
+  }
+
+  private reportBackgroundFailure(sessionId: string): void {
+    const report = Object.freeze({
+      code: BACKGROUND_FAILURE_PERSISTENCE_FAILED,
+      sessionId,
+    });
+    try {
+      const pending = this.onBackgroundFailure(report);
+      void Promise.resolve(pending).catch(() => undefined);
+    } catch {
+      // Reporting is best-effort and must never reject the background owner.
+    }
   }
 
   private async runInitialFanOut(
