@@ -17,8 +17,10 @@ import {
   ValidationRecordSchema,
   actionHash as canonicalActionHash,
   buildRoleQuerySpec,
+  canonicalJson,
   canonicalizeRoleQuery,
   makeStaleViewError,
+  sha256Digest,
   snapshotReceiptDependencySetHash,
   type CommitSessionRequest,
   type EffectRecord,
@@ -29,6 +31,7 @@ import {
   type ObservationReceipt,
   type ResourceVersion,
   type Role,
+  type RoleAgentRegistration,
   type RunAssignment,
   type StaleViewErrorBody,
   type ValidationRecord,
@@ -143,31 +146,79 @@ function expectedAgentForRole(session: EpochSession, role: Role): string {
   }
 }
 
-function requireRegisteredAssignmentProfile(
+function requireFrozenRoleRegistrations(
   database: EpochDatabase,
+  session: EpochSession,
+  effectsInSession = 0,
+): ReadonlyMap<Role, RoleAgentRegistration> {
+  if (database.roleAgentRegistrations.length !== ROLES.length) {
+    reject(
+      "DECISION_INVALID",
+      "the frozen Registration set must contain exactly three Role entries",
+      effectsInSession,
+    );
+  }
+  const registrations = database.roleAgentRegistrations.map((record) => {
+    const parsed = RoleAgentRegistrationSchema.safeParse(record);
+    if (!parsed.success) {
+      reject(
+        "DECISION_INVALID",
+        "a frozen Role Registration is malformed",
+        effectsInSession,
+      );
+    }
+    return parsed.data;
+  });
+  if (
+    new Set(registrations.map((registration) => registration.role)).size !==
+      ROLES.length ||
+    new Set(registrations.map((registration) => registration.agentId)).size !==
+      ROLES.length
+  ) {
+    reject(
+      "DECISION_INVALID",
+      "frozen Registrations must cover each Role once with distinct Agents",
+      effectsInSession,
+    );
+  }
+  const byRole = new Map<Role, RoleAgentRegistration>();
+  for (const role of ROLES) {
+    const registration = registrations.find(
+      (candidate) => candidate.role === role,
+    );
+    if (
+      registration === undefined ||
+      registration.agentId !== expectedAgentForRole(session, role)
+    ) {
+      reject(
+        "DECISION_INVALID",
+        `${role} frozen Registration does not match the Session Agent`,
+        effectsInSession,
+      );
+    }
+    byRole.set(role, registration);
+  }
+  return byRole;
+}
+
+function requireRegisteredAssignmentProfile(
+  registrations: ReadonlyMap<Role, RoleAgentRegistration>,
   role: Role,
   expectedAgentId: string,
   assignment: RunAssignment,
   effectsInSession = 0,
 ): void {
-  const registrationRecord = requireSingle(
-    database.roleAgentRegistrations.filter(
-      (candidate) =>
-        candidate.role === role &&
-        candidate.agentId === expectedAgentId &&
-        candidate.roleProfileVersion === assignment.roleProfileVersion &&
-        candidate.agentsMdDigest === assignment.agentsMdDigest,
-    ),
-    "DECISION_INVALID",
-    `${role} Assignment agent/profile must resolve exactly one frozen Registration`,
-    effectsInSession,
-  );
-  const parsedRegistration =
-    RoleAgentRegistrationSchema.safeParse(registrationRecord);
-  if (!parsedRegistration.success) {
+  const registration = registrations.get(role);
+  if (
+    registration === undefined ||
+    registration.agentId !== expectedAgentId ||
+    assignment.agentId !== registration.agentId ||
+    assignment.roleProfileVersion !== registration.roleProfileVersion ||
+    assignment.agentsMdDigest !== registration.agentsMdDigest
+  ) {
     reject(
       "DECISION_INVALID",
-      `${role} frozen Registration is malformed`,
+      `${role} Assignment tuple does not match its frozen Registration`,
       effectsInSession,
     );
   }
@@ -191,6 +242,11 @@ function validateCommittedEvidenceClosure(
   const fail = (reasonCode: FailureCode, message: string): never =>
     reject(reasonCode, message, effectsInSession);
   const activeDecisionIds = orderedActiveDecisionIds(session, effectsInSession);
+  const registrations = requireFrozenRoleRegistrations(
+    database,
+    session,
+    effectsInSession,
+  );
   const receiptIds: string[] = [];
   const attemptIds: string[] = [];
   const runIds: string[] = [];
@@ -257,7 +313,7 @@ function validateCommittedEvidenceClosure(
       );
     }
     requireRegisteredAssignmentProfile(
-      database,
+      registrations,
       role,
       expectedAgentId,
       assignment,
@@ -342,6 +398,7 @@ function validateCommittedEvidenceClosure(
     if (
       version.sourceRevision !== receipt.sourceRevision ||
       version.valueHash !== receipt.valueHash ||
+      version.valueHash !== sha256Digest(canonicalJson(version.value)) ||
       version.validFromSeq > receipt.observedAtSeq ||
       (version.validUntilSeq !== null &&
         receipt.observedAtSeq >= version.validUntilSeq) ||
@@ -967,6 +1024,7 @@ export async function commitProtectedEffect(
       const attemptIds: string[] = [];
       const runIds: string[] = [];
       const intervalBounds: Array<{ from: number; until: number }> = [];
+      const registrations = requireFrozenRoleRegistrations(database, session);
       for (const [index, role] of ROLES.entries()) {
         const decisionId = activeDecisionIds[index]!;
         const decisionRecord = requireSingle(
@@ -1030,7 +1088,7 @@ export async function commitProtectedEffect(
           );
         }
         requireRegisteredAssignmentProfile(
-          database,
+          registrations,
           role,
           expectedAgentId,
           assignment,
@@ -1120,6 +1178,7 @@ export async function commitProtectedEffect(
         if (
           version.sourceRevision !== receipt.sourceRevision ||
           version.valueHash !== receipt.valueHash ||
+          version.valueHash !== sha256Digest(canonicalJson(version.value)) ||
           version.validFromSeq > receipt.observedAtSeq ||
           (version.validUntilSeq !== null &&
             receipt.observedAtSeq >= version.validUntilSeq) ||
@@ -1187,6 +1246,14 @@ export async function commitProtectedEffect(
           "dependency set or current-head interval intersection changed",
         );
       }
+
+      validateCompletedRefreshPlanClosure(
+        database,
+        session,
+        validation,
+        expectedActionHash,
+        0,
+      );
 
       const concurrentExisting = database.effects.find(
         (candidate) =>

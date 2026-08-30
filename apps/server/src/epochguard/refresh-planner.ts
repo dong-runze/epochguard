@@ -11,8 +11,10 @@ import {
   TimestampSchema,
   ValidationRecordSchema,
   buildRoleQuerySpec,
+  canonicalJson,
   makeAlreadyReobservingError,
   makeStaleViewError,
+  sha256Digest,
   snapshotReceiptDependencySetHash,
   type AgentAttempt,
   type AlreadyReobservingErrorBody,
@@ -327,6 +329,7 @@ export function buildRefreshPlan(input: BuildRefreshPlanInput): RefreshPlan {
     if (
       version.sourceRevision !== receipt.sourceRevision ||
       version.valueHash !== receipt.valueHash ||
+      version.valueHash !== sha256Digest(canonicalJson(version.value)) ||
       version.validFromSeq > receipt.observedAtSeq ||
       (version.validUntilSeq !== null &&
         receipt.observedAtSeq >= version.validUntilSeq)
@@ -552,15 +555,72 @@ function assertClaimArtifacts(
   return { assignment, attempt };
 }
 
-function assertClaimedAttempt(
+function assertClaimedPlanClosure(
   database: EpochDatabase,
   session: EpochSession,
   plan: RefreshPlan,
   agentId: string,
+  world: RefreshPlannerWorldPort,
 ): string {
-  if (plan.claimedAttemptId === null) {
-    return failInvariant("CLAIMED RefreshPlan is missing claimedAttemptId");
+  const parsedPlan = RefreshPlanSchema.safeParse(plan);
+  if (!parsedPlan.success) {
+    return failInvariant("CLAIMED RefreshPlan is malformed");
   }
+  if (
+    plan.status !== "CLAIMED" ||
+    plan.claimedAttemptId === null ||
+    plan.sessionId !== session.sessionId ||
+    session.state !== "REOBSERVING" ||
+    session.sessionRevision !== plan.baseSessionRevision + 1 ||
+    session.activeRefreshPlanId !== plan.refreshPlanId ||
+    session.activePermitId !== null ||
+    session.activeAttemptIds.inventory !== null ||
+    session.activeAttemptIds.budget !== plan.claimedAttemptId ||
+    session.activeAttemptIds.policy !== null ||
+    database.headSeq !== plan.validatedHead ||
+    !activeValidationBindsPlan(database, session, plan)
+  ) {
+    return failInvariant(
+      "CLAIMED RefreshPlan does not close over its REOBSERVING Session pointers and single CAS revision",
+    );
+  }
+
+  const planningDatabase = structuredClone(database);
+  const planningSessions = planningDatabase.sessions.filter(
+    (candidate) => candidate.sessionId === session.sessionId,
+  );
+  if (planningSessions.length !== 1) {
+    return failInvariant("CLAIMED RefreshPlan Session must resolve exactly once");
+  }
+  const planningSession = planningSessions[0]!;
+  planningSession.state = "BLOCKED_NO_CUT";
+  planningSession.sessionRevision = plan.baseSessionRevision;
+  planningSession.activeAttemptIds = {
+    inventory: null,
+    budget: null,
+    policy: null,
+  };
+  const authoritative = buildRefreshPlan({
+    refreshPlanId: plan.refreshPlanId,
+    sessionId: session.sessionId,
+    database: planningDatabase,
+    world,
+  });
+  if (
+    plan.baseSessionRevision !== authoritative.baseSessionRevision ||
+    plan.validatedHead !== authoritative.validatedHead ||
+    plan.dependencySetHash !== authoritative.dependencySetHash ||
+    !sameOrderedIds(
+      plan.activeDecisionCertificateIds,
+      authoritative.activeDecisionCertificateIds,
+    ) ||
+    !sameOrderedIds(plan.agentIds, authoritative.agentIds)
+  ) {
+    return failInvariant(
+      "CLAIMED RefreshPlan no longer matches its frozen head, dependency, Decisions, or NoCutProof",
+    );
+  }
+
   const attempts = database.attempts.filter(
     (candidate) => candidate.attemptId === plan.claimedAttemptId,
   );
@@ -575,18 +635,39 @@ function assertClaimedAttempt(
     return failInvariant("claimed Attempt must resolve exactly one Assignment");
   }
   const assignment = RunAssignmentSchema.parse(assignments[0]);
+  const assignmentAttempts = database.attempts.filter(
+    (candidate) => candidate.assignmentId === assignment.assignmentId,
+  );
+  const createdBinding =
+    assignment.status === "CREATED" &&
+    assignment.boundRunId === null &&
+    assignment.boundAt === null &&
+    attempt.runId === null;
+  const activeRunBinding =
+    assignment.status === "BOUND" &&
+    assignment.boundRunId !== null &&
+    assignment.boundAt !== null &&
+    attempt.runId === assignment.boundRunId;
   if (
+    assignmentAttempts.length !== 1 ||
     attempt.sessionId !== session.sessionId ||
     attempt.actionHash !== session.actionHash ||
     attempt.role !== "budget" ||
     attempt.agentId !== agentId ||
+    attempt.assignmentId !== assignment.assignmentId ||
+    (attempt.status === "ACCEPTED" && attempt.outputDigest === null) ||
     assignment.sessionId !== session.sessionId ||
     assignment.actionHash !== session.actionHash ||
     assignment.role !== "budget" ||
-    assignment.agentId !== agentId
+    assignment.agentId !== agentId ||
+    assignment.queryHash !==
+      buildRoleQuerySpec(session.action, "budget").queryHash ||
+    assignment.consumedAt !== null ||
+    assignment.consumedByDecisionCertificateId !== null ||
+    (!createdBinding && !activeRunBinding)
   ) {
     return failInvariant(
-      "CLAIMED RefreshPlan Attempt/Assignment does not match its Budget owner",
+      "CLAIMED RefreshPlan Attempt/Assignment owner or Run binding is invalid",
     );
   }
   return attempt.attemptId;
@@ -638,16 +719,12 @@ export async function claimRefreshPlan(
       const agentId = requireP0BudgetOwner(session, plan.agentIds);
 
       if (plan.status === "CLAIMED") {
-        if (!activeValidationBindsPlan(database, session, plan)) {
-          return failInvariant(
-            "CLAIMED RefreshPlan is not bound by the active Validation",
-          );
-        }
-        const claimedAttemptId = assertClaimedAttempt(
+        const claimedAttemptId = assertClaimedPlanClosure(
           database,
           session,
           plan,
           agentId,
+          input.world,
         );
         throw new AbortRefreshClaim({
           status: "ALREADY_REOBSERVING",

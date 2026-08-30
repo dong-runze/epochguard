@@ -10,6 +10,7 @@ import {
   GOLDEN_ACTION_INPUT,
   ROLES,
   buildRoleQuerySpec,
+  canonicalJson,
   sha256Digest,
   snapshotReceiptDependencySetHash,
   type EpochDatabase,
@@ -66,15 +67,18 @@ function readyDatabase(): EpochDatabase {
   ];
   const dependencySetHash = snapshotReceiptDependencySetHash(receiptIds);
   const roleQuerySpecs = ROLES.map((role) => buildRoleQuerySpec(action, role));
-  const resourceVersions = roleQuerySpecs.map((spec) => ({
-    id: `version_${spec.role}_10`,
-    resourceId: `${spec.source}:${spec.entityKey}`,
-    sourceRevision: 10,
-    value: { role: spec.role, allow: true },
-    valueHash: sha256Digest(`value-${spec.role}-10`),
-    validFromSeq: 10,
-    validUntilSeq: null,
-  }));
+  const resourceVersions = roleQuerySpecs.map((spec) => {
+    const value = { role: spec.role, allow: true } as const;
+    return {
+      id: `version_${spec.role}_10`,
+      resourceId: `${spec.source}:${spec.entityKey}`,
+      sourceRevision: 10,
+      value,
+      valueHash: sha256Digest(canonicalJson(value)),
+      validFromSeq: 10,
+      validUntilSeq: null,
+    };
+  });
   const receipts = roleQuerySpecs.map((spec, index) => ({
     schemaVersion: 1 as const,
     receiptId: receiptIds[index]!,
@@ -268,13 +272,18 @@ function makePorts(
         database: Readonly<EpochDatabase>,
         receipt: Readonly<ObservationReceipt>,
       ): ResourceVersion | null {
-        return (
-          database.resourceVersions.find(
-            (version) =>
-              version.resourceId === `${receipt.source}:${receipt.entityKey}` &&
-              version.sourceRevision === receipt.sourceRevision,
-          ) ?? null
+        const version = database.resourceVersions.find(
+          (candidate) =>
+            candidate.resourceId === `${receipt.source}:${receipt.entityKey}` &&
+            candidate.sourceRevision === receipt.sourceRevision,
         );
+        if (
+          version === undefined ||
+          version.valueHash !== sha256Digest(canonicalJson(version.value))
+        ) {
+          return null;
+        }
+        return version;
       },
     },
     createEffectId,
@@ -301,8 +310,7 @@ async function committedDatabase(): Promise<EpochDatabase> {
   return store.snapshot();
 }
 
-async function committedDatabaseWithCompletedRefreshPlan(): Promise<EpochDatabase> {
-  const database = await committedDatabase();
+function withCompletedRefreshPlan(database: EpochDatabase): EpochDatabase {
   const session = database.sessions[0]!;
   const validation = database.validations[0]!;
   const inventoryDecisionId = session.activeDecisionCertificateIds.inventory!;
@@ -348,6 +356,19 @@ async function committedDatabaseWithCompletedRefreshPlan(): Promise<EpochDatabas
   });
   validation.refreshPlanId = "refresh_normal_completed";
   return database;
+}
+
+function readyDatabaseWithCompletedRefreshPlan(): EpochDatabase {
+  return withCompletedRefreshPlan(readyDatabase());
+}
+
+async function committedDatabaseWithCompletedRefreshPlan(): Promise<EpochDatabase> {
+  const store = new MemoryEffectStore(readyDatabaseWithCompletedRefreshPlan());
+  const result = await commit(makePorts(store));
+  if (result.status !== "COMMITTED" || !result.created) {
+    throw new Error("failed to create completed RefreshPlan Effect fixture");
+  }
+  return store.snapshot();
 }
 
 describe("Effect Gate", () => {
@@ -407,6 +428,65 @@ describe("Effect Gate", () => {
       activePermitId: null,
       sessionRevision: 6,
     });
+  });
+
+  it("commits a READY Session with a fully closed completed RefreshPlan", async () => {
+    const store = new MemoryEffectStore(readyDatabaseWithCompletedRefreshPlan());
+    const result = await commit(makePorts(store));
+
+    expect(result).toMatchObject({
+      status: "COMMITTED",
+      created: true,
+      effectsInSession: 1,
+    });
+    expect(store.snapshot().effects).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      name: "ghost Plan ID",
+      mutate(database: EpochDatabase) {
+        database.validations[0]!.refreshPlanId = "refresh_ghost";
+      },
+    },
+    {
+      name: "wrong Plan Session",
+      mutate(database: EpochDatabase) {
+        database.refreshPlans[0]!.sessionId = "session_other";
+      },
+    },
+    {
+      name: "wrong Plan base revision",
+      mutate(database: EpochDatabase) {
+        database.refreshPlans[0]!.baseSessionRevision =
+          database.validations[0]!.baseSessionRevision;
+      },
+    },
+    {
+      name: "missing claimed Attempt at completion",
+      mutate(database: EpochDatabase) {
+        database.refreshPlans[0]!.claimedAttemptId = null;
+      },
+    },
+    {
+      name: "wrong claimed Attempt at completion",
+      mutate(database: EpochDatabase) {
+        database.refreshPlans[0]!.claimedAttemptId = "attempt_inventory_1";
+      },
+    },
+  ])("rejects READY completed RefreshPlan closure: $name", async ({ mutate }) => {
+    const database = readyDatabaseWithCompletedRefreshPlan();
+    mutate(database);
+    const store = new MemoryEffectStore(database);
+    const result = await commit(makePorts(store));
+
+    expect(result).toMatchObject({
+      status: "REJECTED",
+      reasonCode: "BINDING_MISMATCH",
+      effectsInSession: 0,
+    });
+    expect(store.snapshot().effects).toHaveLength(0);
+    expect(store.snapshot().permits[0]!.status).toBe("ISSUED");
   });
 
   it.each([
@@ -550,9 +630,69 @@ describe("Effect Gate", () => {
       reasonCode: "DECISION_INVALID",
     },
     {
+      name: "shadow fourth Role Registration",
+      mutate(database: EpochDatabase) {
+        database.roleAgentRegistrations.push({
+          ...structuredClone(database.roleAgentRegistrations[0]!),
+          agentId: "agent_inventory_shadow",
+        });
+      },
+      reasonCode: "DECISION_INVALID",
+    },
+    {
+      name: "duplicate Role Registration",
+      mutate(database: EpochDatabase) {
+        database.roleAgentRegistrations[2]!.role = "inventory";
+      },
+      reasonCode: "DECISION_INVALID",
+    },
+    {
+      name: "same Agent registered across Roles",
+      mutate(database: EpochDatabase) {
+        const sharedAgentId = "agent_inventory";
+        database.roleAgentRegistrations[1]!.agentId = sharedAgentId;
+        database.sessions[0]!.frozenAssignments.budgetAgentId = sharedAgentId;
+        database.decisions[1]!.agentId = sharedAgentId;
+        database.runAssignments[1]!.agentId = sharedAgentId;
+        database.attempts[1]!.agentId = sharedAgentId;
+        database.receipts[1]!.agentId = sharedAgentId;
+      },
+      reasonCode: "DECISION_INVALID",
+    },
+    {
       name: "source value hash",
       mutate(database: EpochDatabase) {
         database.resourceVersions[0]!.valueHash = sha256Digest("wrong-value");
+      },
+      reasonCode: "HISTORY_UNVERIFIABLE",
+    },
+    {
+      name: "verified Resource value/hash mismatch",
+      mutate(database: EpochDatabase) {
+        database.resourceVersions[0]!.value = {
+          role: "inventory",
+          allow: false,
+        };
+      },
+      reasonCode: "HISTORY_UNVERIFIABLE",
+    },
+    {
+      name: "verified resolver Receipt value-hash mismatch",
+      mutate(database: EpochDatabase) {
+        const value = { role: "inventory", allow: false } as const;
+        database.resourceVersions[0]!.value = value;
+        database.resourceVersions[0]!.valueHash = sha256Digest(
+          canonicalJson(value),
+        );
+      },
+      reasonCode: "HISTORY_UNVERIFIABLE",
+    },
+    {
+      name: "non-canonical matching Receipt/Resource hash",
+      mutate(database: EpochDatabase) {
+        const nonCanonicalHash = sha256Digest("not-the-canonical-value");
+        database.resourceVersions[0]!.valueHash = nonCanonicalHash;
+        database.receipts[0]!.valueHash = nonCanonicalHash;
       },
       reasonCode: "HISTORY_UNVERIFIABLE",
     },
@@ -676,6 +816,29 @@ describe("Effect Gate", () => {
     expect(result).toMatchObject({
       status: "REJECTED",
       reasonCode: "DECISION_INVALID",
+      effectsInSession: 1,
+    });
+    expect(ports.createEffectId).not.toHaveBeenCalled();
+    expect(store.snapshot().effects).toHaveLength(1);
+  });
+
+  it("rejects an existing Effect when the resolved Resource value/hash diverges", async () => {
+    const database = await committedDatabase();
+    const value = {
+      role: "inventory",
+      allow: false,
+    } as const;
+    database.resourceVersions[0]!.value = value;
+    database.resourceVersions[0]!.valueHash = sha256Digest(
+      canonicalJson(value),
+    );
+    const store = new MemoryEffectStore(database);
+    const ports = makePorts(store);
+    const result = await commit(ports, 5);
+
+    expect(result).toMatchObject({
+      status: "REJECTED",
+      reasonCode: "HISTORY_UNVERIFIABLE",
       effectsInSession: 1,
     });
     expect(ports.createEffectId).not.toHaveBeenCalled();

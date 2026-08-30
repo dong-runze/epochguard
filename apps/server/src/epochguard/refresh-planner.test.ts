@@ -13,6 +13,7 @@ import {
   GOLDEN_ACTION_INPUT,
   ROLES,
   buildRoleQuerySpec,
+  canonicalJson,
   sha256Digest,
   snapshotReceiptDependencySetHash,
   type AgentAttempt,
@@ -33,13 +34,18 @@ const plannerWorld: RefreshPlannerWorldPort = {
     database: Readonly<EpochDatabase>,
     receipt: Readonly<ObservationReceipt>,
   ): ResourceVersion | null {
-    return (
-      database.resourceVersions.find(
-        (version) =>
-          version.resourceId === `${receipt.source}:${receipt.entityKey}` &&
-          version.sourceRevision === receipt.sourceRevision,
-      ) ?? null
+    const version = database.resourceVersions.find(
+      (candidate) =>
+        candidate.resourceId === `${receipt.source}:${receipt.entityKey}` &&
+        candidate.sourceRevision === receipt.sourceRevision,
     );
+    if (
+      version === undefined ||
+      version.valueHash !== sha256Digest(canonicalJson(version.value))
+    ) {
+      return null;
+    }
+    return version;
   },
 };
 
@@ -169,15 +175,18 @@ function blockedFixture(): {
   );
   database.roleQuerySpecs.push(...roleQuerySpecs);
   database.resourceVersions.push(
-    ...roleQuerySpecs.map((spec, index) => ({
-      id: `version_${spec.role}_impossible_1`,
-      resourceId: `${spec.source}:${spec.entityKey}`,
-      sourceRevision: index + 1,
-      value: { role: spec.role, fixture: "impossible" },
-      valueHash: sha256Digest(`value-${spec.role}-impossible-1`),
-      validFromSeq: evidenceIntervals[index]!.from,
-      validUntilSeq: evidenceIntervals[index]!.until,
-    })),
+    ...roleQuerySpecs.map((spec, index) => {
+      const value = { role: spec.role, fixture: "impossible" } as const;
+      return {
+        id: `version_${spec.role}_impossible_1`,
+        resourceId: `${spec.source}:${spec.entityKey}`,
+        sourceRevision: index + 1,
+        value,
+        valueHash: sha256Digest(canonicalJson(value)),
+        validFromSeq: evidenceIntervals[index]!.from,
+        validUntilSeq: evidenceIntervals[index]!.until,
+      };
+    }),
   );
   database.receipts.push(
     ...roleQuerySpecs.map((spec, index) => ({
@@ -403,6 +412,33 @@ describe("Refresh Planner", () => {
       },
     },
     {
+      name: "verified Resource value/hash mismatch",
+      mutate(database: EpochDatabase) {
+        database.resourceVersions[0]!.value = {
+          role: "inventory",
+          fixture: "tampered",
+        };
+      },
+    },
+    {
+      name: "verified resolver Receipt value-hash mismatch",
+      mutate(database: EpochDatabase) {
+        const value = { role: "inventory", fixture: "new-authority" } as const;
+        database.resourceVersions[0]!.value = value;
+        database.resourceVersions[0]!.valueHash = sha256Digest(
+          canonicalJson(value),
+        );
+      },
+    },
+    {
+      name: "non-canonical matching Receipt/Resource hash",
+      mutate(database: EpochDatabase) {
+        const nonCanonicalHash = sha256Digest("not-the-canonical-value");
+        database.resourceVersions[0]!.valueHash = nonCanonicalHash;
+        database.receipts[0]!.valueHash = nonCanonicalHash;
+      },
+    },
+    {
       name: "collapsed witness endpoints",
       mutate(database: EpochDatabase) {
         database.noCutProofs[0]!.latestStartingReceiptId =
@@ -552,7 +588,114 @@ describe("Refresh Planner", () => {
         world: plannerWorld,
         createArtifacts,
       }),
-    ).rejects.toThrow(/not bound by the active Validation/);
+    ).rejects.toThrow(/REOBSERVING Session pointers/);
+    expect(retryStore.snapshot().attempts).toHaveLength(1);
+    expect(retryStore.snapshot().runAssignments).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      name: "Session state",
+      mutate(database: EpochDatabase) {
+        database.sessions[0]!.state = "BLOCKED_NO_CUT";
+      },
+    },
+    {
+      name: "active Plan pointer",
+      mutate(database: EpochDatabase) {
+        database.sessions[0]!.activeRefreshPlanId = null;
+      },
+    },
+    {
+      name: "active Attempt pointer",
+      mutate(database: EpochDatabase) {
+        database.sessions[0]!.activeAttemptIds.budget = null;
+      },
+    },
+    {
+      name: "Plan base revision",
+      mutate(database: EpochDatabase) {
+        database.refreshPlans[0]!.baseSessionRevision -= 1;
+      },
+    },
+    {
+      name: "Plan head",
+      mutate(database: EpochDatabase) {
+        database.refreshPlans[0]!.validatedHead -= 1;
+      },
+    },
+    {
+      name: "Plan dependency",
+      mutate(database: EpochDatabase) {
+        database.refreshPlans[0]!.dependencySetHash = sha256Digest(
+          "claimed-plan-wrong-dependency",
+        );
+      },
+    },
+    {
+      name: "Plan Decision tuple",
+      mutate(database: EpochDatabase) {
+        database.refreshPlans[0]!.activeDecisionCertificateIds[0] =
+          "decision_inventory_other";
+      },
+    },
+    {
+      name: "NoCutProof closure",
+      mutate(database: EpochDatabase) {
+        database.noCutProofs[0]!.latestStartingReceiptId =
+          database.noCutProofs[0]!.earliestEndingReceiptId;
+      },
+    },
+    {
+      name: "Assignment owner",
+      mutate(database: EpochDatabase) {
+        database.runAssignments[0]!.agentId = "agent_inventory";
+      },
+    },
+    {
+      name: "Attempt owner",
+      mutate(database: EpochDatabase) {
+        database.attempts[0]!.agentId = "agent_inventory";
+      },
+    },
+    {
+      name: "Assignment/Attempt Run binding",
+      mutate(database: EpochDatabase) {
+        database.runAssignments[0]!.boundRunId = "run_unbound_shadow";
+      },
+    },
+  ])("rejects a CLAIMED retry with broken $name", async ({ mutate }) => {
+    const fixture = blockedFixture();
+    const firstStore = new MemoryRefreshStore(fixture.database);
+    const first = await claimRefreshPlan(firstStore, {
+      sessionId: fixture.session.sessionId,
+      request: {
+        expectedSessionRevision: fixture.session.sessionRevision,
+        refreshPlanId: fixture.plan.refreshPlanId,
+      },
+      now: NOW,
+      world: plannerWorld,
+      createArtifacts,
+    });
+    expect(first.status).toBe("CLAIMED");
+
+    const claimedDatabase = firstStore.snapshot();
+    mutate(claimedDatabase);
+    const retryStore = new MemoryRefreshStore(claimedDatabase);
+    const retryFactory = vi.fn(createArtifacts);
+    await expect(
+      claimRefreshPlan(retryStore, {
+        sessionId: fixture.session.sessionId,
+        request: {
+          expectedSessionRevision: claimedDatabase.sessions[0]!.sessionRevision,
+          refreshPlanId: fixture.plan.refreshPlanId,
+        },
+        now: NOW,
+        world: plannerWorld,
+        createArtifacts: retryFactory,
+      }),
+    ).rejects.toThrow(/EpochGuard Refresh Planner invariant failed/);
+    expect(retryFactory).not.toHaveBeenCalled();
     expect(retryStore.snapshot().attempts).toHaveLength(1);
     expect(retryStore.snapshot().runAssignments).toHaveLength(1);
   });
