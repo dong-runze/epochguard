@@ -25,7 +25,26 @@ export const MAX_DECISION_OUTPUT_BYTES = 16 * 1_024;
 export const EPOCH_REDACTION_VERSION = "epoch-redact-v1" as const;
 export const EPOCH_REDACTION_PLACEHOLDER = "[REDACTED]" as const;
 
-const EPOCH_PRIVATE_KEY_PLACEHOLDER = "[REDACTED_PRIVATE_KEY]" as const;
+const SENSITIVE_LABEL_SOURCE = String.raw`(?:aws[_-]?secret[_-]?access[_-]?key|ark[_-]?api[_-]?key|database[_-]?(?:url|uri)|db[_-]?(?:url|uri)|(?:(?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|password|passwd|pwd|client[_-]?secret|secret|private[_-]?key)))`;
+
+const ESCAPED_QUOTED_LABELED_SECRET = new RegExp(
+  String.raw`((?:\\?["'])?\b${SENSITIVE_LABEL_SOURCE}\b(?:\\?["'])?[ \t]*[:=][ \t]*\\(["']))([^\r\n]*?)\\\2`,
+  "gi",
+);
+const QUOTED_LABELED_SECRET = new RegExp(
+  String.raw`((?:\\?["'])?\b${SENSITIVE_LABEL_SOURCE}\b(?:\\?["'])?[ \t]*[:=][ \t]*)(["'])((?:\\.|[^\\\r\n])*?)\2`,
+  "gi",
+);
+const UNQUOTED_LABELED_SECRET = new RegExp(
+  String.raw`((?:\\?["'])?\b${SENSITIVE_LABEL_SOURCE}\b(?:\\?["'])?[ \t]*[:=][ \t]*)(?!\\?["'])([^,;}"'\r\n]+)`,
+  "gi",
+);
+const SENSITIVE_LABEL_CONTINUATION = new RegExp(
+  String.raw`(?:\\?["'])?\b${SENSITIVE_LABEL_SOURCE}\b(?:\\?["'])?[ \t]*[:=][ \t]*(?:\\?["'])?[ \t]*$`,
+  "i",
+);
+const AUTHORIZATION_CONTINUATION =
+  /\b(?:Bearer|Basic)[ \t]*(?:\\?["'])?[ \t]*$/i;
 
 export class DecisionNormalizationError extends Error {
   constructor(
@@ -79,18 +98,11 @@ function countLiteral(value: string, literal: string): number {
   }
 }
 
-function redactionFor(secret: string): string {
-  return Buffer.byteLength(secret, "utf8") >=
-    Buffer.byteLength(EPOCH_REDACTION_PLACEHOLDER, "utf8")
-    ? EPOCH_REDACTION_PLACEHOLDER
-    : "";
-}
-
-function redactPrivateKeyPreservingDecisionMarkers(
-  privateKeyBlock: string,
-): string {
-  let usedPrimaryPlaceholder = false;
-  return privateKeyBlock
+function maskSecretPreservingReplayStructure(secret: string): string {
+  if (secret === EPOCH_REDACTION_PLACEHOLDER) {
+    return secret;
+  }
+  return secret
     .split(/(<\/?EPOCH_DECISION>)/g)
     .map((segment) => {
       if (
@@ -99,14 +111,121 @@ function redactPrivateKeyPreservingDecisionMarkers(
       ) {
         return segment;
       }
-      if (segment.length === 0) return "";
-      if (!usedPrimaryPlaceholder) {
-        usedPrimaryPlaceholder = true;
-        return EPOCH_PRIVATE_KEY_PLACEHOLDER;
-      }
-      return "*";
+      return segment.replace(/[^\r\n\t ]/g, "*");
     })
     .join("");
+}
+
+function redactContinuedSecretLine(line: string): string {
+  const escapedQuoted = /^([ \t]*\\(["']))([^\r\n]*?)\\\2/;
+  const quoted = /^([ \t]*)(["'])((?:\\.|[^\\\r\n])*?)\2/;
+  const unquoted = /^([ \t]*)([^,;}\r\n]+)/;
+
+  if (escapedQuoted.test(line)) {
+    return line.replace(
+      escapedQuoted,
+      (_match: string, prefix: string, quote: string, secret: string) =>
+        `${prefix}${maskSecretPreservingReplayStructure(secret)}\\${quote}`,
+    );
+  }
+  if (quoted.test(line)) {
+    return line.replace(
+      quoted,
+      (
+        _match: string,
+        prefix: string,
+        quote: string,
+        secret: string,
+      ) =>
+        `${prefix}${quote}${maskSecretPreservingReplayStructure(secret)}${quote}`,
+    );
+  }
+  return line.replace(
+    unquoted,
+    (_match: string, prefix: string, secret: string) =>
+      `${prefix}${maskSecretPreservingReplayStructure(secret)}`,
+  );
+}
+
+function redactCredentialLine(line: string): string {
+  const escapedQuotedAuthorization =
+    /(\b(?:Bearer|Basic)[ \t]+\\(["']))([^\r\n]*?)\\\2/gi;
+  const quotedAuthorization =
+    /(\b(?:Bearer|Basic)[ \t]+)(["'])((?:\\.|[^\\\r\n])*?)\2/gi;
+  const unquotedAuthorization =
+    /(\b(?:Bearer|Basic)[ \t]+)(?!\\?["'])([^ \t\r\n,;}"'<>]+)/gi;
+  const databaseUrlUserinfo =
+    /(\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqp|amqps|cockroachdb|sqlserver):\/\/)([^@\r\n/?#]+)@/gi;
+  const awsAccessKey = /\bAKIA[0-9A-Z]{16}\b/g;
+  const prefixedApiKey = /\bsk-(?:proj-)?[a-z0-9_-]{12,}\b/gi;
+
+  return line
+    .replace(
+      escapedQuotedAuthorization,
+      (_match: string, prefix: string, quote: string, secret: string) =>
+        `${prefix}${maskSecretPreservingReplayStructure(secret)}\\${quote}`,
+    )
+    .replace(
+      quotedAuthorization,
+      (_match: string, prefix: string, quote: string, secret: string) =>
+        `${prefix}${quote}${maskSecretPreservingReplayStructure(secret)}${quote}`,
+    )
+    .replace(
+      unquotedAuthorization,
+      (_match: string, prefix: string, secret: string) =>
+        `${prefix}${maskSecretPreservingReplayStructure(secret)}`,
+    )
+    .replace(
+      ESCAPED_QUOTED_LABELED_SECRET,
+      (_match: string, prefix: string, quote: string, secret: string) =>
+        `${prefix}${maskSecretPreservingReplayStructure(secret)}\\${quote}`,
+    )
+    .replace(
+      QUOTED_LABELED_SECRET,
+      (_match: string, prefix: string, quote: string, secret: string) =>
+        `${prefix}${quote}${maskSecretPreservingReplayStructure(secret)}${quote}`,
+    )
+    .replace(
+      UNQUOTED_LABELED_SECRET,
+      (_match: string, prefix: string, secret: string) =>
+        `${prefix}${maskSecretPreservingReplayStructure(secret)}`,
+    )
+    .replace(
+      databaseUrlUserinfo,
+      (_match: string, prefix: string, userinfo: string) =>
+        `${prefix}${maskSecretPreservingReplayStructure(userinfo)}@`,
+    )
+    .replace(awsAccessKey, (secret) =>
+      maskSecretPreservingReplayStructure(secret),
+    )
+    .replace(prefixedApiKey, (secret) =>
+      maskSecretPreservingReplayStructure(secret),
+    );
+}
+
+function redactLineBoundCredentials(rawOutput: string): string {
+  const parts = rawOutput.split(/(\r\n|\n|\r)/);
+  let redactNextLine = false;
+
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index] as string;
+    if (/^(?:\r\n|\n|\r)$/.test(part)) {
+      continue;
+    }
+
+    let line = part;
+    if (redactNextLine) {
+      line = redactContinuedSecretLine(line);
+      redactNextLine = false;
+    }
+    const continuesSensitiveValue =
+      AUTHORIZATION_CONTINUATION.test(line) ||
+      SENSITIVE_LABEL_CONTINUATION.test(line);
+    parts[index] = redactCredentialLine(line);
+    redactNextLine = continuesSensitiveValue;
+  }
+
+  return parts.join("");
 }
 
 /**
@@ -117,44 +236,18 @@ function redactPrivateKeyPreservingDecisionMarkers(
  */
 export function redactRejectedDecisionOutput(rawOutput: string): string {
   const privateKeyBlock =
-    /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/gi;
+    /-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----/gis;
   const unterminatedPrivateKey =
-    /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*$/gi;
-  const quotedBearerCredential =
-    /(\bBearer[ \t]+)(["'])((?:\\.|[^\\\r\n])*?)\2/gi;
-  const bearerCredential = /(\bBearer[ \t]+)([^\s"'<>]+)/gi;
-  const labeledQuotedSecret =
-    /((?:["']?)\b(?:(?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|password|passwd|pwd|client[_-]?secret|secret|private[_-]?key))\b(?:["']?)\s*[:=]\s*)(["'])((?:\\.|[^\\\r\n])*?)\2/gi;
-  const labeledUnquotedSecret =
-    /((?:["']?)\b(?:(?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|password|passwd|pwd|client[_-]?secret|secret|private[_-]?key))\b(?:["']?)\s*[:=]\s*)(?!["'])([^\s,;}&"'<>]+)/gi;
-  const awsAccessKey = /\bAKIA[0-9A-Z]{16}\b/g;
-  const prefixedApiKey = /\bsk-(?:proj-)?[a-z0-9_-]{12,}\b/gi;
+    /-----BEGIN [^-\r\n]*PRIVATE KEY-----.*$/gis;
+  const privateKeysRedacted = rawOutput
+    .replace(privateKeyBlock, (block) =>
+      maskSecretPreservingReplayStructure(block),
+    )
+    .replace(unterminatedPrivateKey, (block) =>
+      maskSecretPreservingReplayStructure(block),
+    );
 
-  return rawOutput
-    .replace(privateKeyBlock, redactPrivateKeyPreservingDecisionMarkers)
-    .replace(unterminatedPrivateKey, redactPrivateKeyPreservingDecisionMarkers)
-    .replace(
-      quotedBearerCredential,
-      (_match: string, prefix: string, quote: string, secret: string) =>
-        `${prefix}${quote}${redactionFor(secret)}${quote}`,
-    )
-    .replace(
-      bearerCredential,
-      (_match: string, prefix: string, secret: string) =>
-        `${prefix}${redactionFor(secret)}`,
-    )
-    .replace(
-      labeledQuotedSecret,
-      (_match: string, prefix: string, quote: string, secret: string) =>
-        `${prefix}${quote}${redactionFor(secret)}${quote}`,
-    )
-    .replace(
-      labeledUnquotedSecret,
-      (_match: string, prefix: string, secret: string) =>
-        `${prefix}${redactionFor(secret)}`,
-    )
-    .replace(awsAccessKey, (secret) => redactionFor(secret))
-    .replace(prefixedApiKey, (secret) => redactionFor(secret));
+  return redactLineBoundCredentials(privateKeysRedacted);
 }
 
 function requireUnique<T>(
@@ -376,6 +469,7 @@ function buildRejectedOutputArtifact(
   sessionId: string,
   attemptId: string,
   rawOutput: string,
+  originalFailure: DecisionNormalizationError,
   originalDigest: string,
   originalByteLength: number,
   options: DecisionNormalizationOptions,
@@ -406,6 +500,33 @@ function buildRejectedOutputArtifact(
   }
 
   const sanitizedContent = redactRejectedDecisionOutput(rawOutput);
+  if (
+    Buffer.byteLength(sanitizedContent, "utf8") > originalByteLength ||
+    redactRejectedDecisionOutput(sanitizedContent) !== sanitizedContent
+  ) {
+    fail(
+      "DECISION_INVALID",
+      "Rejected output redaction must be non-expanding and idempotent",
+    );
+  }
+
+  let replayFailure: unknown;
+  try {
+    parseDecisionEnvelope(sanitizedContent);
+  } catch (error) {
+    replayFailure = error;
+  }
+  if (
+    !(replayFailure instanceof DecisionNormalizationError) ||
+    replayFailure.reasonCode !== originalFailure.reasonCode ||
+    replayFailure.message !== originalFailure.message
+  ) {
+    fail(
+      "DECISION_INVALID",
+      "Rejected output redaction must replay the original parser failure",
+    );
+  }
+
   return RejectedOutputArtifactSchema.parse({
     artifactId,
     sessionId,
@@ -567,6 +688,7 @@ export function normalizeAndConsumeDecision(
       session.sessionId,
       attempt.attemptId,
       rawOutput,
+      error,
       originalDigest,
       originalByteLength,
       options,

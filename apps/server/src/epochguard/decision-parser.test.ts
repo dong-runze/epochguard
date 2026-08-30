@@ -13,7 +13,6 @@ import {
   DecisionNormalizationError,
   EPOCH_DECISION_CLOSE_MARKER,
   EPOCH_DECISION_OPEN_MARKER,
-  EPOCH_REDACTION_PLACEHOLDER,
   EPOCH_REDACTION_VERSION,
   MAX_DECISION_OUTPUT_BYTES,
   normalizeAndConsumeDecision,
@@ -353,8 +352,10 @@ describe("Decision parser and normalizer", () => {
     expect(Buffer.byteLength(sanitizedContent, "utf8")).toBeLessThanOrEqual(
       MAX_DECISION_OUTPUT_BYTES,
     );
-    expect(sanitizedContent).toContain(EPOCH_REDACTION_PLACEHOLDER);
-    expect(sanitizedContent).toContain("[REDACTED_PRIVATE_KEY]");
+    expect(sanitizedContent).toContain("*".repeat(secrets[0].length));
+    expect(sanitizedContent.split("\n")).toHaveLength(
+      rawOutput.split("\n").length,
+    );
     expect(sanitizedContent).toContain("tail remains visible");
     for (const secret of secrets) {
       expect(sanitizedContent).not.toContain(secret);
@@ -402,6 +403,174 @@ describe("Decision parser and normalizer", () => {
       ),
     ).toThrowError(DecisionNormalizationError);
     expect(committed.database).toEqual(afterRejection);
+  });
+
+  it("redacts fictional Basic, AWS, Ark, database, and one-line continuation credentials", () => {
+    const fixture = makeFixture();
+    const secrets = {
+      basic: "RklDVElUSU9VUy1CQVNJQy0wMTIzNDU2Nzg5",
+      aws: "fictitious-aws-secret-access-key-0123456789",
+      arkCamel: "fictitious-ark-camel-key-0123456789",
+      arkSnake: "fictitious-ark-snake-key-0123456789",
+      arkEscaped: "fictitious-ark-escaped-key-0123456789",
+      databaseUser: "fictitious_db_user",
+      databasePassword: "fictitious_db_password_0123456789",
+      continuedBearer: "fictitious-cross-line-bearer-0123456789",
+      continuedLabel: "fictitious-cross-line-label-0123456789",
+    };
+    const rawOutput = [
+      `Authorization: Basic ${secrets.basic}`,
+      `AWS_SECRET_ACCESS_KEY=${secrets.aws}`,
+      `arkApiKey: "${secrets.arkCamel}"`,
+      `{"ARK_API_KEY":"${secrets.arkSnake}"}`,
+      `payload={\\"arkApiKey\\":\\"${secrets.arkEscaped}\\"}`,
+      `connection=postgresql://${secrets.databaseUser}:${secrets.databasePassword}@db.invalid/epochguard`,
+      "Authorization: Bearer",
+      `  "${secrets.continuedBearer}"`,
+      "ARK_API_KEY:",
+      `  ${secrets.continuedLabel}`,
+      "line after continued credentials remains intact",
+    ].join("\n");
+    replaceRawOutput(fixture, rawOutput);
+    const originalFailure = parserFailure(rawOutput);
+
+    const result = normalizeAndConsumeDecision(
+      fixture.database,
+      fixture.attemptId,
+      rawOutput,
+      {
+        rejectedOutputArtifactId: "artifact_credential_matrix",
+        createdAt: COMPLETED,
+      },
+    );
+    expect(result.status).toBe("OUTPUT_REJECTED");
+    if (result.status !== "OUTPUT_REJECTED") {
+      throw new Error("Expected credential matrix rejection");
+    }
+    const sanitizedContent = result.rejectedOutputArtifact.sanitizedContent!;
+    for (const secret of Object.values(secrets)) {
+      expect(sanitizedContent).not.toContain(secret);
+    }
+    expect(sanitizedContent).toContain("db.invalid/epochguard");
+    expect(sanitizedContent).toContain(
+      "line after continued credentials remains intact",
+    );
+    expect(sanitizedContent.split("\n")).toHaveLength(
+      rawOutput.split("\n").length,
+    );
+    expect(Buffer.byteLength(sanitizedContent, "utf8")).toBe(
+      Buffer.byteLength(rawOutput, "utf8"),
+    );
+    expect(redactRejectedDecisionOutput(sanitizedContent)).toBe(
+      sanitizedContent,
+    );
+    const replayFailure = parserFailure(sanitizedContent);
+    expect({
+      reasonCode: replayFailure.reasonCode,
+      message: replayFailure.message,
+    }).toEqual({
+      reasonCode: originalFailure.reasonCode,
+      message: originalFailure.message,
+    });
+    expect(fixture.database.decisions).toEqual([]);
+  });
+
+  it("preserves schema and JSON parser failures while masking necessary length and newlines", () => {
+    const source = makeFixture();
+    const schemaSecret = "fictitious-schema-ark-key-0123456789";
+    const privateSecret = "fictitious-private-key-line-0123456789";
+    const jsonSecret = "fictitious-malformed-json-key-0123456789";
+    const overlongReason = `ARK_API_KEY=${schemaSecret}${"x".repeat(1_001)}`;
+    const privateKeyJson = JSON.stringify({
+      ...source.envelope,
+      reason: "private-key-placeholder",
+    }).replace(
+      '"reason":"private-key-placeholder"',
+      `"reason":"-----BEGIN PRIVATE KEY-----\n${privateSecret}\n-----END PRIVATE KEY-----"`,
+    );
+    const cases = [
+      {
+        name: "schema length",
+        rawOutput: renderEnvelope({
+          ...source.envelope,
+          reason: overlongReason,
+        }),
+        secret: schemaSecret,
+        expectedMessage: "Decision envelope failed the strict contract schema",
+      },
+      {
+        name: "unescaped private-key newlines",
+        rawOutput:
+          `${EPOCH_DECISION_OPEN_MARKER}\n${privateKeyJson}\n` +
+          EPOCH_DECISION_CLOSE_MARKER,
+        secret: privateSecret,
+        expectedMessage: "Decision envelope contains invalid JSON",
+      },
+      {
+        name: "malformed JSON",
+        rawOutput:
+          `${EPOCH_DECISION_OPEN_MARKER}\n` +
+          `{"ARK_API_KEY":"${jsonSecret}",}\n` +
+          EPOCH_DECISION_CLOSE_MARKER,
+        secret: jsonSecret,
+        expectedMessage: "Decision envelope contains invalid JSON",
+      },
+    ];
+
+    for (const [index, testCase] of cases.entries()) {
+      const fixture = makeFixture();
+      expect(Buffer.byteLength(testCase.rawOutput, "utf8")).toBeLessThanOrEqual(
+        MAX_DECISION_OUTPUT_BYTES,
+      );
+      replaceRawOutput(fixture, testCase.rawOutput);
+      const originalFailure = parserFailure(testCase.rawOutput);
+      expect(originalFailure.message, testCase.name).toBe(
+        testCase.expectedMessage,
+      );
+
+      const result = normalizeAndConsumeDecision(
+        fixture.database,
+        fixture.attemptId,
+        testCase.rawOutput,
+        {
+          rejectedOutputArtifactId: `artifact_structure_${index}`,
+          createdAt: COMPLETED,
+        },
+      );
+      expect(result.status, testCase.name).toBe("OUTPUT_REJECTED");
+      if (result.status !== "OUTPUT_REJECTED") {
+        throw new Error(`Expected ${testCase.name} rejection`);
+      }
+      const sanitizedContent = result.rejectedOutputArtifact.sanitizedContent!;
+      expect(sanitizedContent, testCase.name).not.toContain(testCase.secret);
+      expect(Buffer.byteLength(sanitizedContent, "utf8"), testCase.name).toBe(
+        Buffer.byteLength(testCase.rawOutput, "utf8"),
+      );
+      expect(sanitizedContent.split("\n").length, testCase.name).toBe(
+        testCase.rawOutput.split("\n").length,
+      );
+      expect(redactRejectedDecisionOutput(sanitizedContent), testCase.name).toBe(
+        sanitizedContent,
+      );
+      const replayFailure = parserFailure(sanitizedContent);
+      expect(
+        {
+          reasonCode: replayFailure.reasonCode,
+          message: replayFailure.message,
+        },
+        testCase.name,
+      ).toEqual({
+        reasonCode: originalFailure.reasonCode,
+        message: originalFailure.message,
+      });
+      expect(fixture.database.runAssignments[0]).toMatchObject({
+        status: "REJECTED",
+        consumedByDecisionCertificateId: null,
+        consumedAt: null,
+      });
+      expect(fixture.database.attempts[0]!.status).toBe("OUTPUT_REJECTED");
+      expect(fixture.database.decisions).toEqual([]);
+    }
   });
 
   it("persists PARSE_REJECTED for marker, JSON, and strict-schema failures", () => {
@@ -507,8 +676,11 @@ describe("Decision parser and normalizer", () => {
     expect(
       sanitizedContent.split(EPOCH_DECISION_CLOSE_MARKER).length - 1,
     ).toBe(1);
-    expect(Buffer.byteLength(sanitizedContent, "utf8")).toBeLessThanOrEqual(
+    expect(Buffer.byteLength(sanitizedContent, "utf8")).toBe(
       Buffer.byteLength(rawOutput, "utf8"),
+    );
+    expect(sanitizedContent.split("\n")).toHaveLength(
+      rawOutput.split("\n").length,
     );
     expect(redactRejectedDecisionOutput(sanitizedContent)).toBe(
       sanitizedContent,
