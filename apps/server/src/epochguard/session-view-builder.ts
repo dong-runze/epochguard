@@ -1214,7 +1214,7 @@ function buildRefreshPlan(
   if (
     originValidation.sessionId !== session.sessionId ||
     originValidation.actionHash !== session.actionHash ||
-    plan.baseSessionRevision !== originValidation.baseSessionRevision ||
+    plan.baseSessionRevision !== originValidation.baseSessionRevision + 1 ||
     plan.validatedHead !== originValidation.validatedHead ||
     plan.dependencySetHash !== originValidation.dependencySetHash ||
     !sameIds(

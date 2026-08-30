@@ -710,7 +710,7 @@ function assertOriginRefreshPlanClosure(
   if (
     plan === null ||
     plan.sessionId !== diagnostic.sessionId ||
-    plan.baseSessionRevision !== validation.baseSessionRevision ||
+    plan.baseSessionRevision !== validation.baseSessionRevision + 1 ||
     plan.validatedHead !== validation.validatedHead ||
     plan.dependencySetHash !== validation.dependencySetHash ||
     !sameOrderedIds(

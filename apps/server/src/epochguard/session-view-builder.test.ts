@@ -464,7 +464,7 @@ function makeNoCutDatabase(): EpochDatabase {
     {
       refreshPlanId: "refresh_budget",
       sessionId: SESSION_ID,
-      baseSessionRevision: 3,
+      baseSessionRevision: 4,
       validatedHead: HEAD,
       dependencySetHash,
       activeDecisionCertificateIds: decisionIds,
@@ -553,7 +553,7 @@ function makeHistoricalStaleDatabase(): EpochDatabase {
     {
       refreshPlanId: "refresh_historical_budget",
       sessionId: SESSION_ID,
-      baseSessionRevision: 7,
+      baseSessionRevision: 8,
       validatedHead: HEAD,
       dependencySetHash,
       activeDecisionCertificateIds: decisionIds,
@@ -1237,6 +1237,27 @@ describe("single-snapshot isolation and fail-closed projection", () => {
     );
   });
 
+  it("binds RefreshPlan to the post-Validation Session revision", () => {
+    const valid = makeNoCutDatabase();
+    expect(valid.refreshPlans[0]!.baseSessionRevision).toBe(
+      valid.validations[0]!.baseSessionRevision + 1,
+    );
+    expect(() =>
+      assertSafetyDiagnosticCausalChains(valid, SESSION_ID),
+    ).not.toThrow();
+    expect(() => snapshot(valid)).not.toThrow();
+
+    for (const offset of [0, 2]) {
+      const database = makeNoCutDatabase();
+      database.refreshPlans[0]!.baseSessionRevision =
+        database.validations[0]!.baseSessionRevision + offset;
+      expect(() =>
+        assertSafetyDiagnosticCausalChains(database, SESSION_ID),
+      ).toThrowError(SafetyDiagnosticIntegrityError);
+      expect(() => snapshot(database)).toThrowError(SessionViewBuilderError);
+    }
+  });
+
   it("rejects future-head and forged No-Cut RefreshPlan owner closures", () => {
     const corruptions: Array<{
       name: string;
@@ -1256,12 +1277,6 @@ describe("single-snapshot isolation and fail-closed projection", () => {
           database.noCutProofs[0]!.refreshAgentIds = [
             roleAgentId("inventory"),
           ];
-        },
-      },
-      {
-        name: "RefreshPlan base revision differs from Validation",
-        apply: (database) => {
-          database.refreshPlans[0]!.baseSessionRevision += 1;
         },
       },
       {
