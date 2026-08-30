@@ -6,7 +6,7 @@ or recording operator starting from a clean machine state.
 
 > [!IMPORTANT]
 > **Current release status — 2026-08-30:** `npm run check` passes in WSL2
-> (360/360 server tests plus TypeScript and production builds). The final
+> (361/361 server tests, 6/6 web tests, TypeScript, and production builds). The final
 > candidate's real Volcengine Ark/Codex lifecycle and seven-Run recording have
 > **not yet been completed**. Follow this document to run that open gate; do not
 > report it as passed in advance.
@@ -68,8 +68,10 @@ npm run check
 Expected current deterministic result:
 
 ```text
-Test Files  23 passed (23)
-Tests       360 passed (360)
+Server Test Files  23 passed (23)
+Server Tests       361 passed (361)
+Web Test Files      1 passed (1)
+Web Tests            6 passed (6)
 Web typecheck/build: pass
 Server typecheck/build: pass
 ```
@@ -334,7 +336,7 @@ Stores, workspaces, Codex sessions, or raw sensitive output.
 | Gate | Evidence to observe | Pass condition |
 | --- | --- | --- |
 | Candidate | Git revision and clean status | Recording and tests use the same final candidate |
-| Deterministic | `npm run check` | 23 files and 360/360 tests; both typechecks and builds pass |
+| Deterministic | `npm run check` | Server 23 files / 361 tests and Web 1 file / 6 tests; both typechecks and builds pass |
 | Credential | Scratch Codex JSONL + final-message file | real Ark/Codex call exits 0 and the trimmed final assistant message exactly equals the marker |
 | Normal Runs | Dashboard Run/Assignment/Receipt evidence | three distinct real Runs, current 3-ALLOW result |
 | Normal Effect | Gate and Effect ID | one Effect in the Normal Session |

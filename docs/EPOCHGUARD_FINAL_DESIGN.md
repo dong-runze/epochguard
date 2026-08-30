@@ -100,11 +100,11 @@ implementation changes: none
 design artifact: docs/EPOCHGUARD_FINAL_DESIGN.md
 ```
 
-当前已完成阶段 8/9，阶段 9/9 Release Verification 正在收口。此次权威文档同步前的最新产品/发布基线为 `epochguard/staging@e11619dd67a51d2aba9481b8b89a6a77fa80e83c`：冻结合同 v7、Store、World/Evidence、Decision/JV、Refresh/Effect、Diagnostics/Snapshot/Run Adapter、Coordinator/Routes、双场景 Production Integration、Session Safety Dashboard、运行证据带、英文 README/演示手册、一页品牌架构图、跨平台测试修复和依赖补丁均已合入并推送 staging。该精确 SHA 已在 Windows 与 WSL2 Ubuntu 24.04 两个干净克隆中分别完成 `npm ci`、`npm audit --audit-level=low`（0 vulnerabilities）、23 个测试文件 360/360、全工作区 typecheck 和 Web/Server production build；生产无 Mock 的 controlled-HTTP 浏览器门也已通过。它已经可以做受控演示，但仍不等于真实模型端到端比赛演示；真实 Ark、录屏和默认分支发布尚未完成。
+当前已完成阶段 8/9，阶段 9/9 Release Verification 正在收口。此次权威文档同步前的最新产品/发布基线为 `epochguard/staging@140edd543e1244b27538fe74d7a80d144aec8c0a`：冻结合同 v7、Store、World/Evidence、Decision/JV、Refresh/Effect、Diagnostics/Snapshot/Run Adapter、Coordinator/Routes、双场景 Production Integration、Session Safety Dashboard、运行证据带、英文 README/演示手册、一页品牌架构图、跨平台测试修复、依赖补丁，以及 Runtime 真实性/未就绪禁用 Run/凭据预检 fail-closed 加固均已合入并推送 staging。该精确 SHA 已在 Windows 与 WSL2 Ubuntu 24.04 两个干净克隆中分别完成 `npm ci`（196 packages）、`npm audit --audit-level=low`（0 vulnerabilities）、Server 23 files / 361 tests、Web 1 file / 6 tests、全工作区 typecheck 和 Web/Server production build。此前生产无 Mock 的 controlled-HTTP 浏览器门已经通过，但 `140edd5` 的最终浏览器回归仍与真实 Ark 演示一起保留为发布门。当前候选可以做确定性和受控演示，但仍不等于真实模型端到端比赛演示；真实 Ark、录屏和默认分支发布尚未完成。
 
 正式实现应把赛段开始后的新增代码、测试、README 和演示材料保留为清晰的 Git 历史；不要把赛前概念文档冒充实现成果。
 
-当前运行硬阻塞必须显式记录：**`ARK_API_KEY` / `ARK_MODEL` 尚未完成最终候选的真实 Agent Run 验证；若演示选择 container Runtime，Docker daemon 也仍需单独验证。** WSL2 Ubuntu 24.04 与 Node 22 已在干净克隆完成 typecheck、build 和全 Server 360/360，但确定性测试与受控 HTTP 都不能替代真实模型 Runtime；真实运行仍是发布前 Go/No-Go。
+当前运行硬阻塞必须显式记录：**`ARK_API_KEY` / `ARK_MODEL` 尚未完成最终候选的真实 Agent Run 验证；按用户决定暂时跳过 Key，若演示选择 container Runtime，Docker daemon 也仍需单独验证。** Windows 与 WSL2 Ubuntu 24.04 的精确 SHA 干净克隆已完成 audit=0、Server 361/361、Web 6/6、typecheck 和 build，但确定性测试与受控 HTTP 都不能替代真实模型 Runtime；真实运行仍是发布前 Go/No-Go。
 
 ### 1.6 资格和提交可用性自检
 
@@ -2384,7 +2384,7 @@ Agent 回传的区间不被信任。Receipt 由服务端保存，并绑定 Sessi
 - [x] Node 22；
 - [ ] Docker / Podman Runtime 可用；
 - [ ] Ark 连续真实 Run；
-- [x] `npm run check`（Windows/WSL 干净克隆均 360/360）；
+- [x] `npm run check`（Windows/WSL 精确 SHA 干净克隆均为 Server 361/361 + Web 6/6）；
 - [x] DS-01/03 与并发 Commit 通过；
 - [x] Snapshot 无密钥、绝对用户路径、完整 Prompt 或未脱敏输出；
 - [x] P0 单 Node / 单 writer 限制写入 README；

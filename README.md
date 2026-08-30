@@ -15,7 +15,8 @@ witness; and re-observes only the evidence owner that became invalid.
 
 > [!IMPORTANT]
 > **Release truth — 2026-08-30:** the deterministic WSL2 gate passes
-> (`npm run check`, 360/360 server tests, typecheck, and production builds).
+> (`npm run check`: 361/361 server tests plus 6/6 web tests, typecheck, and
+> production builds).
 > The final candidate has **not yet completed the real Volcengine Ark/Codex
 > lifecycle gate**. Controlled runners, HTTP fixtures, and the Mock Preview are
 > not evidence of a real Ark run. Do not describe this project as live-Ark
@@ -277,7 +278,7 @@ times, and never substitute the Mock Preview. A detailed shot list is in
 
 | Evidence | Current result | What it proves | What it does **not** prove |
 | --- | --- | --- | --- |
-| WSL2 Ubuntu 24.04, Node `v22.22.3`, npm `10.9.8`: `npm run check` | **PASS** — 23 files, 360/360 tests; Server/Web typecheck; Web/Server production builds | Contracts, Stores, interval validation, no-cut proof, run binding, selective refresh, Effect Gate, routes, dual-scenario integration, and Snapshot projection under deterministic test doubles | Ark credentials, remote model behavior, Docker daemon, or an end-to-end live recording |
+| Windows and WSL2 Ubuntu 24.04 clean clones: `npm run check` | **PASS** — Server 23 files / 361 tests; Web 1 file / 6 tests; Server/Web typecheck; Web/Server production builds | Contracts, Stores, interval validation, no-cut proof, run binding, selective refresh, Effect Gate, routes, dual-scenario integration, Snapshot projection, and fail-closed Runtime readiness under deterministic tests | Ark credentials, remote model behavior, Docker daemon, or an end-to-end live recording |
 | Controlled-HTTP browser gate recorded for the integrated production shell | **PASS**, documented in the two authoritative design/workflow records | Production routing, authentication boundary, single-Snapshot UI, and fail-closed browser behavior under controlled responses | A real Ark/Codex lifecycle |
 | Final-candidate real Ark seven-Run story | **NOT COMPLETED / NOT PASSED** | Required before the release claim can be upgraded | Nothing yet; this is the open release gate |
 
