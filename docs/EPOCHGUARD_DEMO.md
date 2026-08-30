@@ -51,26 +51,55 @@ Windows-mounted directory. Never share `node_modules` between Windows and WSL.
 ```bash
 mkdir -p ~/src
 cd ~/src
-git clone https://github.com/dong-runze/epochguard.git
+git clone --branch epochguard/staging --single-branch https://github.com/dong-runze/epochguard.git
 cd epochguard
 
+test "$(git branch --show-current)" = "epochguard/staging"
 test -z "$(git status --short)"
+export EPOCHGUARD_CANDIDATE_SHA="$(git rev-parse HEAD)"
+test "$EPOCHGUARD_CANDIDATE_SHA" = "$(git rev-parse origin/epochguard/staging)"
 node --version
 npm --version
 
 npm ci
+npm run check
+```
+
+Expected current deterministic result:
+
+```text
+Test Files  23 passed (23)
+Tests       360 passed (360)
+Web typecheck/build: pass
+Server typecheck/build: pass
+```
+
+These tests use deterministic fixtures and controlled runners. They do not
+validate Ark credentials or remote model behavior. They deliberately run before
+any secret enters the shell.
+
+Install and resolve the pinned Linux Codex CLI only after the offline gate:
+
+```bash
 npm install --global @openai/codex@0.111.0
 export CODEX_BIN="$(npm prefix --global)/bin/codex"
+case "$CODEX_BIN" in /*) ;; *) echo "CODEX_BIN must be an absolute Linux path"; exit 2;; esac
+test -x "$CODEX_BIN"
 "$CODEX_BIN" --version
 ```
+
+The explicit branch is required until the real Ark gate passes and the reviewed
+candidate is promoted: the repository's default `main` intentionally remains
+the Starter baseline during release verification.
 
 Use `"$CODEX_BIN"` for every later invocation. Do not switch to
 `command -v codex` or bare `codex`: an inherited Windows PATH can shadow the
 Linux global install with an incompatible Windows shim. The expected version
 line is `codex-cli 0.111.0`.
 
-Set Ark configuration explicitly in this shell. `npm run dev` does not load
-`.env`.
+Only now set Ark configuration explicitly in this shell. `npm run dev` does not
+load `.env`. If a key is not available, stop here: the deterministic candidate
+remains testable, while the real preflight and seven product Runs remain open.
 
 ```bash
 read -rsp "ARK_API_KEY: " ARK_API_KEY; echo
@@ -82,30 +111,12 @@ export ARK_MODEL
 export ARK_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
 
 case "$ARK_API_KEY" in
-  ""|replace-*) echo "Real ARK_API_KEY required"; exit 2 ;;
+  ""|replace-*|*'<'*|*'>'*) echo "Real ARK_API_KEY required"; exit 2 ;;
 esac
 case "$ARK_MODEL" in
-  ""|*replace-*) echo "Real ARK_MODEL required"; exit 2 ;;
+  ""|*replace-*|*'<'*|*'>'*) echo "Real ARK_MODEL required"; exit 2 ;;
 esac
 ```
-
-Run the offline deterministic gate before spending model quota:
-
-```bash
-npm run check
-```
-
-Expected current result:
-
-```text
-Test Files  23 passed (23)
-Tests       360 passed (360)
-Web typecheck/build: pass
-Server typecheck/build: pass
-```
-
-These tests use deterministic fixtures and controlled runners. They do not
-validate Ark credentials or remote model behavior.
 
 ## 3. Live credential preflight (required)
 
@@ -119,6 +130,7 @@ EpochGuard Session or write either scenario Store.
 imports the built server configuration module.
 
 ```bash
+umask 077
 export EPOCHGUARD_PREFLIGHT_ROOT="$(mktemp -d /tmp/epochguard-preflight.XXXXXX)"
 export CODEX_HOME="$EPOCHGUARD_PREFLIGHT_ROOT/codex-home"
 mkdir -p "$CODEX_HOME" "$EPOCHGUARD_PREFLIGHT_ROOT/work"
@@ -129,7 +141,8 @@ node --input-type=module -e \
 
 set -o pipefail
 
-"$CODEX_BIN" exec \
+timeout --foreground 180s "$CODEX_BIN" exec \
+  --ephemeral \
   --json \
   -o "$EPOCHGUARD_PREFLIGHT_ROOT/final.txt" \
   --sandbox read-only \
@@ -160,13 +173,17 @@ if ! PREFLIGHT_FINAL="$EPOCHGUARD_PREFLIGHT_ROOT/final.txt" \
 fi
 
 echo "LIVE ARK/CODEX PREFLIGHT PASSED"
+export EPOCHGUARD_LIVE_PREFLIGHT_SHA="$EPOCHGUARD_CANDIDATE_SHA"
 ```
 
 This fail-closed check is pinned to `@openai/codex@0.111.0` and depends on
-that version's `--json` JSONL stream plus `-o/--output-last-message` final
-assistant-message file. Re-audit both output contracts before changing the
-Codex version. The JSONL stream is retained for review, but arbitrary stream
-text is never accepted as the success marker.
+that version's `--ephemeral` non-persistence mode, `--json` JSONL stream, and
+`-o/--output-last-message` final assistant-message file. Re-audit these output
+contracts before changing the Codex version. The private scratch JSONL and final
+file exist only for local review; arbitrary stream text is never accepted as the
+success marker. Confirm they contain no secret, retain only a sanitized pass/fail
+note or screenshot, then remove the entire scratch root after the take. Never
+attach the raw scratch files to a submission, issue, chat, or commit.
 
 Treat any nonzero exit, timeout, authentication error, endpoint/model error, or
 missing marker as a failed release preflight. Fix credentials or the endpoint
@@ -196,6 +213,7 @@ export NODE_ENV=development
 export HOST=127.0.0.1
 export PORT=3000
 export RUNTIME_PROVIDER=local-process
+export CODEX_SANDBOX_MODE=workspace-write
 
 test "${#APP_AUTH_TOKEN}" -ge 24
 case "$APP_AUTH_TOKEN" in *[!A-Za-z0-9._~-]*) echo "Token is not URL-safe"; exit 2;; esac
@@ -364,8 +382,10 @@ create another new root:
 ```bash
 export LOCAL_POC_DATA_ROOT="$(mktemp -d /tmp/epochguard-container.XXXXXX)"
 export APP_AUTH_TOKEN="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(24).toString("base64url"))')"
-export ARK_API_KEY="<real-key>"
-export ARK_MODEL="<responses-capable-endpoint-or-model-id>"
+: "${ARK_API_KEY:?Run the hidden-input credential preflight first}"
+: "${ARK_MODEL:?Run the credential preflight first}"
+case "$ARK_API_KEY" in replace-*|*'<'*|*'>'*) echo "Real ARK_API_KEY required"; exit 2;; esac
+case "$ARK_MODEL" in *replace-*|*'<'*|*'>'*) echo "Real ARK_MODEL required"; exit 2;; esac
 export ARK_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
 
 npm run poc
@@ -393,7 +413,15 @@ explicit—`.env` is not loaded by `npm run dev`.
 ```powershell
 $ErrorActionPreference = 'Stop'
 
+if (git status --porcelain) { throw 'Use a clean Windows clone' }
+$env:EPOCHGUARD_CANDIDATE_SHA = (git rev-parse HEAD).Trim()
+$remoteCandidate = (git rev-parse origin/epochguard/staging).Trim()
+if ($env:EPOCHGUARD_CANDIDATE_SHA -cne $remoteCandidate) { throw 'Checkout does not match origin/epochguard/staging' }
+
 npm ci
+npm run check
+if ($LASTEXITCODE -ne 0) { throw 'Deterministic gate failed' }
+
 npm install --global @openai/codex@0.111.0
 $env:CODEX_BIN = (Get-Command codex).Source
 
@@ -401,9 +429,8 @@ $secureArkKey = Read-Host 'ARK_API_KEY' -AsSecureString
 $env:ARK_API_KEY = [Net.NetworkCredential]::new('', $secureArkKey).Password
 $env:ARK_MODEL = Read-Host 'ARK_MODEL (Responses-capable endpoint/model ID)'
 $env:ARK_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
-
-npm run check
-if ($LASTEXITCODE -ne 0) { throw 'Deterministic gate failed' }
+if ([string]::IsNullOrWhiteSpace($env:ARK_API_KEY) -or $env:ARK_API_KEY.StartsWith('replace-') -or $env:ARK_API_KEY.Contains('<') -or $env:ARK_API_KEY.Contains('>')) { throw 'Real ARK_API_KEY required' }
+if ([string]::IsNullOrWhiteSpace($env:ARK_MODEL) -or $env:ARK_MODEL.Contains('replace-') -or $env:ARK_MODEL.Contains('<') -or $env:ARK_MODEL.Contains('>')) { throw 'Real ARK_MODEL required' }
 
 $preflightRoot = Join-Path ([IO.Path]::GetTempPath()) ('epochguard-preflight-' + [guid]::NewGuid().ToString('N'))
 $env:CODEX_HOME = Join-Path $preflightRoot 'codex-home'
@@ -414,13 +441,33 @@ $preflightStderr = Join-Path $preflightRoot 'codex.stderr.txt'
 New-Item -ItemType Directory -Force -Path $env:CODEX_HOME, $preflightWork | Out-Null
 node --input-type=module -e 'import { loadConfig, writeCodexConfig } from "./apps/server/dist/config.js"; await writeCodexConfig(loadConfig());'
 if ($LASTEXITCODE -ne 0) { throw 'Could not generate the scratch Codex configuration' }
-$preflightEvents = & $env:CODEX_BIN exec --json --output-last-message $preflightFinal --sandbox read-only --skip-git-repo-check -C $preflightWork 'Reply exactly EPOCHGUARD_PREFLIGHT_OK.' 2> $preflightStderr
+$env:EPOCHGUARD_PREFLIGHT_CODEX = $env:CODEX_BIN
+$env:EPOCHGUARD_PREFLIGHT_WORK = $preflightWork
+$env:EPOCHGUARD_PREFLIGHT_JSONL = $preflightJsonl
+$env:EPOCHGUARD_PREFLIGHT_FINAL = $preflightFinal
+$env:EPOCHGUARD_PREFLIGHT_STDERR = $preflightStderr
+node --input-type=module -e @'
+import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const result = spawnSync(
+  process.env.EPOCHGUARD_PREFLIGHT_CODEX,
+  ["exec", "--ephemeral", "--json", "--output-last-message", process.env.EPOCHGUARD_PREFLIGHT_FINAL, "--sandbox", "read-only", "--skip-git-repo-check", "-C", process.env.EPOCHGUARD_PREFLIGHT_WORK, "Reply exactly EPOCHGUARD_PREFLIGHT_OK."],
+  { encoding: "utf8", timeout: 180_000, windowsHide: true }
+);
+writeFileSync(process.env.EPOCHGUARD_PREFLIGHT_JSONL, result.stdout ?? "", { mode: 0o600 });
+writeFileSync(process.env.EPOCHGUARD_PREFLIGHT_STDERR, result.stderr ?? "", { mode: 0o600 });
+if (result.error) {
+  console.error(result.error.code === "ETIMEDOUT" ? "Codex preflight timed out" : "Could not execute Codex preflight");
+  process.exit(124);
+}
+process.exit(result.status ?? 1);
+'@
 $codexExit = $LASTEXITCODE
-$preflightEvents | Set-Content -LiteralPath $preflightJsonl -Encoding utf8 -ErrorAction Stop
 if ($codexExit -ne 0) { throw "Live Ark/Codex preflight exited $codexExit" }
 if (-not (Test-Path -LiteralPath $preflightFinal)) { throw 'Codex did not write the final assistant message' }
 $finalMessage = (Get-Content -LiteralPath $preflightFinal -Raw).Trim()
 if ($finalMessage -cne 'EPOCHGUARD_PREFLIGHT_OK') { throw 'Final agent message did not exactly match the preflight marker' }
+$env:EPOCHGUARD_LIVE_PREFLIGHT_SHA = (git rev-parse HEAD).Trim()
 
 $demoRoot = Join-Path ([IO.Path]::GetTempPath()) ('epochguard-demo-' + [guid]::NewGuid().ToString('N'))
 $env:APP_DATA_DIR = Join-Path $demoRoot 'data'
@@ -433,6 +480,10 @@ $env:NODE_ENV = 'development'
 $env:HOST = '127.0.0.1'
 $env:PORT = '3000'
 $env:RUNTIME_PROVIDER = 'local-process'
+$env:CODEX_SANDBOX_MODE = 'workspace-write'
+
+# Copy the browser token without printing it into the terminal or recording.
+Set-Clipboard -Value $env:APP_AUTH_TOKEN
 
 npm run dev
 ```

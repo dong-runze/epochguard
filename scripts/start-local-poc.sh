@@ -63,9 +63,29 @@ detect_engine() {
   return 1
 }
 
-if [[ -z "${ARK_API_KEY:-}" || -z "${ARK_MODEL:-}" ]]; then
-  log "ARK_API_KEY and ARK_MODEL are required."
-  log "Example: ARK_API_KEY=key ARK_MODEL=ep-id ./scripts/start-local-poc.sh"
+case "${ARK_API_KEY:-}" in
+  ""|replace-*|*'<'*|*'>'*)
+    log "A real, non-placeholder ARK_API_KEY is required."
+    log "Enter it without placing the key in command history; see docs/EPOCHGUARD_DEMO.md."
+    exit 2
+    ;;
+esac
+
+case "${ARK_MODEL:-}" in
+  ""|*replace-*|*your-*|*'<'*|*'>'*)
+    log "A real, non-placeholder ARK_MODEL is required."
+    exit 2
+    ;;
+esac
+
+candidate_sha="$(git rev-parse HEAD 2>/dev/null || true)"
+if [[ -z "$candidate_sha" || -n "$(git status --short 2>/dev/null)" ]]; then
+  log "The container POC must start from a clean Git candidate."
+  exit 2
+fi
+if [[ "${EPOCHGUARD_LIVE_PREFLIGHT_SHA:-}" != "$candidate_sha" ]]; then
+  log "The disposable live Ark/Codex preflight has not passed for candidate $candidate_sha."
+  log "Complete section 3 of docs/EPOCHGUARD_DEMO.md in this shell before npm run poc."
   exit 2
 fi
 

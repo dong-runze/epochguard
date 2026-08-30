@@ -130,26 +130,35 @@ checkout or its `node_modules`; run `npm ci` inside the WSL clone.
 ```bash
 mkdir -p ~/src
 cd ~/src
-git clone https://github.com/dong-runze/epochguard.git
+git clone --branch epochguard/staging --single-branch https://github.com/dong-runze/epochguard.git
 cd epochguard
+test "$(git branch --show-current)" = "epochguard/staging"
 test -z "$(git status --short)"
+export EPOCHGUARD_CANDIDATE_SHA="$(git rev-parse HEAD)"
+test "$EPOCHGUARD_CANDIDATE_SHA" = "$(git rev-parse origin/epochguard/staging)"
 
 npm ci
+npm run check
+
 npm install --global @openai/codex@0.111.0
 export CODEX_BIN="$(npm prefix --global)/bin/codex"
 "$CODEX_BIN" --version
 
+# Stop here without a key: every deterministic release gate above is complete.
+# Only a real Ark preflight and the seven product Runs remain credential-gated.
 read -rsp "ARK_API_KEY: " ARK_API_KEY; echo
 export ARK_API_KEY
 read -rp "ARK_MODEL (Responses-capable endpoint/model ID): " ARK_MODEL
 export ARK_MODEL
 export ARK_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
 
-case "$ARK_API_KEY" in ""|replace-*) echo "Real ARK_API_KEY required"; exit 2;; esac
-case "$ARK_MODEL" in ""|*replace-*) echo "Real ARK_MODEL required"; exit 2;; esac
-
-npm run check
+case "$ARK_API_KEY" in ""|replace-*|*'<'*|*'>'*) echo "Real ARK_API_KEY required"; exit 2;; esac
+case "$ARK_MODEL" in ""|*replace-*|*'<'*|*'>'*) echo "Real ARK_MODEL required"; exit 2;; esac
 ```
+
+Until the real Ark gate passes and the reviewed candidate is promoted, the
+repository's default `main` is intentionally still the Starter baseline. Clone
+`epochguard/staging` explicitly as above; do not test the default branch yet.
 
 Keep using the explicit `"$CODEX_BIN"` path for every later Codex command.
 Do not replace it with `command -v codex` or bare `codex`: an inherited Windows
@@ -209,8 +218,11 @@ credential preflight first, then use a new container data root:
 ```bash
 export LOCAL_POC_DATA_ROOT="$(mktemp -d /tmp/epochguard-container.XXXXXX)"
 export APP_AUTH_TOKEN="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(24).toString("base64url"))')"
-export ARK_API_KEY="<real-key>"
-export ARK_MODEL="<responses-capable-endpoint-or-model-id>"
+: "${ARK_API_KEY:?Run the hidden-input credential preflight first}"
+: "${ARK_MODEL:?Run the credential preflight first}"
+case "$ARK_API_KEY" in replace-*|*'<'*|*'>'*) echo "Real ARK_API_KEY required"; exit 2;; esac
+case "$ARK_MODEL" in *replace-*|*'<'*|*'>'*) echo "Real ARK_MODEL required"; exit 2;; esac
+export ARK_BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
 npm run poc
 ```
 

@@ -35,7 +35,10 @@ afterEach(async () => {
   );
 });
 
-async function makeService(runner: AgentRunner = new FakeRunner()): Promise<AgentService> {
+async function makeService(
+  runner: AgentRunner = new FakeRunner(),
+  environment: Record<string, string> = {},
+): Promise<AgentService> {
   const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
   temporaryDirectories.push(root);
   const config = loadConfig({
@@ -45,6 +48,7 @@ async function makeService(runner: AgentRunner = new FakeRunner()): Promise<Agen
     CODEX_HOME: path.join(root, "codex"),
     ARK_API_KEY: "test-key",
     ARK_MODEL: "ep-test",
+    ...environment,
   });
   const service = new AgentService(
     config,
@@ -57,6 +61,25 @@ async function makeService(runner: AgentRunner = new FakeRunner()): Promise<Agen
 }
 
 describe("Agent lifecycle", () => {
+  it("reports the configured execution boundary without calling a local process a container", async () => {
+    const localService = await makeService();
+    const containerService = await makeService(new FakeRunner(), {
+      RUNTIME_PROVIDER: "container",
+      CONTAINER_ENGINE: "docker",
+    });
+
+    await expect(localService.systemInfo()).resolves.toMatchObject({
+      runtimeProvider: "local-process",
+      containerEngine: null,
+      runtime: "Codex CLI in local process",
+    });
+    await expect(containerService.systemInfo()).resolves.toMatchObject({
+      runtimeProvider: "container",
+      containerEngine: "docker",
+      runtime: "Codex CLI in docker Runtime",
+    });
+  });
+
   it("creates, updates, stops, starts and deletes an Agent", async () => {
     const service = await makeService();
     const agent = await service.createAgent({ name: "Builder" });

@@ -10,6 +10,33 @@ if [[ ! -f "$env_file" ]]; then
   exit 1
 fi
 
+read_env_value() {
+  local key="$1"
+  sed -n "s/^${key}=//p" "$env_file" | tail -n 1
+}
+
+ark_api_key="$(read_env_value ARK_API_KEY)"
+ark_model="$(read_env_value ARK_MODEL)"
+app_auth_token="$(read_env_value APP_AUTH_TOKEN)"
+case "$ark_api_key" in
+  ""|replace-*|your-*|*'<'*|*'>'*)
+    echo "A real, non-placeholder ARK_API_KEY is required in $env_file." >&2
+    exit 1
+    ;;
+esac
+case "$ark_model" in
+  ""|*replace-*|*your-*|*'<'*|*'>'*)
+    echo "A real, non-placeholder ARK_MODEL is required in $env_file." >&2
+    exit 1
+    ;;
+esac
+if [[ ! "$app_auth_token" =~ ^[A-Za-z0-9._~-]{24,128}$ ]] \
+  || [[ "$app_auth_token" == replace-* ]]; then
+  echo "APP_AUTH_TOKEN in $env_file must be a non-placeholder 24-128 character URL-safe token." >&2
+  exit 1
+fi
+unset ark_api_key ark_model app_auth_token
+
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker Engine 24 or newer is required. Follow the Linux install section in README.md." >&2
   exit 1

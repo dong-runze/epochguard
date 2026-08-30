@@ -4,10 +4,18 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_dir"
 
-if [[ -z "${VOLCENGINE_ACCESS_KEY:-}" || -z "${VOLCENGINE_SECRET_KEY:-}" ]]; then
-  echo "Export VOLCENGINE_ACCESS_KEY and VOLCENGINE_SECRET_KEY first." >&2
-  exit 1
-fi
+case "${VOLCENGINE_ACCESS_KEY:-}" in
+  ""|replace-*|your-*|*'<'*|*'>'*)
+    echo "Export a real, non-placeholder VOLCENGINE_ACCESS_KEY first." >&2
+    exit 1
+    ;;
+esac
+case "${VOLCENGINE_SECRET_KEY:-}" in
+  ""|replace-*|your-*|*'<'*|*'>'*)
+    echo "Export a real, non-placeholder VOLCENGINE_SECRET_KEY first." >&2
+    exit 1
+    ;;
+esac
 
 if [[ ! -f .env.production ]]; then
   echo "Missing .env.production. Copy .env.example and fill the Ark values." >&2
@@ -24,8 +32,21 @@ set -a
 source .env.production
 set +a
 
-if [[ "${ARK_API_KEY:-}" == "" || "${ARK_MODEL:-}" == "" || "${APP_AUTH_TOKEN:-}" == "" ]]; then
-  echo "ARK_API_KEY, ARK_MODEL and APP_AUTH_TOKEN are required in .env.production." >&2
+case "${ARK_API_KEY:-}" in
+  ""|replace-*|your-*|*'<'*|*'>'*)
+    echo "A real, non-placeholder ARK_API_KEY is required in .env.production." >&2
+    exit 1
+    ;;
+esac
+case "${ARK_MODEL:-}" in
+  ""|*replace-*|*your-*|*'<'*|*'>'*)
+    echo "A real, non-placeholder ARK_MODEL is required in .env.production." >&2
+    exit 1
+    ;;
+esac
+if [[ ! "${APP_AUTH_TOKEN:-}" =~ ^[A-Za-z0-9._~-]{24,128}$ ]] \
+  || [[ "$APP_AUTH_TOKEN" == replace-* ]]; then
+  echo "APP_AUTH_TOKEN in .env.production must be a non-placeholder 24-128 character URL-safe token." >&2
   exit 1
 fi
 

@@ -84,20 +84,43 @@ dedicated ECS instance for this POC.
 
 ### Deploy
 
+Before connecting to ECS, complete sections 2 and 3 of the
+[reproducible demo runbook](EPOCHGUARD_DEMO.md) from a clean WSL clone. Record
+the resulting `EPOCHGUARD_CANDIDATE_SHA` only after both `npm run check` and the
+scratch live Ark/Codex marker pass. Do not treat a moving branch name as the
+verified release identity.
+
+On the dedicated ECS host, enter that non-secret SHA and check out exactly that
+commit. Repeat the deterministic gate in a disposable Node container before
+putting any secret on the host:
+
 ```bash
-git clone https://github.com/your-org/volc-agent-launchpad.git
-cd volc-agent-launchpad
-cp .env.example .env.production
-openssl rand -hex 32
+read -rp "Verified EpochGuard candidate SHA: " EPOCHGUARD_CANDIDATE_SHA
+if [[ ! "$EPOCHGUARD_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "Expected one 40-character lowercase Git SHA"
+  exit 2
+fi
+git clone --branch epochguard/staging --single-branch https://github.com/dong-runze/epochguard.git
+cd epochguard
+git checkout --detach "$EPOCHGUARD_CANDIDATE_SHA"
+test "$(git rev-parse HEAD)" = "$EPOCHGUARD_CANDIDATE_SHA"
+test -z "$(git status --short)"
+
+docker run --rm -v "$PWD:/workspace" -w /workspace node:22-bookworm npm ci
+docker run --rm -v "$PWD:/workspace" -w /workspace node:22-bookworm npm run check
+
+install -m 600 .env.example .env.production
 ```
 
-Set these values in `.env.production`:
+Use a private editor to replace every placeholder in `.env.production`. Do not
+put a real key or token in an inline shell assignment, terminal recording,
+issue, commit, or chat:
 
 ```dotenv
 PUBLIC_PORT=80
-ARK_API_KEY=your-ark-api-key
-ARK_MODEL=ep-your-endpoint-id
-APP_AUTH_TOKEN=the-random-token-generated-above
+ARK_API_KEY=replace-with-your-real-ark-api-key
+ARK_MODEL=ep-replace-with-your-real-endpoint-id
+APP_AUTH_TOKEN=replace-with-a-private-random-token
 ```
 
 Deploy:
@@ -111,7 +134,9 @@ Verify:
 
 ```bash
 curl http://127.0.0.1/api/health
-export APP_AUTH_TOKEN=your-shared-demo-token
+set -a
+. ./.env.production
+set +a
 curl -H "Authorization: Bearer $APP_AUTH_TOKEN" \
   http://127.0.0.1/api/system
 docker compose --env-file .env.production ps
@@ -160,8 +185,10 @@ image, instance type, key pair, allowed CIDRs, and repository URL in
 Provide account credentials only through the current shell:
 
 ```bash
-export VOLCENGINE_ACCESS_KEY=your-access-key
-export VOLCENGINE_SECRET_KEY=your-secret-key
+read -rsp "VOLCENGINE_ACCESS_KEY: " VOLCENGINE_ACCESS_KEY; echo
+export VOLCENGINE_ACCESS_KEY
+read -rsp "VOLCENGINE_SECRET_KEY: " VOLCENGINE_SECRET_KEY; echo
+export VOLCENGINE_SECRET_KEY
 ./scripts/deploy-volcengine.sh
 ```
 

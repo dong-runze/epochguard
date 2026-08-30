@@ -276,8 +276,48 @@ function snapshotPreservesRoleAgents(
   });
 }
 
-function SessionSafetyWorkspace({
+export type RuntimeReadiness = {
+  ready: boolean;
+  reason: string | null;
+};
+
+export function getRuntimeReadiness(system: SystemInfo | null): RuntimeReadiness {
+  if (system === null) {
+    return {
+      ready: false,
+      reason: "Checking the current server runtime configuration.",
+    };
+  }
+  if (!system.arkConfigured) {
+    return {
+      ready: false,
+      reason:
+        "Configure ARK_API_KEY and ARK_MODEL in the current server environment, then restart the server.",
+    };
+  }
+  if (!system.codexAvailable) {
+    return {
+      ready: false,
+      reason:
+        system.runtimeProvider === "container"
+          ? "The configured container engine or Agent Runtime image is unavailable. Restore it, then restart the server."
+          : "Codex CLI is unavailable in the local server process. Install @openai/codex, then restart the server.",
+    };
+  }
+  return { ready: true, reason: null };
+}
+
+export function getRuntimeDisplayLabel(system: SystemInfo | null): string {
+  if (system === null) return "Checking runtime…";
+  return system.runtimeProvider === "container"
+    ? "Local container · Codex CLI"
+    : "Local process · Codex CLI";
+}
+
+export function SessionSafetyWorkspace({
   agents,
+  runtimeReady,
+  runtimeReadinessReason,
   scenarioId,
   onScenarioIdChange,
   sessionIds,
@@ -287,6 +327,8 @@ function SessionSafetyWorkspace({
   finishOperation,
 }: {
   agents: Agent[];
+  runtimeReady: boolean;
+  runtimeReadinessReason: string | null;
   scenarioId: ScenarioId;
   onScenarioIdChange: (scenarioId: ScenarioId) => void;
   sessionIds: StoredSessionIds;
@@ -315,6 +357,12 @@ function SessionSafetyWorkspace({
     : [];
 
   const createSession = async () => {
+    if (!runtimeReady) {
+      setCreateError(
+        runtimeReadinessReason ?? "The current server runtime is not ready.",
+      );
+      return;
+    }
     if (!assignmentResolution.ok) return;
     const operationToken = beginOperation("create");
     if (operationToken === null) return;
@@ -542,6 +590,14 @@ function SessionSafetyWorkspace({
               </ul>
             </div>
           ) : null}
+          {!runtimeReady ? (
+            <div className="safety-setup-error" role="status">
+              <strong>Runtime is not ready</strong>
+              <span>
+                {runtimeReadinessReason ?? "The current server runtime is unavailable."}
+              </span>
+            </div>
+          ) : null}
           {assignmentResolution.ok && nonReadyRoleAgents.length > 0 ? (
             <div className="safety-readiness-note" role="status">
               <strong>Role status is advisory</strong>
@@ -558,7 +614,7 @@ function SessionSafetyWorkspace({
           <button
             type="button"
             className="button button-primary safety-run-button"
-            disabled={!assignmentResolution.ok || operationPending}
+            disabled={!runtimeReady || !assignmentResolution.ok || operationPending}
             onClick={() => void createSession()}
           >
             {creating ? <Spinner /> : `Run ${selectedScenario.label}`}
@@ -595,6 +651,7 @@ export default function App() {
     useState<SafetyPendingOperation>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [system, setSystem] = useState<SystemInfo | null>(null);
+  const runtimeReadiness = getRuntimeReadiness(system);
   const [showCreate, setShowCreate] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [form, setForm] = useState(emptyForm);
@@ -914,11 +971,7 @@ export default function App() {
           <div className="brand-mark">A</div>
           <div>
             <strong>Agent Launchpad</strong>
-            <span>
-              {system?.runtimeProvider === "container"
-                ? "Local container · Codex CLI"
-                : "ECS / Docker · Codex CLI"}
-            </span>
+            <span>{getRuntimeDisplayLabel(system)}</span>
           </div>
         </div>
 
@@ -996,17 +1049,13 @@ export default function App() {
           </button>
         </nav>
 
-        {!system?.arkConfigured || !system?.codexAvailable ? (
+        {system !== null && !runtimeReadiness.ready ? (
           <div className="config-banner">
             <span>!</span>
             <div>
               <strong>Runtime configuration needed</strong>
               <p>
-                {!system?.arkConfigured
-                  ? "Set ARK_API_KEY and ARK_MODEL in .env before using the Playground."
-                  : system.runtimeProvider === "container"
-                    ? "The local container engine or Agent Runtime image is unavailable. Rerun npm run poc."
-                    : "Codex CLI was not found. Use the Docker image or install @openai/codex."}
+                {runtimeReadiness.reason}
               </p>
             </div>
           </div>
@@ -1137,6 +1186,8 @@ export default function App() {
               {workspaceMode === "safety" ? (
                 <SessionSafetyWorkspace
                   agents={agents}
+                  runtimeReady={runtimeReadiness.ready}
+                  runtimeReadinessReason={runtimeReadiness.reason}
                   scenarioId={safetyScenarioId}
                   onScenarioIdChange={setSafetyScenarioId}
                   sessionIds={safetySessionIds}
