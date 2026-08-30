@@ -30,6 +30,8 @@ const SESSION_ID = "session_eg05";
 const HEAD = 21;
 const NOW = "2026-08-29T12:00:00.000Z";
 const LATER = "2026-08-29T12:01:00.000Z";
+const LOW_ENTROPY_V4_UUID = "00000000-0000-4000-8000-000000000000";
+const FIXED_V7_UUID = "01890f4a-7b3c-7def-8abc-0123456789ab";
 const PRODUCTION_UUID_ID_PREFIXES = [
   "session",
   "action",
@@ -46,7 +48,6 @@ const PRODUCTION_UUID_ID_PREFIXES = [
   "refresh",
   "event",
   "diagnostic",
-  "run",
 ] as const;
 
 const roleAgentId = (role: Role): string => `agent_${role}`;
@@ -1636,7 +1637,7 @@ describe("fixed redaction boundary", () => {
         assignmentId:
           role === "inventory" ? randomUUID() : `assignment_${randomUUID()}`,
         attemptId: `attempt_${randomUUID()}`,
-        runId: `run_${randomUUID()}`,
+        runId: randomUUID(),
       };
       idsByRole.set(role, ids);
       const assignment = database.runAssignments.find(
@@ -1680,6 +1681,9 @@ describe("fixed redaction boundary", () => {
     }
 
     const structuredIds = [
+      LOW_ENTROPY_V4_UUID,
+      `session_${LOW_ENTROPY_V4_UUID}`,
+      FIXED_V7_UUID,
       randomUUID(),
       ...PRODUCTION_UUID_ID_PREFIXES.map(
         (prefix) => `${prefix}_${randomUUID()}`,
@@ -1716,6 +1720,9 @@ describe("fixed redaction boundary", () => {
 
   it("still redacts bare and prefixed UUIDs in free display text", () => {
     const freeTextIds = [
+      LOW_ENTROPY_V4_UUID,
+      `session_${LOW_ENTROPY_V4_UUID}`,
+      FIXED_V7_UUID,
       randomUUID(),
       ...PRODUCTION_UUID_ID_PREFIXES.map(
         (prefix) => `${prefix}_${randomUUID()}`,
@@ -1746,6 +1753,18 @@ describe("fixed redaction boundary", () => {
     runDatabase.attempts[0]!.runId = opaqueRunId;
     runDatabase.decisions[0]!.runId = opaqueRunId;
     expect(() => snapshot(runDatabase)).toThrowError(SessionViewBuilderError);
+
+    const pathDatabase = makeDatabase();
+    const opaqueAssignmentId =
+      "opaque_Qw8Er6Ty4Ui2Op9As7Df5Gh3Jk1Lz0Xc8Vb6Nm4P";
+    const assignment = pathDatabase.runAssignments[0]!;
+    assignment.assignmentId = opaqueAssignmentId;
+    assignment.evidencePackRelativePath =
+      `.epochguard/sessions/${SESSION_ID}/inventory/${opaqueAssignmentId}.json`;
+    pathDatabase.receipts[0]!.runAssignmentId = opaqueAssignmentId;
+    pathDatabase.attempts[0]!.assignmentId = opaqueAssignmentId;
+    pathDatabase.decisions[0]!.runAssignmentId = opaqueAssignmentId;
+    expect(() => snapshot(pathDatabase)).toThrowError(SessionViewBuilderError);
   });
 
   it("rejects a sha256 digest reused as a system ID", () => {
