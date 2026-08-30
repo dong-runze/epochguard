@@ -496,6 +496,8 @@ export class EpochGuardService {
           "In-flight Session active RefreshPlan state/status is invalid",
         );
       }
+    } else if (session.state === "REOBSERVING") {
+      throw new Error("REOBSERVING Session has no active RefreshPlan");
     }
 
     if (session.activePermitId !== null) {
@@ -519,6 +521,8 @@ export class EpochGuardService {
       }
       permits[0]!.status = "REVOKED";
       permits[0]!.consumedAt = null;
+    } else if (session.state === "COMMITTING") {
+      throw new Error("COMMITTING Session has no active Permit");
     }
 
     session.activeAttemptIds = {

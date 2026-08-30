@@ -1735,6 +1735,34 @@ describe("EpochGuardService", () => {
     expect(malformed.store.snapshot()).toEqual(beforeRecovery);
   });
 
+  it("rejects REOBSERVING without an active RefreshPlan without publishing recovery", async () => {
+    const { forkPersistedService, service, requestFor } = await createHarness();
+    const created = await service.createSession(
+      requestFor("impossible-collage-v1"),
+    );
+    const blocked = await waitForSessionState(service, created.sessionId, [
+      "BLOCKED_NO_CUT",
+    ]);
+    const malformed = await forkPersistedService();
+    await malformed.store.initialize();
+    await malformed.store.mutate((database) => {
+      const session = database.sessions.find(
+        (candidate) => candidate.sessionId === blocked.sessionId,
+      )!;
+      expect(session.activeRefreshPlanId).not.toBeNull();
+      session.activeRefreshPlanId = null;
+      session.state = "REOBSERVING";
+      session.sessionRevision += 1;
+      session.stateUpdatedAt = NOW;
+    });
+    const beforeRecovery = malformed.store.snapshot();
+
+    await expect(malformed.service.initialize()).rejects.toThrow(
+      "REOBSERVING Session has no active RefreshPlan",
+    );
+    expect(malformed.store.snapshot()).toEqual(beforeRecovery);
+  });
+
   it("recovers COMMITTING with a completed selective RefreshPlan and issued Permit", async () => {
     const { agents, forkPersistedService, service, requestFor } =
       await createHarness();
@@ -1816,6 +1844,32 @@ describe("EpochGuardService", () => {
     await restarted.service.initialize();
     expect(restarted.store.snapshot()).toEqual(recoveredDatabase);
     expect(restarted.service.getSnapshot(ready.sessionId)).toEqual(interrupted);
+  });
+
+  it("rejects COMMITTING without an active Permit without publishing recovery", async () => {
+    const { forkPersistedService, service, requestFor } = await createHarness();
+    const created = await service.createSession(requestFor("normal-world-v1"));
+    const ready = await waitForSessionState(service, created.sessionId, [
+      "READY_AT_CURRENT_HEAD",
+    ]);
+    const malformed = await forkPersistedService();
+    await malformed.store.initialize();
+    await malformed.store.mutate((database) => {
+      const session = database.sessions.find(
+        (candidate) => candidate.sessionId === ready.sessionId,
+      )!;
+      expect(session.activePermitId).not.toBeNull();
+      session.activePermitId = null;
+      session.state = "COMMITTING";
+      session.sessionRevision += 1;
+      session.stateUpdatedAt = NOW;
+    });
+    const beforeRecovery = malformed.store.snapshot();
+
+    await expect(malformed.service.initialize()).rejects.toThrow(
+      "COMMITTING Session has no active Permit",
+    );
+    expect(malformed.store.snapshot()).toEqual(beforeRecovery);
   });
 
   it("rejects an active issued Permit outside COMMITTING without publishing recovery", async () => {
