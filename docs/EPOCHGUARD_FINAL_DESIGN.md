@@ -42,16 +42,16 @@ failure_session.effectsInSession = 0
 ### 1.1 时间
 
 - 正式赛段：**2026-08-29 12:00 至 2026-09-01 12:00，SGT / GMT+8**；
-- 核对时间：2026-08-29 约 15:09 SGT；
-- 当时实际剩余时间：约 **69 小时**；
+- 首次核对时间：2026-08-29 约 15:09 SGT，当时剩余约 **69 小时**；
+- 最新公开页面复核时间：2026-08-30 约 15:15 SGT，距离截止约 **44 小时 45 分**；
 - 这是 72 小时赛，不再采用“五天实施计划”。
 
 ### 1.2 Devpost 当前状态
 
-- 官方入口已经开放；
-- 登录后的入口显示 `Start project`，当前尚未创建提交草稿；
-- 截止前可以保存和修改草稿，截止后不能再实质修改；
-- 建议实现链路跑通后尽早创建草稿，但最终提交操作应由参赛者本人确认。
+- 官方公开页面仍显示提交期处于开放状态，截止时间为 **2026-09-01 12:00 SGT**；
+- 匿名、只读访问无法判断参赛者账号内是否已经创建或保存提交草稿，因此不再把 `Start project` 或“尚未创建草稿”写成已验证事实；
+- 参赛者应立即登录 Devpost，创建并保存草稿，核对公开仓库、`≤ 3:00` YouTube 视频和书面说明字段；
+- 截止前可以修改草稿，但最终提交与公开页面检查必须由参赛者本人完成。
 
 官方入口：
 
@@ -100,7 +100,7 @@ implementation changes: none
 design artifact: docs/EPOCHGUARD_FINAL_DESIGN.md
 ```
 
-当前实现已推进至阶段 8/9 完成：冻结合同 v7、Store、World/Evidence、Decision/JV、Refresh/Effect、Diagnostics/Snapshot/Run Adapter、Coordinator/Routes、双场景 Production Integration 与 Session Safety Dashboard 均已由独立 worktree 实现并合入 `epochguard/staging@f096edd`。精确 SHA 已通过 Windows 聚焦测试、WSL2 干净克隆全 Server 360/360，以及生产无 Mock 的 controlled-HTTP 浏览器门。该状态可用于稳定展示生产外壳和受控生命周期，但仍不等于真实模型端到端比赛演示；真实 Ark 与最终发布门尚未完成。
+当前已完成阶段 8/9，阶段 9/9 Release Verification 正在收口。此次权威文档同步前的最新产品/发布基线为 `epochguard/staging@e11619dd67a51d2aba9481b8b89a6a77fa80e83c`：冻结合同 v7、Store、World/Evidence、Decision/JV、Refresh/Effect、Diagnostics/Snapshot/Run Adapter、Coordinator/Routes、双场景 Production Integration、Session Safety Dashboard、运行证据带、英文 README/演示手册、一页品牌架构图、跨平台测试修复和依赖补丁均已合入并推送 staging。该精确 SHA 已在 Windows 与 WSL2 Ubuntu 24.04 两个干净克隆中分别完成 `npm ci`、`npm audit --audit-level=low`（0 vulnerabilities）、23 个测试文件 360/360、全工作区 typecheck 和 Web/Server production build；生产无 Mock 的 controlled-HTTP 浏览器门也已通过。它已经可以做受控演示，但仍不等于真实模型端到端比赛演示；真实 Ark、录屏和默认分支发布尚未完成。
 
 正式实现应把赛段开始后的新增代码、测试、README 和演示材料保留为清晰的 Git 历史；不要把赛前概念文档冒充实现成果。
 
@@ -419,7 +419,7 @@ interface RoleAgentRegistration {
 }
 ```
 
-`EpochGuardService.initialize()` 通过现有 `AgentService.createAgent()` 幂等创建缺失的三个 Demo Role Agent，并把 Registration 保存到 EpochStore；它不接管或改写用户已有 Chat Agent。已注册 Agent 被删除、编辑或 digest 不匹配时，Session 创建 fail closed，Dashboard 显示明确 setup 错误，由操作者重新初始化专用 Agent，不能静默覆盖用户内容。可恢复的旧 Codex thread 仍可能包含历史指令，因此模型输出始终不可信；Profile/digest、当前 Receipt/nonce 和后端 Gate 只保证历史内容不能冒充权威证据或直接发布，并不保证模型没有受到旧上下文影响。
+`EpochGuardService.initialize()` 仅在全新的空数据根中通过现有 `AgentService.createAgent()` 幂等创建三个固定 Demo Role Agent，并把 Registration 保存到 EpochStore；它不接管或改写用户已有 Chat Agent。若已有 Registration 指向的 Agent 被删除、编辑，或 name/Profile/digest 不匹配，初始化会 fail closed 并在 `createApp()` / `listen()` 之前阻止服务器启动；此时 Dashboard 根本不会开放，也没有 UI 重新注册入口。操作者应依据去敏启动错误恢复完全匹配的持久状态，或为新的 take 使用干净 `APP_DATA_DIR`，不能静默覆盖用户内容。可恢复的旧 Codex thread 仍可能包含历史指令，因此模型输出始终不可信；Profile/digest、当前 Receipt/nonce 和后端 Gate 只保证历史内容不能冒充权威证据或直接发布，并不保证模型没有受到旧上下文影响。
 
 ### 5.2 信任边界
 
@@ -1532,7 +1532,7 @@ stateDiagram-v2
     FAILED --> [*]
 ```
 
-P0 将 `COMMIT_RACE` 视为当前业务 Session 的终态：服务端持久化 `TRANSIENT_RACE / COMMIT` Diagnostic，保持 effect=0，不在原 Session 内自动回到 `VALIDATING`。恢复方式是 reset 后新建 Session；前端只能 GET 权威 Snapshot，不得自动重放 Commit。
+P0 将 `COMMIT_RACE` 视为当前业务 Session 的终态：服务端持久化 `TRANSIENT_RACE / COMMIT` Diagnostic，保持 effect=0，不在原 Session 内自动回到 `VALIDATING`。Production 没有 reset API；前端只能 GET 权威 Snapshot，随后清除终态浏览器指针，且不得自动重放 Commit。同一场景的新 take 必须使用全新的 `APP_DATA_DIR`；`/demo/reset` 仅限 development/test。
 
 单 Agent Attempt：
 
@@ -1822,7 +1822,7 @@ GET  /api/epochguard/effects/:campaignId
 
 - `POST /refresh` 的 body 只有 `{ expectedSessionRevision, refreshPlanId }`，不接受任意 `agentId`；
 - `POST /commit` 的 body 只有 `{ expectedSessionRevision }`，不接受浏览器提交的 head、Permit、区间、Gate 状态或 effect count；若 Effect 已存在则在 revision 检查前幂等返回原 Effect，否则核对 Session revision 后，从 Store 完整重验、append Effect 并 consume Permit，全部位于一个短串行 mutation；
-- `POST /demo/reset` 只在开发/测试模式重置注册 fixture，不执行广泛删除，也不作为 UI 的“新建 Session”按钮；
+- `POST /demo/reset` 只在 development/test 暴露：通过活跃态预检后清空两个场景 Store 的 demo 业务集合，并保留三条 Role registrations；它不在 production 暴露，也不作为 UI 的“新建 Session”按钮；
 - 所有命令在 Store mutation 中重新验证，不信任 Snapshot 中曾经显示的 `availableActions`。
 
 Refresh 不能在持有 Store mutation 时等待模型。事务分三段：
@@ -1853,13 +1853,13 @@ Session Safety Dashboard 不是额外装饰或独立 BI 页面，而是同一 Se
 
 `Session Safety` 只替换现有消息区和 Composer，不创建新首页。用户流程：
 
-1. 从已有 Agent 侧栏选择三个已经注册为 Inventory / Budget / Policy 的专用 Role Agent；未注册或 Profile digest 不匹配的普通 Chat Agent 不可选；
-2. 后端验证三个 ID 不同、状态可运行、Role/Profile 版本匹配且当前没有编辑或 active Run；
+1. 用户按现有认证流程粘贴 Bearer token 并打开 Playground，再从 `Agent Chat` 切到 `Session Safety`；
+2. Dashboard 自动解析后端注册并冻结的 Inventory / Budget / Policy 三个专用 Role Agent，不要求用户在侧栏手工挑选；普通 Chat Agent 不进入安全三元组；
 3. 选择 `Normal World` 或 `Impossible World`；
-4. 点击 `Run Scenario`，Session 随即冻结 Role assignments，之后切换侧栏不改变正在运行的 Session；
+4. 点击与场景对应的 `Run Normal World` 或 `Run Impossible World`；后端再次验证三个 ID 不同、状态可运行、Role/Profile 版本匹配且全局没有 active Session，然后冻结 assignments 并并发派发初始三条 Run；
 5. `BLOCKED_NO_CUT` 时只显示服务端授权的 `Re-observe Budget only`；
-6. `READY_AT_CURRENT_HEAD` 时可以显示 `Commit protected effect`，点击后后端仍完整重验；
-7. `New Demo Session` 再次调用 `POST /sessions`，创建新的注册 fixture Session，不修改旧审计记录；开发用 `/demo/reset` 不出现在正式 UI。
+6. `READY_AT_CURRENT_HEAD` 时显示 `Commit protected effect`，点击后后端仍在串行临界区完整重验；
+7. `Clear saved session` 先通过 production GET 严格验证 Session 已终态或得到精确匹配的 canonical 404，随后只删除浏览器保存的指针；它不调用 mutation/reset API、不删除后端 Store，也不重置世界。在同一录制 take 内可清除 Normal 指针后切换到尚未使用的 Impossible 分区。重新录制或重跑同一场景必须使用全新的 `APP_DATA_DIR`。
 
 绝不提供 `Force release`、`Ignore proof`、手工编辑 interval/head/effect count 或任意选择 refresh Agent 的能力。
 
@@ -1868,7 +1868,9 @@ Session Safety Dashboard 不是额外装饰或独立 BI 页面，而是同一 Se
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
 │ Playground [Agent Chat | Session Safety]  Publish campaign_42  │
-│ [Normal | Impossible] I:Inv B:Bud P:Pol  CONCURRENT [Run]      │
+│ [Normal | Impossible] I:Inv B:Bud P:Pol [Run Normal/Impossible]│
+│ EVIDENCE · fan-out CONCURRENT · Runs 3/3 distinct · Threads 3/3│
+│ shared active overlap 1.2s · usage input/cached/output coverage │
 ├──────────────┬──────────────┬──────────────┬────────────────────┤
 │ TEAM         │ WORLD CUT    │ EFFECT       │ RE-OBSERVATION     │
 │ 3/3 ALLOW    │ NONE L21≥U20 │ BLOCKED · 0  │ Recommended 1/3    │
@@ -1927,7 +1929,7 @@ Gate 状态必须同时使用文字、图标和颜色：`WAITING`、`CHECKING`�
 
 ### 14.5 Run-bound Evidence Details 与 Badcase 定位
 
-三张卡默认显示冻结的 Agent 名称/Role、active Decision 的短 Run ID、Fact、Verdict、Receipt 区间、证据状态和 run count；若 refresh 正在进行，在同一卡片独立显示 `inFlightAttempt`，绝不把新 Run 与旧 Verdict 混成一个状态。P0 的 Run-bound Evidence `<details>` 只需当前 Session 的 Agent/Run/Assignment/Receipt/Validation ID；Runtime、Thread、Pack 相对路径与 hash、source revision、起止时间和 usage 是数据合同已支持但有余时才展示的扩展。任何层级都不显示本机绝对用户名路径、API Key、完整环境变量或未脱敏 Prompt，也不扩展成通用 Agent observability / token 成本产品。
+三张卡默认显示冻结的 Agent 名称/Role、active Decision 的短 Run ID、Fact、Verdict、Receipt 区间、证据状态和 run count；若 refresh 正在进行，在同一卡片独立显示 `inFlightAttempt`，绝不把新 Run 与旧 Verdict 混成一个状态。当前 Dashboard 已实现权威运行证据带：直接读取 Snapshot 的 `coordinationMode`，统计不同 active Run、已记录 Thread 的覆盖数、初始 Run 当前可证实的共同活跃重叠区间，以及 input/cached-input/output 三类 usage 字段覆盖；只有存在可比较的时间区间时才显示 overlap，刷新后不可比较就明确显示 unavailable，cached input 明示为 input 的子集。Run-bound Evidence `<details>` 当前展示短 Run/Assignment、source/observed revision、Runtime、短 Thread、Evidence Pack 相对路径与短 hash；Receipt 的短 ID 和区间显示在同一卡片，Agent 只显示名称/Role，公开 ActiveDecision Snapshot 不投影 `validationId`。Run/Assignment/Thread 的完整 opaque 值可通过标题属性用于审计，但任何层级都不显示本机绝对用户名路径、API Key、完整环境变量或未脱敏 Prompt，也不扩展成通用 Agent observability / token 成本产品。
 
 Dashboard 的诊断链直接复用权威工件：
 
@@ -1943,22 +1945,24 @@ P0 界面只显示当前 Session 最新的 `stage + reasonCode + relevant IDs`�
 
 | 状态 | Dashboard 表现 | 允许操作 |
 | --- | --- | --- |
-| Demo Role Agent 未初始化、缺失或 digest 变化 | 指出具体 Role/Profile 问题，指标为 `—` | 初始化/重新注册专用 Agent |
+| 全新空数据根首次启动 | Server 在监听前幂等创建并注册三名固定 Role Agent；成功后 Dashboard 才可访问 | 无需在 UI 手工选择或注册 |
+| 已有 Role Registration 指向的 Agent 缺失、被修改或 digest 漂移 | Server 在监听前 fail closed，Dashboard 不可访问，不承诺承担启动失败恢复 | 检查去敏启动错误，恢复完全匹配的持久状态；否则为新 take 使用干净 `APP_DATA_DIR` |
 | Dispatch / Collect / Validate | 卡片显示 queued/running，Gate `WAITING/CHECKING` | 禁止重复 Run |
 | No Cut / Historical Stale | 预期安全阻断，显示 proof，不渲染成系统崩溃 | 仅服务端授权 refresh |
-| Consistent Deny | `RESOLVED SAFELY`，effect 仍为 0 | 新建 Session |
-| Committed | Effect ID，count=1 | 新建 Session |
-| Run failed / Interrupted / Unstable | 指明 Role / Run，Gate 锁定，Permit 作废 | P0 新建 Session |
+| Consistent Deny | `RESOLVED SAFELY`，effect 仍为 0 | `Clear saved session`；其他未使用场景可继续，同场景新 take 使用全新数据根 |
+| Committed | Effect ID，count=1 | `Clear saved session`；其他未使用场景可继续，同场景新 take 使用全新数据根 |
+| Run failed / Interrupted / Unstable | 指明 Role / Run，Gate 锁定，Permit 作废 | 清除浏览器指针；新 take 使用全新数据根 |
 | API 断开或 Snapshot 超时 | 保留最后确认值并显示 `VIEW STALE` | 禁止 refresh / commit |
 | `409 STALE_VIEW` | 保留旧画面，提示 `Session changed; refreshed before action` | GET 新 Snapshot，不自动重放 |
-| `404 SESSION_NOT_FOUND` / 不支持 Schema | 清空全部可执行动作并显示不可恢复原因 | New Demo Session |
-| `COMMIT_RACE` | Gate 保持锁定，显示当前 Session 因提交竞态安全终止，effect=0 | reset 后新建 Session；前端不自动重复 commit |
+| canonical `404 SESSION_NOT_FOUND` 且响应 `sessionId` 精确匹配 | 清空全部可执行动作并显示 Session 已不存在 | `Clear saved session` 可删除精确匹配的浏览器指针 |
+| 不支持 Schema / Snapshot decode 失败 | Fail closed、保留指针并清空全部可执行动作，显示客户端/服务端版本不匹配 | 修复为匹配的 Web/Server 版本后重新 GET；不得清指针或发送 mutation |
+| `COMMIT_RACE` | Gate 保持锁定，显示当前 Session 因提交竞态安全终止，effect=0 | 清除浏览器指针并为新 take 使用全新数据根；前端不自动重复 commit |
 
 Dashboard 打开期间约每 900ms 固定轮询；写入 UI 前必须同时核对 Session ID、request generation 和 revision，不能只依赖 Abort。连续三次失败或距离最后成功 HTTP Snapshot 超过 3 秒时标记 `VIEW STALE` 并禁用动作；command pending 期间也禁用所有 mutation 按钮，但继续 GET。所有面板必须标注同一个 `snapshotRevision`、`sessionRevision` 和 `generatedAt`。
 
 状态不能只靠红绿：同时提供文字、`✓/⛔` 和可读区间表；只用一个简短 `aria-live="polite"` 播报状态变化，900ms 轮询不能反复朗读整页，No-Cut 作为预期安全结果不使用 alert，网络/Schema 错误才用。`Agent Chat / Session Safety` 使用原生 button + `aria-pressed`；Raw Proof/Evidence 使用原生 `<details>`；按钮保留明显 `focus-visible`，支持 `prefers-reduced-motion`。布局只保留 topbar + 可滚动 Dashboard 两行，主区 `min-height:0; overflow:auto`，避免原 Composer 留白或双滚动。窄屏允许 Inspector 横向滚动；比赛视频以 1080p 桌面布局为验收基准。
 
-Normal 和 Failure 是两个独立 Session：`normal_01` 与 `impossible_01`。切换场景时 Gate 先回到 `WAITING`；计数始终标注 `Effects in this session`，不能把正常场景的 1 和失败场景的 0 混在一个累计数中。
+Normal 和 Failure 位于两个物理独立 Store，各自创建不可预测的 `session_<UUIDv4>`。同一 take 先让 Normal 到达终态，再用 `Clear saved session` 清除浏览器指针并启动尚未使用的 Impossible 分区；切换时 Gate 回到 `WAITING`。计数始终标注 `Effects in this session`，不能把正常场景的 1 和失败场景的 0 混在一个累计数中。再次录制必须换用全新的 `APP_DATA_DIR`，不能把清除浏览器指针误解为重置后端。
 
 ---
 
@@ -1967,10 +1971,10 @@ Normal 和 Failure 是两个独立 Session：`normal_01` 与 `impossible_01`。�
 | 时间 | 画面 | 解说重点 |
 | ---: | --- | --- |
 | 0:00–0:07 | 黑底 Hook，随后进入现有 Playground | “The most dangerous multi-agent failure is when every agent is right.” |
-| 0:07–0:18 | 在原侧栏选择三个 ready Agent，主区从 `Agent Chat` 切到 `Session Safety` | 没有另做演示壳；三个独立 Runtime 分别负责库存、预算、政策 |
-| 0:18–0:38 | Dashboard 运行 `normal_01`；三张卡从 queued/running 到真实 Run 完成 | 展示短 Run ID、Receipt、区间；Run-bound Evidence 短暂展示完整可核验链 |
+| 0:07–0:18 | 主区从 `Agent Chat` 切到 `Session Safety`，Dashboard 自动显示固定三名 Role Agent | 没有另做演示壳或手工挑 Agent；三个独立 Runtime 分别负责库存、预算、政策 |
+| 0:18–0:38 | 点击 `Run Normal World`；三张卡从 queued/running 到真实 Run 完成，运行证据带同步显示 fan-out、不同 Run、Thread、overlap 与 usage 覆盖 | 展示短 Run ID、Receipt、区间和可核验的并行运行证据 |
 | 0:38–0:49 | 同一 Snapshot 上先显示 `READY`；点击 `Commit protected effect` 后变为 `RELEASED · 1` | 服务端在原子临界区重验当前 head，后端 Gate 只释放一次 Effect |
-| 0:49–0:58 | Dashboard 新建 `impossible_01`，四个摘要回到 `WAITING/—/0` | Normal 与 Failure 是独立 Session，不混用计数 |
+| 0:49–0:58 | 点击 `Clear saved session`，选择 Impossible 并点击 `Run Impossible World`，四个摘要回到 `WAITING/—/0` | 清除的只是终态浏览器指针；Normal 与 Failure 是独立 Store/Session，不混用计数 |
 | 0:58–1:22 | 三张 Agent 卡分别完成并全部 `ALLOW`，Event Ledger 出现 seq20/seq21 | 每个局部结论都对，但观察来自不同世界版本 |
 | 1:22–1:33 | 保留三张 ALLOW 卡，同时 World Cut 与 Effect Gate 变为 `NONE/LOCKED` | 三个 Agent 都正确，但证据从未共同成立；浏览器没有重算结论 |
 | 1:33–1:53 | 放大 World Inspector：v18–v21、head、L/U、开闭端点与 witness | `[19,20) ∩ [21,∞) = ∅`，确定性后端拒绝，不是 LLM 再猜一次 |
@@ -1979,6 +1983,8 @@ Normal 和 Failure 是两个独立 Session：`normal_01` 与 `impossible_01`。�
 | 2:17–2:34 | 点击一次 `Re-observe Budget only`；仅 Budget 第二次真实 Run | 读取 `$0`，返回 `DENY`；I=1、B=2、P=1，避免两次重跑 |
 | 2:34–2:47 | 同一 Dashboard 显示 `VALID @ v21 · 2 ALLOW/1 DENY · RESOLVED SAFELY · 0` | 恢复目标是一致、安全、可解释的当前决定，不是强迫发布 |
 | 2:47–2:55 | Event Ledger、自动化测试实测摘要与结尾标语 | 一次演示不自证安全率；结尾是 “No valid observed world, no side effect.” |
+
+录制执行、真实 Codex preflight、七次模型 Run、fresh-data 规则和故障恢复的唯一操作手册是 [`EPOCHGUARD_DEMO.md`](./EPOCHGUARD_DEMO.md)。视频允许剪掉模型等待时间，但画面必须来自同一候选 SHA 的真实七条 Run，不能用 FakeRunner、Mock Preview 或 controlled HTTP 冒充。
 
 成片目标为 **2:50–2:55**，给平台转码和片头留出至少五秒余量，不制作卡在 3:00 的版本。视频可以剪掉等待时间，但跳切处必须短暂显示实际 elapsed time 或 Run 的真实开始/结束时间，并保留真实 Run ID 和 Event Ledger；不能用预制静态动画代替 Agent 执行。若最终使用顺序 Runtime，解说和屏幕不得称其为 parallel。
 
@@ -2122,9 +2128,9 @@ Dashboard 级记录 `snapshot projection mismatches`、`cross-panel revision ske
 
 必须先完成：
 
-1. 在 WSL2 Ubuntu 24.04 启动 Docker Desktop 或 Podman；
-2. 配置真实 `ARK_API_KEY` 和 `ARK_MODEL`；
-3. 构建/检查官方 Runtime image；
+1. 在 WSL2 Ubuntu 24.04 的 Linux 文件系统完成干净克隆与 `npm ci`，使用已验证的 Linux Codex CLI，并通过显式 `CODEX_BIN="$(npm prefix --global)/bin/codex"` 避免误用 Windows 可执行文件；
+2. 通过终端隐藏输入配置真实 `ARK_API_KEY` 和 `ARK_MODEL`，绝不粘贴到聊天、仓库或截图；
+3. 优先完成 local-process Runtime preflight；container Runtime 只是可选的独立门，选择它时才要求 Docker Desktop 或 Podman；
 4. 完成至少一次真实 Ark/Codex Agent Run，并保留真实 Run ID 与输出；
 5. 确认秘密不会进入日志、截图、Git 或浏览器。
 
@@ -2357,35 +2363,35 @@ Agent 回传的区间不被信任。Receipt 由服务端保存，并绑定 Sessi
 - [ ] 三个真实 Agent ID / Run ID / Thread ID；
 - [ ] Normal 当前切面发布一次；
 - [ ] Impossible Collage 三个 `ALLOW` 仍被阻断；
-- [ ] No-Cut Proof 展示 L/U 和 conflict witness；
-- [ ] 仅 Budget 第二次运行；
-- [ ] 刷新后 `CONSISTENT_DENY`；
-- [ ] failure `effectsInSession` 始终为 0；
-- [ ] 重复 normal commit 仍为 1；
-- [ ] Agent 没有 Publish capability；
-- [ ] Session Safety 嵌入现有 Playground，切回 Agent Chat 仍正常；
-- [ ] 一个 EpochStore Snapshot 驱动全部面板，active Decision 与 in-flight Attempt 不混搭；
-- [ ] Normal / Impossible / Recovered 三个画面与后端 `effectsInSession` 一致；
-- [ ] 三个真实 Run 的短 Run/Assignment/Receipt/Validation Evidence 可见且已脱敏；
-- [ ] 未知 Schema 和 command pending 时操作禁用；
-- [ ] 浏览器不能伪造 head、Receipt、Permit、Gate、refresh owner 或 effect count；
-- [ ] No-Cut 显示 reasonCode、相关 ID 与 witness；
-- [ ] 状态同时使用文字、图标与颜色，存在等价区间表。
+- [x] No-Cut Proof 展示 L/U 和 conflict witness（确定性测试与 controlled-HTTP）；
+- [x] 仅 Budget 第二次运行（确定性测试与 controlled-HTTP）；
+- [x] 刷新后 `CONSISTENT_DENY`（确定性测试与 controlled-HTTP）；
+- [x] failure `effectsInSession` 始终为 0（确定性测试与 controlled-HTTP）；
+- [x] 重复 normal commit 仍为 1（确定性并发/幂等测试）；
+- [x] Agent 没有 Publish capability；
+- [x] Session Safety 嵌入现有 Playground，切回 Agent Chat 仍正常；
+- [x] 一个 EpochStore Snapshot 驱动全部面板，active Decision 与 in-flight Attempt 不混搭；
+- [x] Normal / Impossible / Recovered 三个受控画面与后端 `effectsInSession` 一致；
+- [ ] 三个真实 Run 的 Run/Assignment/Receipt、Runtime/Thread/Pack Evidence 可见且无凭据泄露；Validation 结论由同一 Snapshot 的 Gate/Proof 投影，不宣称存在 `validationId` 字段；
+- [x] 未知 Schema 和 command pending 时操作禁用；
+- [x] 浏览器不能伪造 head、Receipt、Permit、Gate、refresh owner 或 effect count；
+- [x] No-Cut 显示 reasonCode、相关 ID 与 witness；
+- [x] 状态同时使用文字、图标与颜色，存在等价区间表。
 
 ### 工程
 
-- [ ] WSL2 Ubuntu 24.04 作为主环境；
-- [ ] Node 22；
+- [x] WSL2 Ubuntu 24.04 作为主环境；
+- [x] Node 22；
 - [ ] Docker / Podman Runtime 可用；
 - [ ] Ark 连续真实 Run；
-- [ ] `npm run check`；
-- [ ] DS-01/03 与并发 Commit 通过；
-- [ ] Snapshot 无密钥、绝对用户路径、完整 Prompt 或未脱敏输出；
-- [ ] P0 单 Node / 单 writer 限制写入 README；
-- [ ] 清洁克隆一键复现；
+- [x] `npm run check`（Windows/WSL 干净克隆均 360/360）；
+- [x] DS-01/03 与并发 Commit 通过；
+- [x] Snapshot 无密钥、绝对用户路径、完整 Prompt 或未脱敏输出；
+- [x] P0 单 Node / 单 writer 限制写入 README；
+- [x] 清洁克隆一键复现；
 - [ ] 无秘密；
-- [ ] 公开仓库；
-- [ ] 许可证和第三方依赖说明。
+- [x] 公开仓库；
+- [x] 许可证和第三方依赖说明。
 
 ### 提交
 
@@ -2397,12 +2403,12 @@ Agent 回传的区间不被信任。Receipt 由服务端保存，并绑定 Sessi
 - [ ] What we learned；
 - [ ] What's next；
 - [ ] 技术栈、API、库和资产；
-- [ ] GitHub README；
-- [ ] README 明确声明 `Selected Track: Track 1 — Multi-Agent Coordination Middleware`；
-- [ ] 一页架构图；
+- [x] GitHub README；
+- [x] README 明确声明 `Selected Track: Track 1 — Multi-Agent Coordination Middleware`；
+- [x] 一页架构图；
 - [ ] `≤ 3:00` 的公开 YouTube 视频；
-- [ ] Testing instructions；
-- [ ] 已知限制；
+- [x] Testing instructions；
+- [x] 已知限制；
 - [ ] working project、仓库和测试入口至少到 2026-09-07 15:00 SGT 保持免费、无障碍、可访问；
 - [ ] 无未授权音乐、商标或第三方素材；
 - [ ] 截止前最终提交并检查公开页面。

@@ -1,10 +1,10 @@
 # EpochGuard 并行 Session 执行与验收流程
 
 > 状态：执行中——阶段 8/9 已完成，阶段 9/9 Release Verification 进行中
-> 当前集成基线：`epochguard/staging@f096edd`
+> 当前集成基线：`epochguard/staging`；本次文档同步前的产品/发布基线为 `e11619d`，文档同步不改变运行代码
 > 冻结合同：`epochguard-contract-v7`，`schemaVersion=1`
 > 产品设计来源：[`EPOCHGUARD_FINAL_DESIGN.md`](./EPOCHGUARD_FINAL_DESIGN.md)  
-> 本文档范围：定义任务编排、审核、校验、测试和合并流程，并记录实际执行证据。当前已具备双场景生产 Service、正式 HTTP 接线和嵌入式 Session Safety Dashboard；WSL 与 controlled-HTTP 浏览器门已通过，真实 Ark 生命周期和最终发布门完成前仍不是最终端到端比赛演示。
+> 本文档范围：定义任务编排、审核、校验、测试和合并流程，并记录实际执行证据。当前已具备双场景生产 Service、正式 HTTP 接线、嵌入式 Session Safety Dashboard、权威运行证据带、发布文档与一页架构图；Windows/WSL 干净克隆、依赖审计和 controlled-HTTP 浏览器门已通过，真实 Ark 生命周期、视频、Devpost 最终提交与默认分支发布完成前仍不是最终端到端比赛演示。
 
 ---
 
@@ -82,17 +82,18 @@ Gate 0 已完成：
 2. 设计与流程共同基线：`475cb93e832f56219bb4bdfdefff3d6aac1e7784`；
 3. 可视化灰度与执行任务登记基线：`c6e07b85baf56b59e44d0b728fd1d0ef5c0e5f9d`；
 4. `epochguard/staging` 只接收经中央审核的提交；EG-00～EG-09 使用独立 worktree 与独立分支；
-5. 当前已验收集成基线为 `f096edd8dec452f8ebf0dc5368a54d0e98be6c17`。
+5. 当前已验收产品/发布基线为 `e11619dd67a51d2aba9481b8b89a6a77fa80e83c`；其父链包含 EG-09 生产集成、跨平台修复、依赖补丁、运行证据、发布文档与架构资产。
 
 ### 4.2 当前集成测试事实
 
-在 `f096edd` 上已验证：
+在精确 SHA `e11619dd67a51d2aba9481b8b89a6a77fa80e83c` 的 Windows 与 WSL2 Ubuntu 24.04 两个干净克隆上已验证：
 
-- Dual Scenario + App：**45/45 PASS**；全部 EpochGuard：**330/330 PASS**；App + EpochGuard 组合：**336/336 PASS**；
+- `npm ci` 可重复安装 196 个 packages，`npm audit --audit-level=low` 为 **0 vulnerabilities**；
+- 23 个 Server 测试文件 **360/360 PASS**，此前 Windows `/tmp/codex-home` 平台断言已由 EG-11 关闭；
 - 全工作区 TypeScript 检查、Web 与 Server production build：**PASS**；
-- Windows 全 Server：**359/360**；唯一失败仍是 Container Runner 测试硬编码 `/tmp/codex-home`，且已在父提交独立复现；
-- WSL2 Ubuntu 24.04、Node `v22.22.3`、npm `10.9.8` 的干净克隆完成 `npm ci`、typecheck、build 和全 Server **360/360 PASS**；
+- WSL2 使用 Node `v22.22.3`、npm `10.9.8` 和独立 Linux `codex-cli 0.111.0`，没有复用 Windows `node_modules` 或 Windows Codex；
 - 精确 SHA 的 controlled-HTTP 浏览器门通过：生产无 Mock/Preview 接线、会话连续、busy 恢复、clear fail-closed、pending 防重入、localStorage 降级以及 390px/长文本布局均通过；
+- Dashboard 运行证据带、英文 README/演示 Runbook 和响应式 1920×1080 架构资产已集成并完成浏览器/链接检查；
 - 真实 `ARK_API_KEY` / `ARK_MODEL` 的模型生命周期仍是最终发布前 Go/No-Go，不能由 controlled HTTP 证据替代。
 
 ### 4.3 EG-00 必须冻结的合同
@@ -299,7 +300,7 @@ apps/server/src/epochguard/*对应单测
 - Failure fixture 只刷新 Budget；
 - 两个同 RefreshPlan 请求只创建一个 Assignment/Attempt/Run；
 - 两个并发 Commit 的 effect count 始终为 1；
-- 验证后、Commit 前 head 前进时，Session 必须持久化进入终态 `COMMIT_RACE`，写入 `TRANSIENT_RACE / COMMIT` Diagnostic 且 effect=0；P0 不在原 Session 内自动回到 `VALIDATING`，恢复方式为 reset 后新建 Session，前端不得自动重放 Commit；
+- 验证后、Commit 前 head 前进时，Session 必须持久化进入终态 `COMMIT_RACE`，写入 `TRANSIENT_RACE / COMMIT` Diagnostic 且 effect=0；P0 不在原 Session 内自动回到 `VALIDATING`。Production 没有 reset API；前端只清除终态浏览器指针且不得自动重放 Commit，同一场景新 take 使用全新 `APP_DATA_DIR`；
 - Action/Permit/JVC/dependency/head 任一不符都 effect=0。
 
 ### 6.6 EG-05 —— Diagnostics & Single Snapshot Projection
@@ -685,7 +686,7 @@ EG-01～EG-07 可以同时开发，但必须按上述顺序逐个审核并合入
 必须阻断合并的用例：
 
 1. 两个同 Commit 同时进入，返回同一 `effectId`，Ledger 仅一条，Permit 只消费一次；
-2. 验证后暂停 Commit，推进 head 再释放，必须持久化终态 `COMMIT_RACE`、写入 `TRANSIENT_RACE / COMMIT` Diagnostic 且 effect=0；只能 reset 后新建 Session，前端不得自动重放 Commit；
+2. 验证后暂停 Commit，推进 head 再释放，必须持久化终态 `COMMIT_RACE`、写入 `TRANSIENT_RACE / COMMIT` Diagnostic 且 effect=0；Production 无 reset，前端只清除终态浏览器指针且不得自动重放 Commit，同一场景新 take 使用全新 `APP_DATA_DIR`；
 3. 两个请求同时领取一个 RefreshPlan，只有一个 Assignment/Attempt/Run；
 4. Assignment/Decision 重复消费不能创建第二个 Certificate；
 5. 任一 Run 失败后无 Permit、无 Effect；
@@ -825,11 +826,11 @@ npm run check
 | 6 Diagnostics / Snapshot / Run Adapter | COMPLETE | `c49fc7f`、`6df7feb` / `82a4f8e`、`7b81d68` |
 | 7 Coordinator / Routes | COMPLETE | `c091886` / `e6e58ba`，EpochGuard 286/286 |
 | 8 Dashboard + Production Integration | COMPLETE | `f096edd` 已合入；双场景生产接线、正式四 API、Dashboard 与 controlled-HTTP 浏览器门通过 |
-| 9 WSL / Real Ark / Browser / Release | IN_PROGRESS | 精确 SHA 的 WSL 全量 360/360 与 controlled-HTTP 浏览器门完成；真实 Ark 和最终发布材料仍待完成 |
+| 9 WSL / Real Ark / Browser / Release | IN_PROGRESS | `e11619d` 的 Windows/WSL 全量 360/360、audit=0、controlled-HTTP、运行证据、README/Runbook 与架构资产完成；真实 Ark、视频、Devpost 最终提交和 `submission/main` 晋升待完成 |
 
 | ID | 名称 | 状态 | Base SHA | Commit SHA | 中央门 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
-| CONTROL | 规划/审核/测试 | ACTIVE | `f096edd` | `f096edd` | — | 阶段 8/9 COMPLETE；阶段 9/9 IN_PROGRESS；负责真实 Ark、发布材料、最终浏览器与仓库放行 |
+| CONTROL | 规划/审核/测试 | ACTIVE | `f096edd` | `e11619d` | — | 阶段 8/9 COMPLETE；阶段 9/9 IN_PROGRESS；确定性发布门已收口，负责真实 Ark、视频、最终浏览器与仓库放行 |
 | EG-CANARY | 可视化 Session 只读灰度 | ACCEPTED | `475cb93` | — | Visibility / Read-only | 可视化机制通过；worktree 隔离未通过 |
 | EG-00 | Contracts & Starter Seams | MERGED | `7b81d68` | `0d677a2` | Gate A **PASS** | v7 合同已由 `c4927e4` 合入 |
 | EG-01 | EpochStore | MERGED | `e5f0b3a` | `a7ba259` | Gate B Store **PASS** | 已合入 `epochguard/staging@b5576dc` |
@@ -841,6 +842,11 @@ npm run check
 | EG-07 | Dashboard Preview | MERGED | `e5f0b3a` | `bac3f6d` | Gate D Preview **PASS** | 浏览器验收通过；由 `cb09293` 合入，仍是 network-free Mock Preview |
 | EG-08 | Coordinator / Routes | MERGED | `c4927e4` | `c091886` | Gate B/C **PASS** | 由 `e6e58ba` 合入；恢复闭包、canonical HTTP 与后台 owner 门通过 |
 | EG-09 | Production Integration | MERGED | `ff663db` | `f096edd` | Gate B/D/F **PASS** | 双场景生产接线、真实默认 UUID 门、正式四 API 与 Dashboard 已合入 staging |
+| EG-10 | Release Docs & Demo Runbook | MERGED | `00bf1bd` | `d18bf22` / `78a9c13` | Docs/Links/Check **PASS** | 英文 README、架构说明和真实七 Run 演示手册已合入 |
+| EG-11 | Cross-platform Gate | MERGED | `00bf1bd` | `ce52af8` / `a4b5c25` | Windows/WSL **PASS** | 关闭 Windows `/tmp` 断言，两个干净克隆均 360/360 |
+| EG-12 | Dependency Audit Patch | MERGED | `00bf1bd` | `a192b1f` / `8453eae` | Supply-chain **PASS** | lockfile 最小补丁，`npm audit --audit-level=low` 为 0 |
+| EG-14 | Architecture & Brand | MERGED | `a4b5c25` | `049894d`、`3a48ad5` / `fb9311b`、`e11619d` | SVG/Browser **PASS** | 一页架构资产、信任边界、并发和响应式拓扑完成 |
+| EG-15 | Runtime Evidence | MERGED | `a4b5c25` | `1d05784` / `6350aaa` | UI/Contract **PASS** | Snapshot 驱动的 fan-out、Run/Thread、overlap 与 usage 证据带完成 |
 
 状态只使用：
 
@@ -906,14 +912,15 @@ BLOCKED
 | 合同版本 | `epochguard-contract-v7`，`schemaVersion=1` |
 | 合同摘要 | `sha256:4dfbeb9e55de7ca17a19f5fb8f99494b17e441af0f877767027284d3ae646361` |
 | 合同测试 | **28/28 PASS** |
-| 当前中央 EpochGuard | `f096edd` 上 **330/330 PASS**；App + EpochGuard **336/336 PASS** |
-| 当前 Windows Server | **359/360**；唯一失败为既知 POSIX `/tmp/codex-home` 路径断言 |
-| 当前 WSL2 Server | 干净克隆、`npm ci` 后 **360/360 PASS** |
+| 当前中央候选 | `e11619d`；23 个测试文件、全 Server **360/360 PASS** |
+| 当前 Windows Server | 干净克隆、`npm ci` 后 **360/360 PASS** |
+| 当前 WSL2 Server | Ubuntu 24.04 Linux 文件系统干净克隆、`npm ci` 后 **360/360 PASS** |
 | 构建门 | 全工作区 typecheck、Web/Server production build **PASS** |
+| 依赖门 | Windows/WSL `npm audit --audit-level=low` 均为 **0 vulnerabilities** |
 | v7 独立审核 | Server/Web 版本、digest、九种错误、strict schema、状态码、四个 Golden Snapshot hash 完全对称；三路 digest 复算一致 |
 | Gate A | **PASS** |
 
-v6 的 8,118 个 mutation candidates、479 个标注 snapshots、17,356 次 decoder 调用属于历史合同证据，不能冒充 v7 的当前统计。已知非 Gate A 阻断项仍是 Windows 上单个测试硬编码 POSIX `/tmp` 路径；依赖审计需在发布门前单独跟踪，不得与合同语义正确性混为一项。
+v6 的 8,118 个 mutation candidates、479 个标注 snapshots、17,356 次 decoder 调用属于历史合同证据，不能冒充 v7 的当前统计。历史上的 Windows POSIX `/tmp` 断言与依赖审计问题已分别由 EG-11、EG-12 关闭；合同语义、跨平台测试和供应链审计仍作为三个独立 Gate 记录，不能互相替代。
 
 ### 15.4 EG-01 / EpochStore 验收记录
 
@@ -1052,7 +1059,7 @@ v6 的 8,118 个 mutation candidates、479 个标注 snapshots、17,356 次 deco
 | 冷启动恢复 | 稳定可操作态原样保留；真实 in-flight Attempt/Assignment/CLAIMED Plan/ISSUED Permit 在单次 Store mutation 内闭合；非法 Plan/Permit 正反组合原子拒绝 |
 | 后台失败 | 持久化失败重试一次；持续失败仅上报固定 `code + sessionId` 并保留 fail-closed owner latch；已落盘终态不执行冗余闭合 |
 | HTTP 门 | v7 canonical errors；客户端 Zod=400；未知内部错误脱敏 500；production 仅四条正式 API，不存在 `/validate` 或 debug route |
-| Commit race | `COMMIT_RACE` 为终态，写入 `TRANSIENT_RACE / COMMIT`，effect=0；reset 后可新建 Session |
+| Commit race | `COMMIT_RACE` 为终态，写入 `TRANSIENT_RACE / COMMIT`，effect=0；Production 无 reset，前端仅清除终态浏览器指针，同一场景新 take 使用全新 `APP_DATA_DIR` |
 | 聚焦测试 | Service **30/30 PASS**；全部 EpochGuard **286/286 PASS** |
 | 全量门 | typecheck / build **PASS**；Windows Server **311/312**，唯一失败为既知 `/tmp/codex-home` 平台断言 |
 | Gate B/C | **PASS / MERGED** |
@@ -1069,7 +1076,7 @@ v6 的 8,118 个 mutation candidates、479 个标注 snapshots、17,356 次 deco
 | Production HTTP | 仅 `POST sessions`、`GET session`、`POST refresh`、`POST commit` 四条正式 API；均在 Bearer 边界内，debug/dev 路由为 canonical 404 |
 | Web | 使用真实 HTTP Source；跨 Chat/Safety 与 reload 保持 Session；busy 恢复只 GET 不重放 mutation；clear、Abort、pending 与 localStorage 均 fail closed |
 | 自动化门 | Dual + App **45/45**；EpochGuard **330/330**；App + EpochGuard **336/336**；typecheck/build **PASS** |
-| 平台门 | Windows Server **359/360**，唯一失败为父提交已有 `/tmp` 基线；WSL2 干净克隆 Server **360/360 PASS** |
+| 平台门 | 本行保留 EG-09 当时证据：`f096edd` 的 Windows 为 359/360、WSL2 为 360/360；该平台缺口随后由 EG-11 `ce52af8` / `a4b5c25` 关闭，当前 `e11619d` 的 Windows 与 WSL 干净克隆均为 360/360 |
 | 浏览器门 | 精确 SHA controlled-HTTP 验收通过：390×844、1000 字符文本、单纵向滚动、生产无 Mock/Preview、无 P0/P1 |
 | 独立终审 | Server、测试矩阵、Web 三路 **ACCEPT**；P0=0，P1=0；Web 记录一个非阻断 P2：极端永久挂起请求需刷新恢复 |
 | Gate B/D/F | **PASS / MERGED**；真实 Ark 模型生命周期归阶段 9 单独放行 |
@@ -1103,5 +1110,6 @@ v6 的 8,118 个 mutation candidates、479 个标注 snapshots、17,356 次 deco
 7. [x] 当前 Session 按第 10.2 节顺序审核和合入 EG-01～EG-08；
 8. [x] EG-01～EG-06 稳定后激活 EG-08；
 9. [x] EG-07/08 稳定并合入后，以 `e6e58ba` 激活 EG-09；
-10. [ ] EG-09 候选已合入，Gate B～F、WSL 与 controlled-HTTP 浏览器门已通过；真实 Ark 与最终发布浏览器门仍待完成；
-11. [ ] 全部通过后才将 staging 晋升为最终候选版本。
+10. [x] EG-09 候选已合入，Gate B～F 与 controlled-HTTP 浏览器门已通过；
+11. [x] EG-10/11/12/14/15 已合入，`e11619d` 的 Windows/WSL 干净克隆、audit=0、360/360、typecheck/build、运行证据、README/Runbook 与架构资产均通过；
+12. [ ] 同一最终候选完成真实 Ark 七次 Run、真实浏览器录屏、`≤ 3:00` 视频、认证态 Devpost 检查后，才将 staging 晋升至 `submission/main`。
