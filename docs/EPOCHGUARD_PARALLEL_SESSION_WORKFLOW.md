@@ -804,12 +804,12 @@ npm run check
 
 | ID | 名称 | 状态 | Base SHA | Commit SHA | 中央门 | 备注 |
 | --- | --- | --- | --- | --- | --- | --- |
-| CONTROL | 规划/审核/测试 | ACTIVE | `c6e07b8` | `e5f5f67` | — | 本 Session，位于 `epochguard/staging`；负责 worktree 初始化与故障恢复 |
+| CONTROL | 规划/审核/测试 | ACTIVE | `c6e07b8` | `c5818f8` | — | 本 Session，位于 `epochguard/staging`；负责 worktree 初始化与故障恢复 |
 | EG-CANARY | 可视化 Session 只读灰度 | ACCEPTED | `475cb93` | — | Visibility / Read-only | 可视化机制通过；worktree 隔离未通过 |
 | EG-00 | Contracts & Starter Seams | MERGED | `c6e07b8` | `d0f7861` | Gate A **PASS** | 已合入 `epochguard/staging@e5f0b3a` |
 | EG-01 | EpochStore | MERGED | `e5f0b3a` | `a7ba259` | Gate B Store **PASS** | 已合入 `epochguard/staging@b5576dc` |
 | EG-02 | World / Receipt / Evidence | MERGED | `e5f0b3a` | `1ff733d` | Gate B World/Evidence **PASS** | 已合入 `epochguard/staging@9b14f0c` |
-| EG-03 | Decision / Joint Validity | MERGED | `e5f0b3a` | `fe8a15f` | Gate B Decision/Validity **PASS** | 已合入 `epochguard/staging@8fc3bb4` |
+| EG-03 | Decision / Joint Validity | MERGED | `e5f0b3a` | `ee86f75` | Gate B Decision/Validity **PASS** | 主模块与 PGP hotfix 已合入 `epochguard/staging@c5818f8` |
 | EG-04 | Refresh / Effect Gate | MERGED | `e5f0b3a` | `63a8ee6` | Gate B/C Refresh/Effect **PASS** | 已合入 `epochguard/staging@5109ecb` |
 | EG-05 | Diagnostics / Snapshot | MERGED | `e5f0b3a` | `0a824b4` | Gate B/D Projection **PASS** | 已合入 `epochguard/staging@e5f5f67` |
 | EG-06 | Role Profiles / Run Adapter | MERGED | `e5f0b3a` | `5e4a5db` | Gate B/E Run Adapter **PASS** | 已合入 `epochguard/staging@1e1dce5` |
@@ -928,14 +928,15 @@ BLOCKED
 | 初始模块提交 | `467e15d059e8f1f52d00ff0cb265f119329da99a` |
 | 拒绝产物修复 | `2ce27440b9ac0df2bdbf6ce904cd634705620f94` |
 | 脱敏重放修复 | `4d6e9b5b3fc25f148791696a568ff66e8e0dc20a`、`2fe94c41080f376347da9078edce558bb108d197`、`fe8a15ffb1a638a57353e1c41ebf35a94187d82c` |
-| staging 合并提交 | `8fc3bb4` |
-| 变更边界 | 5 个线性提交；恰好只新增 EG-03 allowlist 内 4 个实现/测试文件；contracts v6 与 digest 未变 |
-| 中央累计测试 | Contracts + EG-01～03 的 EpochGuard 测试 **80/80 PASS** |
+| PGP 格式 hotfix | `ee86f754729f91d842469c263badc5ab3810d1a7` |
+| staging 合并提交 | `8fc3bb4`、`c5818f8` |
+| 变更边界 | 6 个线性提交；始终只修改 EG-03 allowlist 内 4 个实现/测试文件；contracts v6 与 digest 未变 |
+| 中央累计测试 | 首次合并 **80/80 PASS**；第一波后 hotfix 累计 **236/236 PASS** |
 | 构建门 | 全工作区 typecheck；Web/Server production build **PASS** |
 | Decision 绑定 | Session、Action、Assignment、Role、Receipt、nonce、Attempt output digest 与冻结 Registration 全部从权威记录闭合 |
 | 拒绝事务 | ≤16 KiB 生成确定、幂等、非扩张且可重放同一 Parser failure 的脱敏 Artifact；超限仅保存长度与摘要；均不消费 Assignment、不建 Decision、不移动 active pointer |
 | Joint Validity | 三 Role、当前 head、L/U、canonical witness、No-Cut 与 current-head coverage 均 fail closed |
-| 独立复核 | 凭据格式矩阵、私钥/JSON 结构、空值 continuation、16 KiB 边界、scope/clean 均 **PASS** |
+| 独立复核 | 格式矩阵、PGP/私钥/JSON 结构、空值 continuation、16 KiB 边界、scope/clean 均 **PASS** |
 | Gate B Decision/Validity 子项 | **PASS / MERGED** |
 
 ### 15.7 EG-04 / Refresh Planner 与 Effect Gate 验收记录
