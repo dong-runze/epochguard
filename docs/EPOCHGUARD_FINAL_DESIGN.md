@@ -6,7 +6,7 @@
 
 ## 0. 最终结论
 
-**条件 GO：EpochGuard 是 Track 1 的唯一候选主方案；只有开工后 90 分钟内通过一次真实 Ark/Codex Run，并在 H+3 前通过三个独立 Runtime 的 3/3 spike，才正式锁定。任一硬门失败就立即降级或停止，不能用 FakeRunner 冒充完成。**
+**条件 GO：EpochGuard 的合同、后端状态机、双场景生产接线、Dashboard、Windows/WSL 自动化门和 controlled-HTTP 浏览器门均已通过；只有最终候选再通过真实 Ark/Codex Run 与完整录屏链路，才升级为正式 Demo GO。任一真实运行硬门失败就立即降级或停止，不能用 FakeRunner 或受控 HTTP 冒充完成。**
 
 它不是聊天机器人、工作流编排器或区块链项目，而是一个执行在后端副作用边界的 Multi-Agent 协调中间件；产品形态是“后端 Effect Gate + 嵌入现有 Playground 的 Session Safety Dashboard”，其中 Dashboard 只展示和操作权威状态，不承担安全判断：
 
@@ -100,11 +100,11 @@ implementation changes: none
 design artifact: docs/EPOCHGUARD_FINAL_DESIGN.md
 ```
 
-当前实现已推进至阶段 7/9 完成：冻结合同 v7、Store、World/Evidence、Decision/JV、Refresh/Effect、Diagnostics/Snapshot/Run Adapter、Coordinator/Routes 均已由独立 worktree 实现并合入 `epochguard/staging@e6e58ba`；Dashboard Mock Preview 已合入，EG-09 正在完成唯一生产接线。该状态仍不等于最终端到端比赛演示，真实 Ark、合并后 WSL、生产浏览器和发布门仍未完成。
+当前实现已推进至阶段 8/9 完成：冻结合同 v7、Store、World/Evidence、Decision/JV、Refresh/Effect、Diagnostics/Snapshot/Run Adapter、Coordinator/Routes、双场景 Production Integration 与 Session Safety Dashboard 均已由独立 worktree 实现并合入 `epochguard/staging@f096edd`。精确 SHA 已通过 Windows 聚焦测试、WSL2 干净克隆全 Server 360/360，以及生产无 Mock 的 controlled-HTTP 浏览器门。该状态可用于稳定展示生产外壳和受控生命周期，但仍不等于真实模型端到端比赛演示；真实 Ark 与最终发布门尚未完成。
 
 正式实现应把赛段开始后的新增代码、测试、README 和演示材料保留为清晰的 Git 历史；不要把赛前概念文档冒充实现成果。
 
-当前运行硬阻塞必须显式记录：**Docker daemon 尚未完成最终候选验证，`ARK_API_KEY` / `ARK_MODEL` 尚未完成真实 Agent Run 验证。** WSL2 Ubuntu 24.04 与 Node 22 环境已经完成预检，但环境可用不等于模型 Runtime 已通过；真实运行仍是发布前 Go/No-Go。
+当前运行硬阻塞必须显式记录：**`ARK_API_KEY` / `ARK_MODEL` 尚未完成最终候选的真实 Agent Run 验证；若演示选择 container Runtime，Docker daemon 也仍需单独验证。** WSL2 Ubuntu 24.04 与 Node 22 已在干净克隆完成 typecheck、build 和全 Server 360/360，但确定性测试与受控 HTTP 都不能替代真实模型 Runtime；真实运行仍是发布前 Go/No-Go。
 
 ### 1.6 资格和提交可用性自检
 
