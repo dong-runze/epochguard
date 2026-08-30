@@ -861,7 +861,7 @@ BLOCKED
 | --- | --- |
 | 可视化任务 | `EG-CANARY 可视化 Session 灰度测试` |
 | Thread ID | `01a04cf8-2aa7-7f73-8ce2-27c7fc72cf2b` |
-| 仓库 | `C:\Users\董润泽\Desktop\hackathon\volc-agent-launchpad` |
+| 仓库 | `<workspace>/volc-agent-launchpad` |
 | 基线 | `epochguard/staging@475cb93` |
 | 文档可见性 | 最终设计与并行流程文档均可读 |
 | 工作包识别 | EG-00～EG-09 共 10 个，批准清单与激活顺序均可见 |
@@ -869,7 +869,7 @@ BLOCKED
 | 可视化 Session 结论 | **PASS** |
 | worktree 隔离结论 | **NOT PASSED / NOT TESTED**：任务与当前 Session 共享 checkout |
 
-原因：Codex 当前保存的项目根是父目录 `C:\Users\董润泽\Desktop\hackathon`，该目录本身不是 Git 仓库；真正的仓库位于子目录 `volc-agent-launchpad`。因此灰度任务只能使用本地共享 checkout。
+原因：Codex 当时保存的项目根是非 Git 的 `<workspace>` 父目录；真正的仓库位于子目录 `volc-agent-launchpad`。因此该次灰度任务只能使用本地共享 checkout。
 
 晋升条件：在启动正式 EG-00 前，必须将 `volc-agent-launchpad` 子仓库单独保存为 Codex Git 项目，然后再创建一个只读 worktree 灰度任务，确认：
 
@@ -878,7 +878,7 @@ BLOCKED
 3. 灰度任务能读取 `epochguard/staging@475cb93` 或其后续已批准基线；
 4. 只有 worktree 灰度通过后，EG-00 才可以进入 `RUNNING`。
 
-后续处置：由于 Codex 项目注册暂未能直接选择子仓库，中央 Session 在 `C:\Users\董润泽\Desktop\hackathon\.epochguard-worktrees` 手动维护 EG-00～EG-09 十个正式注册 Git worktree 和独立分支。每个可视化任务都必须在任何命令前核对自己的绝对 worktree 路径、分支和基线；中央抽查已证明十个正式 worktree 均为不同绝对路径、不同分支。遗留的 `eg-00-v5` 不属于正式 EG-00～EG-09 注册表，不能作为交付证据。
+后续处置：由于 Codex 项目注册暂未能直接选择子仓库，中央 Session 在 `<workspace>/.epochguard-worktrees` 手动维护 EG-00～EG-09 十个正式注册 Git worktree 和独立分支。每个可视化任务都必须在任何命令前核对自己的绝对 worktree 路径、分支和基线；中央抽查已证明十个正式 worktree 均为不同绝对路径、不同分支。遗留的 `eg-00-v5` 不属于正式 EG-00～EG-09 注册表，不能作为交付证据。
 
 工作树的创建、路径/分支/基线校准、初始化失败、锁冲突和损坏恢复统一由中央 Session 负责。执行 Session 只报告故障并停止写入，不得自行重建、移动、删除 worktree，也不得切换到共享 checkout。此前失败的异步 fork 未形成正式任务或 Git worktree，已废弃；当前所有正式执行任务的阶段均以下方注册表为准。
 
@@ -1032,7 +1032,7 @@ v6 的 8,118 个 mutation candidates、479 个标注 snapshots、17,356 次 deco
 | Refresh owner | 严格从 `snapshot.refreshPlan.agentIds` 映射当前 Agent 卡；P0 Preview 为 Budget-only |
 | 浏览器桌面门 | Normal Commit `0→1`；Impossible `effect=0`；Recovered DENY `effect=0`；首次 404 显示 `Actions disabled` |
 | 浏览器窄屏门 | 390×844 的顶部、Agent 卡、No-Cut/Effect Gate、Refresh 与 Ledger 分段截图均可读，页面无整体横向溢出 |
-| 截图证据 | `C:\Users\董润泽\Desktop\hackathon\.epochguard-audits\eg07-bac3f6d` |
+| 截图证据 | `<local-audit-root>/eg07-bac3f6d`（本地验收产物，不随公开仓库提交） |
 | Gate D Preview 子项 | **PASS / MERGED** |
 
 非阻断可用性提示：窄屏 Preview 的场景选择器和 interval table 使用局部横向滚动；测试控件高度约 27～31 px，满足最小点击目标但低于舒适的 44 px 触控建议。它们不改变 Dashboard 安全投影或 Gate D P0 结论，生产接线后的最终屏幕仍需在 EG-09 候选 SHA 上复验。
