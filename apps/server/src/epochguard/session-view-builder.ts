@@ -191,10 +191,16 @@ const SYSTEM_ID_CONTEXT: SensitiveTextContext = {
   allowSha256Digest: false,
 };
 
+const BARE_RANDOM_HEX_SECRET_PATTERN =
+  /(?:^|[^0-9A-Fa-f])(?:[0-9A-Fa-f]{40}|[0-9A-Fa-f]{32})(?=$|[^0-9A-Fa-f])/;
+
 function containsHighEntropySecret(
   value: string,
   context: SensitiveTextContext,
 ): boolean {
+  if (!context.allowSystemId && BARE_RANDOM_HEX_SECRET_PATTERN.test(value)) {
+    return true;
+  }
   for (const match of value.matchAll(/[A-Za-z0-9+_=-]{24,}/g)) {
     const token = match[0];
     const offset = match.index ?? 0;
@@ -485,7 +491,9 @@ function resolveDecisionEvidenceById(
     decision.actionHash !== session.actionHash ||
     decision.agentId !== agentId ||
     decision.role !== role ||
-    !allowedStatuses.includes(decision.status)
+    !allowedStatuses.includes(decision.status) ||
+    (decision.status === "ACTIVE" &&
+      decision.supersededByCertificateId !== null)
   ) {
     projectionFailure(
       session.sessionId,
@@ -507,7 +515,8 @@ function resolveDecisionEvidenceById(
     assignment.role !== role ||
     assignment.boundRunId !== decision.runId ||
     assignment.status !== "CONSUMED" ||
-    assignment.consumedByDecisionCertificateId !== decision.certificateId
+    assignment.consumedByDecisionCertificateId !== decision.certificateId ||
+    assignment.consumedAt === null
   ) {
     projectionFailure(
       session.sessionId,
@@ -529,7 +538,8 @@ function resolveDecisionEvidenceById(
     attempt.actionHash !== session.actionHash ||
     attempt.agentId !== agentId ||
     attempt.role !== role ||
-    attempt.status !== "ACCEPTED"
+    attempt.status !== "ACCEPTED" ||
+    attempt.outputDigest === null
   ) {
     projectionFailure(
       session.sessionId,

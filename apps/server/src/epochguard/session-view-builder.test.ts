@@ -1031,6 +1031,53 @@ describe("SessionViewBuilder golden projections", () => {
 });
 
 describe("single-snapshot isolation and fail-closed projection", () => {
+  it.each([
+    ["READY", () => makeDatabase()],
+    ["COMMITTED", () => makeCommittedDatabase()],
+  ] as const)(
+    "requires complete active Decision evidence in %s projection",
+    (_state, factory) => {
+      const valid = snapshot(factory());
+      for (const agent of valid.agents) {
+        expect(agent.activeDecision?.runtimeProof.outputDigest).toMatch(
+          /^sha256:[0-9a-f]{64}$/,
+        );
+      }
+
+      const corruptions: Array<{
+        name: string;
+        apply: (database: EpochDatabase) => void;
+      }> = [
+        {
+          name: "ACTIVE Decision carries a superseded pointer",
+          apply: (database) => {
+            database.decisions[0]!.supersededByCertificateId =
+              "decision_fictional_replacement";
+          },
+        },
+        {
+          name: "CONSUMED Assignment has no consumedAt",
+          apply: (database) => {
+            database.runAssignments[0]!.consumedAt = null;
+          },
+        },
+        {
+          name: "ACCEPTED Attempt has no outputDigest",
+          apply: (database) => {
+            database.attempts[0]!.outputDigest = null;
+          },
+        },
+      ];
+      for (const corruption of corruptions) {
+        const database = factory();
+        corruption.apply(database);
+        expect(() => snapshot(database), corruption.name).toThrowError(
+          SessionViewBuilderError,
+        );
+      }
+    },
+  );
+
   it("rejects damaged Effect-to-Permit consumption ledgers", () => {
     const corruptions: Array<{
       name: string;
@@ -1512,6 +1559,46 @@ describe("single-snapshot isolation and fail-closed projection", () => {
 });
 
 describe("fixed redaction boundary", () => {
+  it("redacts bare 32/40-hex secrets only from free display text", () => {
+    const freeAgentHex32 = "a7c3e9f1".repeat(4);
+    const freeRuntimeHex40 = "b8d4f0a2".repeat(5);
+    const freeEventTypeHex32 = "c9e5a1b3".repeat(4);
+    const freeEventStatusHex40 = "d0f6b2c4".repeat(5);
+    const structuredThreadHex32 = "e1a7c3d5".repeat(4);
+    const structuredEventHex40 = "f2b8d4e6".repeat(5);
+    const database = makeDatabase();
+    database.runAssignments[0]!.agentNameAtAssignment = freeAgentHex32;
+    database.runAssignments[1]!.runtimeLabelAtDispatch = freeRuntimeHex40;
+    database.auditEvents[0]!.type = freeEventTypeHex32;
+    database.auditEvents[0]!.status = freeEventStatusHex40;
+    database.attempts[2]!.threadId = structuredThreadHex32;
+    database.auditEvents[0]!.eventId = structuredEventHex40;
+
+    const result = snapshot(database);
+    const serialized = JSON.stringify(result);
+    for (const secret of [
+      freeAgentHex32,
+      freeRuntimeHex40,
+      freeEventTypeHex32,
+      freeEventStatusHex40,
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+    expect(result.agents[0]!.agentNameAtAssignment).toBe("inventory Agent");
+    expect(result.agents[1]!.activeDecision?.runtimeProof.runtimeLabel).toBe(
+      "redacted-runtime",
+    );
+    expect(result.events[0]).toMatchObject({
+      eventId: structuredEventHex40,
+      type: "EVENT",
+      status: "REDACTED",
+      summary: "Session: EVENT REDACTED",
+    });
+    expect(result.agents[2]!.activeDecision?.runtimeProof.threadId).toBe(
+      structuredThreadHex32,
+    );
+  });
+
   it("redacts fictitious Basic Authorization material from public text", () => {
     const database = makeDatabase();
     const placeholder = "Basic RklDVElUSU9VU1BST1hZ";
