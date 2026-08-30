@@ -480,7 +480,23 @@ function validateCompletedRefreshPlanClosure(
   expectedActionHash: string,
   effectsInSession: number,
 ): void {
-  if (validation.refreshPlanId === null) return;
+  if (validation.refreshPlanId === null) {
+    if (session.activeRefreshPlanId !== null) {
+      reject(
+        "BINDING_MISMATCH",
+        "an initial Validation must not retain an active RefreshPlan pointer",
+        effectsInSession,
+      );
+    }
+    return;
+  }
+  if (session.activeRefreshPlanId !== validation.refreshPlanId) {
+    reject(
+      "BINDING_MISMATCH",
+      "the active RefreshPlan pointer must match the active Validation",
+      effectsInSession,
+    );
+  }
 
   const planRecord = requireSingle(
     database.refreshPlans.filter(
@@ -669,7 +685,6 @@ function returnExistingEffect(
   if (
     session.state !== "COMMITTED" ||
     session.activePermitId !== effect.permitId ||
-    session.activeRefreshPlanId !== null ||
     !ROLES.every((role) => session.activeAttemptIds[role] === null) ||
     database.refreshPlans.some(
       (plan) =>
@@ -917,7 +932,6 @@ export async function commitProtectedEffect(
       }
       if (
         !ROLES.every((role) => session.activeAttemptIds[role] === null) ||
-        session.activeRefreshPlanId !== null ||
         database.refreshPlans.some(
           (plan) =>
             plan.sessionId === session.sessionId &&
@@ -926,7 +940,7 @@ export async function commitProtectedEffect(
       ) {
         return reject(
           "BINDING_MISMATCH",
-          "READY Session must not retain an in-flight Attempt or RefreshPlan",
+          "READY Session must not retain an in-flight Attempt or AVAILABLE/CLAIMED RefreshPlan",
         );
       }
       if (session.activePermitId === null) {
