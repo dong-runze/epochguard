@@ -15,6 +15,7 @@ demo-output/
 artifacts/
 evidence/
 *.mp4
+!docs/assets/epochguard-demo-submission.mp4
 *.mov
 *.mkv
 *.webm

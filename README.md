@@ -13,6 +13,54 @@ witness; and re-observes only the evidence owner that became invalid.
 
 **中文摘要：** EpochGuard 检查多个 Agent 的证据是否曾在同一个当前世界版本中共同成立。若不存在共同切面，后端 Effect Gate 会拒绝副作用、给出可检验冲突证明，并只刷新已失效的证据 owner。
 
+## Judge quick start — choose your depth
+
+### 1. Watch the result (47 seconds)
+
+[![Watch the 47-second EpochGuard bilingual demo](docs/assets/epochguard-demo-cover.png)](docs/assets/epochguard-demo-submission.mp4)
+
+**[Watch or download the submission video](docs/assets/epochguard-demo-submission.mp4)**
+— 1080p H.264, bilingual hard subtitles, 7.4 MiB, intentionally silent.
+The implementation shown in the video is public at commit
+[`d27713c`](https://github.com/dong-runze/epochguard/commit/d27713c92f677cd02d869ebc3bd58cc4119cd6d4)
+(`volc-agent-launchpad` version `1.0.0`).
+
+### 2. Explore the UI locally — no token, key, backend, WSL, or Docker
+
+Requirements: Git, npm 10+, and Node.js **22.12.0 or newer**. This path works
+from Windows PowerShell, WSL, Linux, or macOS.
+
+```bash
+git clone --branch epochguard/staging --single-branch https://github.com/dong-runze/epochguard.git
+cd epochguard
+npm ci
+npm run dev -w @launchpad/web -- --host 127.0.0.1 --strictPort
+```
+
+Open <http://127.0.0.1:5173/epochguard-preview.html>. The page lets a reviewer
+switch among the Normal released state, the Impossible blocked state, selective
+Budget refresh, and failure states. It is deliberately labeled as a
+network-free contract-fixture **visual preview**, not evidence of live Agent
+execution.
+
+### 3. Verify the implementation offline — no token or key
+
+From the same clone:
+
+```bash
+npm run check
+```
+
+This runs the Server/Web typechecks, deterministic tests, and production
+builds. `APP_AUTH_TOKEN` and `ARK_API_KEY` are needed only for the full live
+path below. `APP_AUTH_TOKEN` is a random access password that **you generate
+locally for this app**; it is not a TikTok, GitHub, or ModelArk credential.
+`ARK_API_KEY` is the BytePlus ModelArk credential used only for real model
+inference.
+
+For the complete seven-Run Agent lifecycle, continue with
+[Full live Agent run](#full-live-agent-run--wsl2--local-process-recommended).
+
 > [!IMPORTANT]
 > **Evidence boundary:** on 2026-08-30, a pre-freeze WSL2 working-tree snapshot
 > passed its then-current `npm run check`, a scratch Responses/Codex preflight,
@@ -127,9 +175,9 @@ are untrusted. The Ark key remains server-side but is available to an active
 Runtime. See [Architecture](docs/ARCHITECTURE.md) and
 [Security](SECURITY.md) for the complete boundary.
 
-## Quick start — WSL2 + local process (recommended)
+## Full live Agent run — WSL2 + local process (recommended)
 
-Use Ubuntu 24.04 in WSL2, Node.js 22+, npm 10+, and a **clean clone stored in
+Use Ubuntu 24.04 in WSL2, Node.js 22.12.0+, npm 10+, and a **clean clone stored in
 the WSL Linux filesystem** (for example under `~/src`). Do not reuse a Windows
 checkout or its `node_modules`; run `npm ci` inside the WSL clone.
 
@@ -309,7 +357,7 @@ times, and never substitute the Mock Preview. A detailed shot list is in
 | Pre-freeze WSL2 working-tree snapshot (2026-08-30): then-current `npm run check` | **HISTORICAL PASS** — all Server/Web tests, typechecks, and production builds in that snapshot passed | Contracts, Stores, interval validation, no-cut proof, run binding, selective refresh, Effect Gate, routes, dual-scenario integration, Snapshot projection, and fail-closed Runtime readiness at that revision | The later authoritative fixed-rule Verdict recomputation, public candidate, Agent-focus UI, remote-model repeatability, or a finished video |
 | Earlier controlled-HTTP browser gate | **HISTORICAL PASS** on the recorded pre-focus candidate | Production routing, authentication boundary, single-Snapshot UI, and fail-closed browser behavior under controlled responses at that revision | The final Agent-focus UI or a real ModelArk/Codex lifecycle |
 | Pre-freeze ModelArk/Codex seven-Run API story (`seed-2-0-lite-260428`) | **HISTORICAL PASS ONCE** — Normal `3 ALLOW`, effective joint-validation window `[10,11)` at head 10, one idempotent Effect; Impossible `L=21/U=20`, Budget-only refresh, final `2 ALLOW + 1 DENY`, counts `1/2/1`, zero Effects | That configuration, then-current prompt/validation logic, Runtime, real Agent outputs, selective refresh, and Effect Gate worked together once | Strict `epoch-prompt-v2`, the later authoritative fixed-rule Verdict recomputation, the exact public candidate, repeated stability, the browser journey, or the submission video |
-| Exact public submission candidate | **NOT ASSERTED IN REPOSITORY TEXT** — verify the external sanitized manifest and Devpost-linked video | Same-SHA offline, live, browser, rehearsal, privacy, and link evidence when present | Anything not recorded by those gates |
+| Public implementation shown in the submission video (`d27713c`) | **PUBLIC SOURCE IDENTITY** — inspect the linked immutable commit and the repository-hosted video above | Exactly identifies the application source shown in the submitted demo | It does not turn a prerecorded run into a hosted live service or replace a reviewer's own credentialed rerun |
 
 Strict `epoch-prompt-v2` and authoritative fixed-rule Verdict recomputation are
 current-candidate capabilities, not facts inherited from either historical row.
@@ -345,8 +393,9 @@ and are not guaranteed by EpochGuard. Never share or commit a ModelArk API key.
 
 If a temporary hosted reviewer endpoint is later listed in Devpost, it may
 provide only a revocable application access token; the ModelArk key remains on
-the server. The prerecorded submission video is evidence of execution, not a
-substitute for credentials or a claim of current hosted availability.
+the server. The [repository-hosted submission video](docs/assets/epochguard-demo-submission.mp4)
+is evidence of the recorded execution, not a substitute for credentials or a
+claim of current hosted availability.
 
 ## Third-party technology and assets
 
@@ -359,7 +408,7 @@ substitute for credentials or a claim of current hosted availability.
 | Fastify, `@fastify/cors`, `@fastify/static` | HTTP API, CORS, and single-port static production serving; each is MIT-licensed. |
 | Zod | Runtime configuration and contract validation; MIT-licensed. |
 | TypeScript, tsx, Vitest, concurrently | Build, development, orchestration, and deterministic tests. TypeScript is Apache-2.0; the other three are MIT-licensed. Exact packages, versions, integrity hashes, and dependency licenses are inspectable from [`package-lock.json`](package-lock.json) and the installed package metadata. |
-| EpochGuard visual assets | `docs/assets/epochguard-architecture.svg` and the EpochGuard UI styling are project-created. No third-party music or stock media is required; any final video asset must still pass the release asset/license review. |
+| EpochGuard visual assets | `docs/assets/epochguard-architecture.svg`, `docs/assets/epochguard-demo-cover.png`, the EpochGuard UI styling, and the silent bilingual submission video are project-created. No third-party music or stock media is used. |
 
 ## Limits and honest claims
 
