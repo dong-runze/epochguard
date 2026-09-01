@@ -409,7 +409,7 @@ describe("Session Safety five-step live decision flow", () => {
       <AgentDecisionFlow snapshot={snapshot} />,
     );
 
-    expect(markup).toContain('aria-label="Five-step live Agent decision flow"');
+    expect(markup).toContain('aria-label="Five-step Agent decision flow"');
     expect(markup).toContain(
       "3 Agents agree in the same world → RELEASE exactly once",
     );

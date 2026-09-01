@@ -400,7 +400,7 @@ export function AgentDecisionFlow({
   return (
     <section
       className={`eg-demo-flow eg-demo-flow-${story.tone}`}
-      aria-label="Five-step live Agent decision flow"
+      aria-label="Five-step Agent decision flow"
     >
       <header className="eg-demo-flow-header">
         <div>
