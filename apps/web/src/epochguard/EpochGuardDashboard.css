@@ -340,6 +340,125 @@
   box-shadow: 0 10px 30px rgba(25, 42, 36, 0.075);
 }
 
+.eg-final-output {
+  margin-top: 10px;
+  min-height: 116px;
+  padding: 14px 16px;
+  display: grid;
+  grid-template-columns: minmax(330px, 0.85fr) minmax(560px, 1.4fr);
+  align-items: stretch;
+  gap: 16px;
+  overflow: hidden;
+  border: 1px solid #9bc9b9;
+  border-radius: 12px;
+  color: #effaf6;
+  background:
+    radial-gradient(circle at 0 0, rgba(255, 255, 255, 0.1), transparent 42%),
+    linear-gradient(112deg, #123c32, #206954);
+  box-shadow: 0 12px 30px rgba(19, 62, 50, 0.16);
+  animation: eg-final-output-in 220ms ease-out both;
+}
+
+.eg-final-output-blocked {
+  border-color: #dda097;
+  background:
+    radial-gradient(circle at 0 0, rgba(255, 255, 255, 0.09), transparent 42%),
+    linear-gradient(112deg, #66251f, #9b3e34);
+  box-shadow: 0 12px 30px rgba(105, 36, 30, 0.17);
+}
+
+.eg-final-output-pending {
+  border-color: #9aafbd;
+  background: linear-gradient(112deg, #2c4657, #496d82);
+}
+
+.eg-final-output-lead {
+  min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 3px;
+}
+
+.eg-final-output .eg-kicker {
+  color: rgba(239, 250, 246, 0.72);
+  font-size: 9px;
+}
+
+.eg-final-output-lead > strong {
+  color: #fff;
+  font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif;
+  font-size: clamp(27px, 2.25vw, 40px);
+  font-weight: 950;
+  letter-spacing: -0.045em;
+  line-height: 1;
+}
+
+.eg-final-output-lead p {
+  margin: 3px 0 0;
+  color: rgba(239, 250, 246, 0.82);
+  font-size: 10px;
+}
+
+.eg-final-output-lead p b {
+  color: #fff;
+}
+
+.eg-final-output-facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 0.72fr 1.4fr 0.85fr;
+  align-items: stretch;
+  border: 1px solid rgba(255, 255, 255, 0.19);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.075);
+}
+
+.eg-final-output-facts > div {
+  min-width: 0;
+  padding: 11px 12px;
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  border-right: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.eg-final-output-facts > div:last-child {
+  border-right: 0;
+}
+
+.eg-final-output-facts dt {
+  color: rgba(239, 250, 246, 0.65);
+  font-size: 8px;
+  font-weight: 850;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.eg-final-output-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 900;
+  line-height: 1.18;
+}
+
+.eg-final-output-facts small {
+  color: rgba(239, 250, 246, 0.72);
+  font-size: 8px;
+}
+
+@keyframes eg-final-output-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .eg-demo-flow-success {
   border-color: #9bc9b9;
 }
@@ -1617,6 +1736,10 @@
     gap: 9px;
   }
 
+  .eg-final-output {
+    grid-template-columns: 1fr;
+  }
+
   .eg-agent-grid {
     grid-template-columns: 1fr;
   }
@@ -1697,6 +1820,19 @@
 
   .eg-demo-step {
     min-height: 132px;
+  }
+
+  .eg-final-output-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .eg-final-output-facts > div {
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+  }
+
+  .eg-final-output-facts > div:last-child {
+    border-bottom: 0;
   }
 
   .eg-runtime-evidence-list {

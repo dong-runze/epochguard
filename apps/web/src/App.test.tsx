@@ -8,12 +8,14 @@ import {
   getRuntimeReadiness,
   inspectionFocusForSessionAcquisition,
   requestEpochGuardSession,
+  SavedEpochGuardChat,
   SafetyRolePicker,
   SessionSafetyWorkspace,
 } from "./App";
 import {
   AgentCard,
   AgentDecisionFlow,
+  FinalProtectedOutput,
 } from "./epochguard/EpochGuardDashboard";
 import {
   CONTRACT_DIGEST,
@@ -497,5 +499,137 @@ describe("Session Safety five-step live decision flow", () => {
 
     expect(markup).toContain("3 Role Agents are starting");
     expect(markup).not.toContain("run in parallel");
+  });
+});
+
+describe("Saved official Agent Chat replay", () => {
+  const sessionIds = {
+    "normal-world-v1": "session_normal",
+    "impossible-collage-v1": "session_impossible",
+  };
+
+  it("projects all five Normal steps into the original chat message structure", () => {
+    const snapshot = SessionDashboardSnapshotSchema.parse(
+      mockScenario("normal-released").payload,
+    );
+    const markup = renderToStaticMarkup(
+      <SavedEpochGuardChat
+        snapshot={snapshot}
+        scenarioId="normal-world-v1"
+        sessionIds={sessionIds}
+        onScenarioIdChange={vi.fn()}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Saved real multi-Agent chat replay"');
+    expect(markup).toContain("Agent Chat UI · saved decision replay");
+    expect(markup).toContain("SAVED REAL RUN · READ ONLY");
+    expect(markup).toContain("Snapshot-derived visualization");
+    expect(markup).toContain("not a raw transcript");
+    expect(markup.match(/STEP [1-5]\/5/g)).toHaveLength(5);
+    expect(markup.match(/>ALLOW</g)).toHaveLength(3);
+    expect(markup).toContain("ONE SHARED WORLD");
+    expect(markup).toContain("L 10 &lt; U 11");
+    expect(markup).toContain("PROTECTED EFFECT · FINAL OUTPUT");
+    expect(markup).toContain("RELEASED");
+    expect(markup).toContain("1 EFFECT");
+    expect(markup).toContain("EXACTLY ONCE");
+    expect(markup).toContain('aria-label="Saved replay is read only"');
+    expect(markup).toMatch(/<textarea[^>]*disabled=""/);
+  });
+
+  it("ends the Impossible replay with an explicit blocked user result", () => {
+    const blocked = SessionDashboardSnapshotSchema.parse(
+      mockScenario("impossible-blocked").payload,
+    );
+    const snapshot = {
+      ...blocked,
+      sessionState: "FAILED" as const,
+      gate: {
+        ...blocked.gate,
+        state: "FAILED" as const,
+        reasonCode: "RUN_FAILED" as const,
+      },
+      availableActions: [],
+    };
+    const markup = renderToStaticMarkup(
+      <SavedEpochGuardChat
+        snapshot={snapshot}
+        scenarioId="impossible-collage-v1"
+        sessionIds={sessionIds}
+        onScenarioIdChange={vi.fn()}
+      />,
+    );
+
+    expect(markup.match(/>ALLOW</g)).toHaveLength(3);
+    expect(markup).toContain("NO SHARED WORLD");
+    expect(markup).toContain("L 21 ≥ U 20");
+    expect(markup).toContain("ACTION BLOCKED · FAIL-CLOSED");
+    expect(markup).toContain("0 EFFECTS");
+    expect(markup).toContain("NOT RELEASED");
+    expect(markup).toContain("RUN FAILED");
+    expect(markup).toContain("No publish mutation was emitted");
+  });
+});
+
+describe("Session Safety final protected output", () => {
+  it("shows the released action and exactly-once Effect as the final result", () => {
+    const snapshot = SessionDashboardSnapshotSchema.parse(
+      mockScenario("normal-released").payload,
+    );
+    const markup = renderToStaticMarkup(
+      <FinalProtectedOutput snapshot={snapshot} />,
+    );
+
+    expect(markup).toContain('aria-label="Final protected output"');
+    expect(markup).toContain("Final output · user-visible result");
+    expect(markup).toContain("RELEASED");
+    expect(markup).toContain("PUBLISH_CAMPAIGN");
+    expect(markup).toContain("campaign_42");
+    expect(markup).toContain("1 EFFECT");
+    expect(markup).toContain("Exactly once");
+    expect(markup).toContain("ONE SHARED WORLD · L 10 &lt; U 11");
+    expect(markup).toContain("effect_normal");
+    expect(markup).not.toContain("LOCAL MOCK");
+  });
+
+  it("shows no-cut blocking without inventing a released Effect", () => {
+    const snapshot = SessionDashboardSnapshotSchema.parse(
+      mockScenario("impossible-blocked").payload,
+    );
+    const markup = renderToStaticMarkup(
+      <FinalProtectedOutput snapshot={snapshot} />,
+    );
+
+    expect(markup).toContain("ACTION BLOCKED");
+    expect(markup).toContain("0 EFFECTS");
+    expect(markup).toContain("No publish mutation emitted");
+    expect(markup).toContain("NO SHARED WORLD · L 21 ≥ U 20");
+    expect(markup).not.toContain("RELEASED");
+  });
+
+  it("labels the terminal Impossible failure as fail-closed with RUN_FAILED", () => {
+    const blocked = SessionDashboardSnapshotSchema.parse(
+      mockScenario("impossible-blocked").payload,
+    );
+    const snapshot = {
+      ...blocked,
+      sessionState: "FAILED" as const,
+      gate: {
+        ...blocked.gate,
+        state: "FAILED" as const,
+        reasonCode: "RUN_FAILED" as const,
+      },
+      availableActions: [],
+    };
+    const markup = renderToStaticMarkup(
+      <FinalProtectedOutput snapshot={snapshot} />,
+    );
+
+    expect(markup).toContain("ACTION BLOCKED · FAIL-CLOSED");
+    expect(markup).toContain("RUN FAILED");
+    expect(markup).toContain("0 EFFECTS");
+    expect(markup).toContain("NO SHARED WORLD · L 21 ≥ U 20");
+    expect(markup).not.toContain("RELEASED");
   });
 });

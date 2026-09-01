@@ -348,11 +348,15 @@ export function AgentDecisionFlow({
   snapshot: SessionDashboardSnapshot;
 }) {
   const [replayStep, setReplayStep] = useState<number | null>(null);
-  const story = demoStory(snapshot);
-  const gate = gateDemoStage(snapshot);
-  const effect = effectDemoStage(snapshot);
+  const [replaySnapshot, setReplaySnapshot] =
+    useState<SessionDashboardSnapshot | null>(null);
+  const displayedSnapshot =
+    replayStep === null ? snapshot : (replaySnapshot ?? snapshot);
+  const story = demoStory(displayedSnapshot);
+  const gate = gateDemoStage(displayedSnapshot);
+  const effect = effectDemoStage(displayedSnapshot);
   const stages = [
-    ...snapshot.agents.map((agent, index) => ({
+    ...displayedSnapshot.agents.map((agent, index) => ({
       number: index + 1,
       kind: "ROLE AGENT",
       label: `${ROLE_LABELS[agent.role]} Agent`,
@@ -395,6 +399,7 @@ export function AgentDecisionFlow({
 
   useEffect(() => {
     setReplayStep(null);
+    setReplaySnapshot(null);
   }, [snapshot.sessionId]);
 
   return (
@@ -410,20 +415,23 @@ export function AgentDecisionFlow({
         <div className="eg-demo-flow-actions">
           <span className="eg-demo-replay-status" aria-live="polite">
             {replayStep === null
-              ? "SAVED REAL RUN"
+              ? `SAVED REAL RUN · r${displayedSnapshot.snapshotRevision}`
               : replayStep < stages.length
-                ? `REPLAY ${replayStep}/${stages.length}`
-                : "REPLAY COMPLETE"}
+                ? `REPLAY ${replayStep}/${stages.length} · r${displayedSnapshot.snapshotRevision}`
+                : `REPLAY COMPLETE · r${displayedSnapshot.snapshotRevision}`}
           </span>
           <button
             type="button"
             className="eg-demo-replay-button"
-            onClick={() => setReplayStep(0)}
+            onClick={() => {
+              setReplaySnapshot(snapshot);
+              setReplayStep(0);
+            }}
           >
             <span aria-hidden="true">▶</span> Replay 1→5
           </button>
           <span className="eg-demo-scenario">
-            {snapshot.scenarioId === "normal-world-v1" ? "NORMAL WORLD" : "IMPOSSIBLE COLLAGE"}
+            {displayedSnapshot.scenarioId === "normal-world-v1" ? "NORMAL WORLD" : "IMPOSSIBLE COLLAGE"}
           </span>
         </div>
       </header>
@@ -445,6 +453,75 @@ export function AgentDecisionFlow({
           </li>
         ))}
       </ol>
+    </section>
+  );
+}
+
+export function FinalProtectedOutput({
+  snapshot,
+}: {
+  snapshot: SessionDashboardSnapshot;
+}) {
+  const released =
+    snapshot.gate.state === "RELEASED" &&
+    snapshot.gate.effectsInSession === 1 &&
+    snapshot.gate.effectId !== null;
+  const blocked =
+    snapshot.gate.state === "LOCKED" || snapshot.gate.state === "FAILED";
+  const tone = released ? "released" : blocked ? "blocked" : "pending";
+  const outcome = released
+    ? "RELEASED"
+    : snapshot.gate.state === "FAILED"
+      ? "ACTION BLOCKED · FAIL-CLOSED"
+      : snapshot.gate.state === "LOCKED"
+        ? "ACTION BLOCKED"
+        : GATE_COPY[snapshot.gate.state].toUpperCase();
+  const jointValidity =
+    snapshot.jointValidity.state === "VALID_CURRENT"
+      ? `ONE SHARED WORLD · L ${snapshot.jointValidity.lowerBound ?? "—"} < U ${snapshot.jointValidity.upperBound ?? "—"}`
+      : snapshot.jointValidity.state === "NO_CUT"
+        ? `NO SHARED WORLD · L ${snapshot.jointValidity.lowerBound ?? "—"} ≥ U ${snapshot.jointValidity.upperBound ?? "—"}`
+        : JOINT_VALIDITY_COPY[snapshot.jointValidity.state].toUpperCase();
+
+  return (
+    <section
+      className={`eg-final-output eg-final-output-${tone}`}
+      aria-label="Final protected output"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <div className="eg-final-output-lead">
+        <span className="eg-kicker">Final output · user-visible result</span>
+        <strong>{outcome}</strong>
+        <p>
+          <b>{snapshot.action.type}</b> → {snapshot.action.campaignId} ·{" "}
+          {snapshot.action.requestedUnits} unit · {snapshot.action.market} ·{" "}
+          {formatMoney(snapshot.action.estimatedCostCents)}
+        </p>
+      </div>
+      <dl className="eg-final-output-facts">
+        <div>
+          <dt>Protected effects</dt>
+          <dd>{snapshot.gate.effectsInSession} EFFECT{snapshot.gate.effectsInSession === 1 ? "" : "S"}</dd>
+          <small>{released ? "Exactly once" : "No publish mutation emitted"}</small>
+        </div>
+        <div>
+          <dt>Joint validity</dt>
+          <dd>{jointValidity}</dd>
+          <small>Authoritative Snapshot</small>
+        </div>
+        <div>
+          <dt>Gate result</dt>
+          <dd>{snapshot.gate.state}</dd>
+          <small>
+            {snapshot.gate.reasonCode === null
+              ? snapshot.gate.effectId === null
+                ? "No Effect ID"
+                : `Effect ${shortId(snapshot.gate.effectId, 22)}`
+              : snapshot.gate.reasonCode.split("_").join(" ")}
+          </small>
+        </div>
+      </dl>
     </section>
   );
 }
@@ -789,6 +866,8 @@ export function EpochGuardDashboard({
           ) : null}
 
           <AgentDecisionFlow snapshot={snapshot} />
+
+          <FinalProtectedOutput snapshot={snapshot} />
 
           <div className="eg-summary-grid">
             <article className="eg-summary-card">

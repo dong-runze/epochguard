@@ -29,6 +29,7 @@ import {
   EpochGuardSessionSourceError,
   type EpochGuardSessionSource,
 } from "./epochguard/session-source";
+import { useEpochGuardSession } from "./epochguard/useEpochGuardSession";
 import type { Agent, AgentRun, Message, SystemInfo } from "./types";
 
 const starterPrompts = [
@@ -825,6 +826,359 @@ export function SessionSafetyWorkspace({
   );
 }
 
+type SavedChatTone = "agent" | "gate" | "released" | "blocked";
+
+interface SavedChatStage {
+  number: number;
+  author: string;
+  eyebrow: string;
+  headline: string;
+  body: string;
+  facts: string[];
+  tone: SavedChatTone;
+  final: boolean;
+}
+
+function formatSavedChatMoney(cents: number): string {
+  return new Intl.NumberFormat("en-SG", {
+    style: "currency",
+    currency: "SGD",
+    maximumFractionDigits: 0,
+  }).format(cents / 100);
+}
+
+function savedChatInterval(receipt: {
+  validFromSeq: number;
+  validUntilSeq: number | null;
+}): string {
+  return `[v${receipt.validFromSeq}, ${
+    receipt.validUntilSeq === null ? "∞" : `v${receipt.validUntilSeq}`
+  })`;
+}
+
+function savedChatReason(reason: string | null): string {
+  if (reason === null) return "No failure reason";
+  return reason.split("_").join(" ");
+}
+
+function shortSavedChatId(value: string, length = 20): string {
+  return value.length <= length ? value : `${value.slice(0, length - 1)}…`;
+}
+
+export function buildSavedChatStages(
+  snapshot: SessionDashboardSnapshot,
+): SavedChatStage[] {
+  const roleStages = snapshot.agents.map((agent, index): SavedChatStage => {
+    const decision = agent.activeDecision;
+    const role = ROLE_AGENT_INSPECTION[agent.role].label;
+    if (decision === null) {
+      const attemptState = agent.inFlightAttempt?.status ?? "WAITING";
+      return {
+        number: index + 1,
+        author: agent.agentNameAtAssignment,
+        eyebrow: `AGENT ${index + 1}/3 · ${role.toUpperCase()}`,
+        headline: attemptState.split("_").join(" "),
+        body: "No bound Decision was accepted, so the protected action remains closed.",
+        facts: [`Runs ${agent.runCount}`, "No accepted Receipt"],
+        tone: "blocked",
+        final: false,
+      };
+    }
+    return {
+      number: index + 1,
+      author: agent.agentNameAtAssignment,
+      eyebrow: `AGENT ${index + 1}/3 · ${role.toUpperCase()}`,
+      headline: decision.verdict,
+      body: decision.factSummary,
+      facts: [
+        `Receipt ${savedChatInterval(decision.receipt)}`,
+        `Observed v${decision.receipt.observedAtSeq}`,
+        decision.evidenceState.split("_").join(" "),
+      ],
+      tone: decision.verdict === "ALLOW" ? "agent" : "blocked",
+      final: false,
+    };
+  });
+
+  const lower = snapshot.jointValidity.lowerBound ?? "—";
+  const upper = snapshot.jointValidity.upperBound ?? "—";
+  const validCurrent = snapshot.jointValidity.state === "VALID_CURRENT";
+  const noCut = snapshot.jointValidity.state === "NO_CUT";
+  const jointValidityFact = validCurrent
+    ? `L ${lower} < U ${upper}`
+    : noCut
+      ? `L ${lower} ≥ U ${upper}`
+      : snapshot.jointValidity.state.split("_").join(" ");
+  const gateStage: SavedChatStage = {
+    number: 4,
+    author: "EpochGuard Gate",
+    eyebrow: "MIDDLEWARE · JOINT-VALIDITY CHECK",
+    headline: validCurrent
+      ? "ONE SHARED WORLD"
+      : noCut
+        ? "NO SHARED WORLD"
+        : snapshot.jointValidity.state.split("_").join(" "),
+    body: validCurrent
+      ? "The three accepted Receipts overlap in one observable world, so the action may reach the protected Effect Gate."
+      : noCut
+        ? "Each Agent can be locally correct, yet the three Receipts cannot all be true at one world revision. The action stays closed."
+        : "EpochGuard has not established a jointly valid current world for the protected action.",
+    facts: [
+      jointValidityFact,
+      `Gate ${snapshot.gate.state}`,
+      savedChatReason(snapshot.gate.reasonCode),
+    ],
+    tone: validCurrent ? "gate" : "blocked",
+    final: false,
+  };
+
+  const released =
+    snapshot.gate.state === "RELEASED" &&
+    snapshot.gate.effectsInSession === 1 &&
+    snapshot.gate.effectId !== null;
+  const terminalBlocked =
+    !released && TERMINAL_SESSION_STATES.has(snapshot.sessionState);
+  const outputStage: SavedChatStage = {
+    number: 5,
+    author: "Protected Effect",
+    eyebrow:
+      released || terminalBlocked
+        ? "PROTECTED EFFECT · FINAL OUTPUT"
+        : "PROTECTED EFFECT · CURRENT OUTPUT · NOT FINAL",
+    headline: released
+      ? "RELEASED"
+      : terminalBlocked
+        ? "ACTION BLOCKED · FAIL-CLOSED"
+        : "NOT RELEASED YET",
+    body: released
+      ? `${snapshot.action.type} → ${snapshot.action.campaignId} was released exactly once.`
+      : terminalBlocked
+        ? `${snapshot.action.type} → ${snapshot.action.campaignId} was not released. No publish mutation was emitted.`
+        : `${snapshot.action.type} → ${snapshot.action.campaignId} has not reached a terminal Gate result.`,
+    facts: [
+      `${snapshot.gate.effectsInSession} EFFECT${snapshot.gate.effectsInSession === 1 ? "" : "S"}${released || terminalBlocked ? "" : " SO FAR"}`,
+      released ? "EXACTLY ONCE" : terminalBlocked ? "NOT RELEASED" : "RESULT PENDING",
+      released
+        ? `Effect ${shortSavedChatId(snapshot.gate.effectId ?? "unavailable")}`
+        : `${snapshot.gate.state} · ${savedChatReason(snapshot.gate.reasonCode)}`,
+    ],
+    tone: released ? "released" : terminalBlocked ? "blocked" : "gate",
+    final: released || terminalBlocked,
+  };
+
+  return [...roleStages, gateStage, outputStage];
+}
+
+function SavedReplayComposer() {
+  return (
+    <form className="composer saved-chat-composer" aria-label="Saved replay composer">
+      <textarea
+        value=""
+        readOnly
+        disabled
+        rows={3}
+        placeholder="Saved replay — switch to Session Safety to inspect Receipts"
+        aria-label="Saved replay is read only"
+      />
+      <div className="composer-footer">
+        <span>READ ONLY · NO MODEL CALL · projected from a decoded Session Snapshot</span>
+        <button className="send-button" type="button" disabled aria-label="Sending disabled">
+          ↑
+        </button>
+      </div>
+    </form>
+  );
+}
+
+export function SavedEpochGuardChat({
+  snapshot,
+  scenarioId,
+  sessionIds,
+  onScenarioIdChange,
+}: {
+  snapshot: SessionDashboardSnapshot;
+  scenarioId: ScenarioId;
+  sessionIds: StoredSessionIds;
+  onScenarioIdChange: (scenarioId: ScenarioId) => void;
+}) {
+  const [replayStep, setReplayStep] = useState<number | null>(null);
+  const [replaySnapshot, setReplaySnapshot] =
+    useState<SessionDashboardSnapshot | null>(null);
+  const messageEnd = useRef<HTMLDivElement>(null);
+  const displayedSnapshot = replayStep === null ? snapshot : (replaySnapshot ?? snapshot);
+  const stages = buildSavedChatStages(displayedSnapshot);
+  const visibleStageCount = replayStep === null ? stages.length : replayStep;
+
+  useEffect(() => {
+    if (replayStep === null || replayStep >= stages.length) return undefined;
+    const timer = window.setTimeout(() => {
+      setReplayStep((step) => (step === null ? null : step + 1));
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [replayStep, stages.length]);
+
+  useEffect(() => {
+    setReplayStep(null);
+    setReplaySnapshot(null);
+  }, [snapshot.sessionId]);
+
+  useEffect(() => {
+    messageEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [replayStep, snapshot.sessionId]);
+
+  return (
+    <>
+      <div className="messages saved-chat-messages" aria-label="Saved real multi-Agent chat replay">
+        <div className="saved-chat-toolbar">
+          <div>
+            <span className="saved-chat-source">SAVED REAL RUN · READ ONLY</span>
+            <strong>Agent Chat UI · saved decision replay</strong>
+            <small>
+              Snapshot-derived visualization · r{displayedSnapshot.snapshotRevision} · not a raw transcript
+            </small>
+          </div>
+          <div className="saved-chat-toolbar-actions">
+            <div className="saved-chat-scenarios" aria-label="Saved replay scenario">
+              {SCENARIO_OPTIONS.map((scenario) => (
+                <button
+                  type="button"
+                  key={scenario.id}
+                  aria-pressed={scenario.id === scenarioId}
+                  disabled={sessionIds[scenario.id] === null}
+                  onClick={() => onScenarioIdChange(scenario.id)}
+                >
+                  {scenario.id === "normal-world-v1" ? "Normal" : "Impossible"}
+                </button>
+              ))}
+            </div>
+            <span className="saved-chat-replay-status" aria-live="polite">
+              {replayStep === null
+                ? "ALL 5 STEPS"
+                : replayStep < stages.length
+                  ? `REPLAY ${replayStep}/5`
+                  : "REPLAY COMPLETE"}
+            </span>
+            <button
+              type="button"
+              className="saved-chat-replay-button"
+              onClick={() => {
+                setReplaySnapshot(snapshot);
+                setReplayStep(0);
+              }}
+            >
+              ▶ Replay 1→5
+            </button>
+          </div>
+        </div>
+
+        <article className="message message-user saved-chat-request">
+          <div className="message-meta">
+            <strong>You</strong>
+            <span>protected action request</span>
+          </div>
+          <div className="message-body">
+            Can campaign <b>{displayedSnapshot.action.campaignId}</b> publish {displayedSnapshot.action.requestedUnits} unit in {displayedSnapshot.action.market} for {formatSavedChatMoney(displayedSnapshot.action.estimatedCostCents)}?
+          </div>
+        </article>
+
+        {stages.slice(0, visibleStageCount).map((stage) => (
+          <article
+            className={`message message-assistant saved-chat-message saved-chat-message-${stage.tone}${stage.final ? " saved-chat-final" : ""}`}
+            key={`${displayedSnapshot.sessionId}-${displayedSnapshot.snapshotRevision}-${stage.number}`}
+            aria-label={`Step ${stage.number} of 5: ${stage.headline}`}
+          >
+            <div className="message-meta">
+              <span className="saved-chat-step">STEP {stage.number}/5</span>
+              <strong>{stage.author}</strong>
+              <span>{stage.eyebrow}</span>
+              <span className="saved-chat-evidence-tag">SAVED SNAPSHOT</span>
+            </div>
+            <div className="message-body">
+              <strong className="saved-chat-headline">{stage.headline}</strong>
+              <p>{stage.body}</p>
+              <div className="saved-chat-facts">
+                {stage.facts.map((fact) => (
+                  <span key={fact}>{fact}</span>
+                ))}
+              </div>
+            </div>
+          </article>
+        ))}
+
+        {replayStep !== null && replayStep < stages.length ? (
+          <article className="message message-assistant thinking saved-chat-thinking">
+            <div className="message-meta">
+              <strong>EpochGuard Demo Agent</strong>
+              <span>revealing saved step {replayStep + 1}/5</span>
+            </div>
+            <div className="thinking-row"><Spinner />No model is running · revealing the next frozen Snapshot step…</div>
+          </article>
+        ) : null}
+        <div ref={messageEnd} />
+      </div>
+      <SavedReplayComposer />
+    </>
+  );
+}
+
+function SavedEpochGuardChatWorkspace({
+  sessionId,
+  scenarioId,
+  sessionIds,
+  onScenarioIdChange,
+}: {
+  sessionId: string;
+  scenarioId: ScenarioId;
+  sessionIds: StoredSessionIds;
+  onScenarioIdChange: (scenarioId: ScenarioId) => void;
+}) {
+  const controller = useEpochGuardSession({
+    source: epochGuardSessionSource,
+    sessionId,
+  });
+
+  const savedSnapshot = controller.snapshot;
+  const snapshotMatchesScenario = savedSnapshot?.scenarioId === scenarioId;
+
+  if (
+    savedSnapshot === null ||
+    !snapshotMatchesScenario ||
+    controller.isStale ||
+    controller.error !== null
+  ) {
+    return (
+      <>
+        <div className="messages saved-chat-messages">
+          <div className="welcome saved-chat-loading" role="status">
+            {controller.isLoading ? <Spinner /> : <span className="saved-chat-load-error">!</span>}
+            <h3>
+              {controller.isLoading
+                ? "Loading saved Agent replay"
+                : "Saved replay unavailable"}
+            </h3>
+            <p>
+              {controller.error?.message ??
+                (snapshotMatchesScenario
+                  ? "The saved Snapshot view is stale, so replay is disabled."
+                  : "The saved Snapshot does not match the selected scenario.")}
+            </p>
+          </div>
+        </div>
+        <SavedReplayComposer />
+      </>
+    );
+  }
+
+  return (
+    <SavedEpochGuardChat
+      snapshot={savedSnapshot}
+      scenarioId={scenarioId}
+      sessionIds={sessionIds}
+      onScenarioIdChange={onScenarioIdChange}
+    />
+  );
+}
+
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -901,6 +1255,23 @@ export default function App() {
     [agents],
   );
   const sidebarAgents = workspaceMode === "safety" ? roleAgents : chatAgents;
+  const savedChatScenarioId: ScenarioId =
+    safetySessionIds[safetyScenarioId] !== null
+      ? safetyScenarioId
+      : safetySessionIds["normal-world-v1"] !== null
+        ? "normal-world-v1"
+        : "impossible-collage-v1";
+  const savedChatSessionId = safetySessionIds[savedChatScenarioId];
+  const hasSavedChatReplay =
+    safetySessionIds["normal-world-v1"] !== null ||
+    safetySessionIds["impossible-collage-v1"] !== null;
+  const showSavedChatReplay =
+    workspaceMode === "chat" &&
+    selected === null &&
+    savedChatSessionId !== null;
+  const sidebarCount =
+    sidebarAgents.length +
+    (workspaceMode === "chat" && hasSavedChatReplay ? 1 : 0);
 
   const refreshAgents = useCallback(async () => {
     const { agents: next } = await api.listAgents();
@@ -1188,9 +1559,23 @@ export default function App() {
 
         <div className="sidebar-label">
           <span>{workspaceMode === "safety" ? "Role Agents" : "Your Agents"}</span>
-          <span>{sidebarAgents.length}</span>
+          <span>{sidebarCount}</span>
         </div>
         <nav className="agent-list">
+          {workspaceMode === "chat" && hasSavedChatReplay ? (
+            <button
+              type="button"
+              className={`agent-card saved-replay-agent-card${selected === null ? " selected" : ""}`}
+              onClick={() => setSelectedId(null)}
+            >
+              <div className="agent-avatar saved-replay-avatar">5</div>
+              <div className="agent-card-copy">
+                <strong>EpochGuard Demo Replay</strong>
+                <span>Saved real Session · read only</span>
+              </div>
+              <span className="mini-dot mini-ready" />
+            </button>
+          ) : null}
           {sidebarAgents.map((agent) =>
             workspaceMode === "safety" ? (
               <div className="agent-card safety-sidebar-agent" key={agent.id}>
@@ -1216,7 +1601,7 @@ export default function App() {
               </button>
             ),
           )}
-          {sidebarAgents.length === 0 && (
+          {sidebarCount === 0 && (
             <div className="empty-sidebar">
               <span>◇</span>
               {workspaceMode === "safety"
@@ -1282,7 +1667,7 @@ export default function App() {
           </div>
         )}
 
-        {workspaceMode === "safety" || selected !== null ? (
+        {workspaceMode === "safety" || selected !== null || showSavedChatReplay ? (
           <>
             <header className="agent-header">
               {workspaceMode === "safety" ? (
@@ -1326,6 +1711,14 @@ export default function App() {
                     </button>
                   </div>
                 </>
+              ) : showSavedChatReplay ? (
+                <div>
+                  <div className="header-title-row">
+                    <h1>EpochGuard Demo Agent</h1>
+                    <span className="safety-header-pill saved-replay-header-pill">Saved replay</span>
+                  </div>
+                  <p>Official Agent Chat UI · read-only projection of an authoritative saved Session.</p>
+                </div>
               ) : null}
             </header>
 
@@ -1385,14 +1778,20 @@ export default function App() {
                   <span className="eyebrow">Playground</span>
                   <h2>
                     {workspaceMode === "chat"
-                      ? "Build something with your Agent"
+                      ? showSavedChatReplay
+                        ? "Watch the saved multi-Agent decision"
+                        : "Build something with your Agent"
                       : "Inspect and operate one protected Session"}
                   </h2>
                 </div>
-                {workspaceMode === "chat" && selected !== null ? (
+                {workspaceMode === "chat" && (selected !== null || showSavedChatReplay) ? (
                   <div className="session-info">
                     <span className="pulse" />
-                    {selected.codexThreadId ? "Session connected" : "New session"}
+                    {showSavedChatReplay
+                      ? "SAVED REAL RUN · READ ONLY"
+                      : selected?.codexThreadId
+                        ? "Session connected"
+                        : "New session"}
                   </div>
                 ) : null}
               </div>
@@ -1505,6 +1904,14 @@ export default function App() {
                 </div>
                   </form>
                 </>
+              ) : showSavedChatReplay && savedChatSessionId !== null ? (
+                <SavedEpochGuardChatWorkspace
+                  key={`${savedChatScenarioId}:${savedChatSessionId}`}
+                  sessionId={savedChatSessionId}
+                  scenarioId={savedChatScenarioId}
+                  sessionIds={safetySessionIds}
+                  onScenarioIdChange={setSafetyScenarioId}
+                />
               ) : null}
             </section>
           </>
