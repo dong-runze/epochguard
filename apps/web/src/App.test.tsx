@@ -422,6 +422,8 @@ describe("Session Safety five-step live decision flow", () => {
     expect(markup).toContain("Campaign Effect");
     expect(markup).toContain("RELEASED");
     expect(markup).toContain("1 effect · exactly once");
+    expect(markup).toContain("Replay 1→5");
+    expect(markup).toContain("SAVED REAL RUN");
   });
 
   it("makes the all-ALLOW impossible collage visibly fail closed", () => {

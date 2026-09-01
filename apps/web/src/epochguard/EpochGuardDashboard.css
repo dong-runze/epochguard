@@ -385,6 +385,40 @@
   letter-spacing: -0.025em;
 }
 
+.eg-demo-flow-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.eg-demo-replay-status {
+  color: rgba(244, 251, 248, 0.76);
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+}
+
+.eg-demo-replay-button {
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 999px;
+  color: #173d34;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 5px 16px rgba(12, 31, 26, 0.17);
+  font-size: 9px;
+  font-weight: 900;
+  cursor: pointer;
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+
+.eg-demo-replay-button:hover,
+.eg-demo-replay-button:focus-visible {
+  transform: translateY(-1px);
+  box-shadow: 0 7px 20px rgba(12, 31, 26, 0.24);
+}
+
 .eg-demo-scenario {
   flex: 0 0 auto;
   padding: 7px 10px;
@@ -417,6 +451,29 @@
   gap: 10px;
   border-right: 1px solid var(--eg-line);
   background: linear-gradient(180deg, #fff, #fafbf8);
+  transition: opacity 260ms ease, transform 260ms ease, box-shadow 260ms ease;
+}
+
+.eg-demo-step-replay-pending {
+  opacity: 0.42;
+}
+
+.eg-demo-step-replay-current {
+  z-index: 2;
+  opacity: 1;
+  transform: translateY(-4px);
+  box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.86),
+    0 12px 28px rgba(18, 51, 42, 0.2);
+  animation: eg-replay-focus 900ms ease-in-out infinite alternate;
+}
+
+@keyframes eg-replay-focus {
+  from {
+    filter: brightness(0.98);
+  }
+  to {
+    filter: brightness(1.08);
+  }
 }
 
 .eg-demo-step:last-child {

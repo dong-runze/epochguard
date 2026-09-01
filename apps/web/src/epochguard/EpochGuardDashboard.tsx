@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { SessionDashboardSnapshot } from "./contracts";
 import type { EpochGuardSessionSource } from "./session-source";
 import { useEpochGuardSession } from "./useEpochGuardSession";
@@ -346,6 +347,7 @@ export function AgentDecisionFlow({
 }: {
   snapshot: SessionDashboardSnapshot;
 }) {
+  const [replayStep, setReplayStep] = useState<number | null>(null);
   const story = demoStory(snapshot);
   const gate = gateDemoStage(snapshot);
   const effect = effectDemoStage(snapshot);
@@ -369,6 +371,31 @@ export function AgentDecisionFlow({
       ...effect,
     },
   ];
+  const replaying = replayStep !== null;
+  const displayedStages = stages.map((stage, index) =>
+    !replaying || index < replayStep
+      ? stage
+      : {
+          ...stage,
+          state: "WAITING",
+          detail: "Saved evidence queued",
+          tone: "waiting" as const,
+        },
+  );
+
+  useEffect(() => {
+    if (replayStep === null || replayStep >= stages.length) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      setReplayStep((step) => (step === null ? null : step + 1));
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [replayStep, stages.length]);
+
+  useEffect(() => {
+    setReplayStep(null);
+  }, [snapshot.sessionId]);
 
   return (
     <section
@@ -377,18 +404,36 @@ export function AgentDecisionFlow({
     >
       <header className="eg-demo-flow-header">
         <div>
-          <span className="eg-kicker">Live decision path · 3 Agents + Gate + Effect</span>
+          <span className="eg-kicker">Decision path · 3 Agents + Gate + Effect</span>
           <h2>{story.headline}</h2>
         </div>
-        <span className="eg-demo-scenario">
-          {snapshot.scenarioId === "normal-world-v1" ? "NORMAL WORLD" : "IMPOSSIBLE COLLAGE"}
-        </span>
+        <div className="eg-demo-flow-actions">
+          <span className="eg-demo-replay-status" aria-live="polite">
+            {replayStep === null
+              ? "SAVED REAL RUN"
+              : replayStep < stages.length
+                ? `REPLAY ${replayStep}/${stages.length}`
+                : "REPLAY COMPLETE"}
+          </span>
+          <button
+            type="button"
+            className="eg-demo-replay-button"
+            onClick={() => setReplayStep(0)}
+          >
+            <span aria-hidden="true">▶</span> Replay 1→5
+          </button>
+          <span className="eg-demo-scenario">
+            {snapshot.scenarioId === "normal-world-v1" ? "NORMAL WORLD" : "IMPOSSIBLE COLLAGE"}
+          </span>
+        </div>
       </header>
       <ol className="eg-demo-steps">
-        {stages.map((stage) => (
+        {displayedStages.map((stage, index) => (
           <li
             key={stage.number}
-            className={`eg-demo-step eg-demo-step-${stage.tone}`}
+            className={`eg-demo-step eg-demo-step-${stage.tone}${
+              replaying && index === replayStep ? " eg-demo-step-replay-current" : ""
+            }${replaying && index >= replayStep ? " eg-demo-step-replay-pending" : ""}`}
           >
             <span className="eg-demo-number" aria-hidden="true">{stage.number}</span>
             <div className="eg-demo-step-copy">
