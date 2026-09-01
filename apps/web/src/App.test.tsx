@@ -11,7 +11,10 @@ import {
   SafetyRolePicker,
   SessionSafetyWorkspace,
 } from "./App";
-import { AgentCard } from "./epochguard/EpochGuardDashboard";
+import {
+  AgentCard,
+  AgentDecisionFlow,
+} from "./epochguard/EpochGuardDashboard";
 import {
   CONTRACT_DIGEST,
   CONTRACT_VERSION,
@@ -394,5 +397,103 @@ describe("Session Safety protected Role inspection", () => {
       assignments,
     });
     expect(baseline).not.toHaveProperty("focusedRole");
+  });
+});
+
+describe("Session Safety five-step live decision flow", () => {
+  it("shows three Role Agents, the EpochGuard Gate, and one released Effect", () => {
+    const snapshot = SessionDashboardSnapshotSchema.parse(
+      mockScenario("normal-released").payload,
+    );
+    const markup = renderToStaticMarkup(
+      <AgentDecisionFlow snapshot={snapshot} />,
+    );
+
+    expect(markup).toContain('aria-label="Five-step live Agent decision flow"');
+    expect(markup).toContain(
+      "3 Agents agree in the same world → RELEASE exactly once",
+    );
+    expect(markup.match(/ROLE AGENT/g)).toHaveLength(3);
+    expect(markup).toContain("Inventory Agent");
+    expect(markup).toContain("Budget Agent");
+    expect(markup).toContain("Policy Agent");
+    expect(markup).toContain("EpochGuard Gate");
+    expect(markup).toContain("ONE SHARED WORLD");
+    expect(markup).toContain("Campaign Effect");
+    expect(markup).toContain("RELEASED");
+    expect(markup).toContain("1 effect · exactly once");
+  });
+
+  it("makes the all-ALLOW impossible collage visibly fail closed", () => {
+    const snapshot = SessionDashboardSnapshotSchema.parse(
+      mockScenario("impossible-blocked").payload,
+    );
+    const markup = renderToStaticMarkup(
+      <AgentDecisionFlow snapshot={snapshot} />,
+    );
+
+    expect(markup).toContain(
+      "3 Agents say ALLOW, but not in the same world → BLOCK",
+    );
+    expect(markup.match(/>ALLOW</g)).toHaveLength(3);
+    expect(markup).toContain("NO SHARED WORLD");
+    expect(markup).toContain("L 21 ≥ U 20");
+    expect(markup).toContain("LOCKED");
+    expect(markup).toContain("0 effects released");
+  });
+
+  it("shows a terminal Role Run failure instead of an in-progress refresh", () => {
+    const snapshot = SessionDashboardSnapshotSchema.parse(
+      mockScenario("run-failed").payload,
+    );
+    const markup = renderToStaticMarkup(
+      <AgentDecisionFlow snapshot={snapshot} />,
+    );
+
+    expect(markup).toContain("Runtime failure → FAIL CLOSED");
+    expect(markup).toContain("RUN FAILED");
+    expect(markup).not.toContain("RE-OBSERVING");
+    expect(markup).toContain("FAIL-CLOSED");
+    expect(markup).toContain("0 effects released");
+  });
+
+  it("keeps a retained ALLOW visible while its selective refresh is running", () => {
+    const snapshot = SessionDashboardSnapshotSchema.parse(
+      mockScenario("refreshing-budget").payload,
+    );
+    const markup = renderToStaticMarkup(
+      <AgentDecisionFlow snapshot={snapshot} />,
+    );
+
+    expect(markup.match(/>ALLOW</g)).toHaveLength(3);
+    expect(markup).toContain("Re-observing · retained [v19, v20)");
+    expect(markup).toContain("NO SHARED WORLD");
+    expect(markup).toContain("LOCKED");
+  });
+
+  it("does not describe a sequential fallback as parallel execution", () => {
+    const baseline = SessionDashboardSnapshotSchema.parse(
+      mockScenario("collecting").payload,
+    );
+    const markup = renderToStaticMarkup(
+      <AgentDecisionFlow
+        snapshot={{ ...baseline, coordinationMode: "SEQUENTIAL_FALLBACK" }}
+      />,
+    );
+
+    expect(markup).toContain("3 Role Agents run sequentially");
+    expect(markup).not.toContain("run in parallel");
+  });
+
+  it("shows a pending start without claiming execution has begun", () => {
+    const baseline = SessionDashboardSnapshotSchema.parse(
+      mockScenario("collecting").payload,
+    );
+    const markup = renderToStaticMarkup(
+      <AgentDecisionFlow snapshot={{ ...baseline, coordinationMode: "PENDING" }} />,
+    );
+
+    expect(markup).toContain("3 Role Agents are starting");
+    expect(markup).not.toContain("run in parallel");
   });
 });

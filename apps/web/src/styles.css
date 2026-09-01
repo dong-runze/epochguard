@@ -239,6 +239,16 @@ button {
   background: #2e2e2a;
 }
 
+.safety-sidebar-agent {
+  cursor: default;
+  background: #2b2b28;
+  border-color: #383834;
+}
+
+.safety-sidebar-agent:hover {
+  background: #2b2b28;
+}
+
 .agent-card.selected {
   background: #353430;
   border-color: #464540;

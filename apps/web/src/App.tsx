@@ -890,6 +890,17 @@ export default function App() {
     () => agents.filter((agent) => !isDedicatedRoleAgent(agent)),
     [agents],
   );
+  const roleAgents = useMemo(
+    () =>
+      (Object.keys(ROLE_AGENT_NAMES) as Role[]).flatMap((role) => {
+        const agent = agents.find(
+          (candidate) => candidate.name === ROLE_AGENT_NAMES[role],
+        );
+        return agent === undefined ? [] : [agent];
+      }),
+    [agents],
+  );
+  const sidebarAgents = workspaceMode === "safety" ? roleAgents : chatAgents;
 
   const refreshAgents = useCallback(async () => {
     const { agents: next } = await api.listAgents();
@@ -1176,28 +1187,41 @@ export default function App() {
         </button>
 
         <div className="sidebar-label">
-          <span>Your Agents</span>
-          <span>{chatAgents.length}</span>
+          <span>{workspaceMode === "safety" ? "Role Agents" : "Your Agents"}</span>
+          <span>{sidebarAgents.length}</span>
         </div>
         <nav className="agent-list">
-          {chatAgents.map((agent) => (
-            <button
-              className={"agent-card " + (agent.id === selectedId ? "selected" : "")}
-              key={agent.id}
-              onClick={() => setSelectedId(agent.id)}
-            >
-              <div className="agent-avatar">{agent.name.slice(0, 1).toUpperCase()}</div>
-              <div className="agent-card-copy">
-                <strong>{agent.name}</strong>
-                <span>{agent.description || "Coding Agent"}</span>
+          {sidebarAgents.map((agent) =>
+            workspaceMode === "safety" ? (
+              <div className="agent-card safety-sidebar-agent" key={agent.id}>
+                <div className="agent-avatar">{agent.name.split(" ")[1]?.slice(0, 1) ?? "R"}</div>
+                <div className="agent-card-copy">
+                  <strong>{agent.name}</strong>
+                  <span>Middleware evidence owner</span>
+                </div>
+                <span className={"mini-dot mini-" + agent.status} />
               </div>
-              <span className={"mini-dot mini-" + agent.status} />
-            </button>
-          ))}
-          {chatAgents.length === 0 && (
+            ) : (
+              <button
+                className={"agent-card " + (agent.id === selectedId ? "selected" : "")}
+                key={agent.id}
+                onClick={() => setSelectedId(agent.id)}
+              >
+                <div className="agent-avatar">{agent.name.slice(0, 1).toUpperCase()}</div>
+                <div className="agent-card-copy">
+                  <strong>{agent.name}</strong>
+                  <span>{agent.description || "Coding Agent"}</span>
+                </div>
+                <span className={"mini-dot mini-" + agent.status} />
+              </button>
+            ),
+          )}
+          {sidebarAgents.length === 0 && (
             <div className="empty-sidebar">
               <span>◇</span>
-              Create your first coding Agent.
+              {workspaceMode === "safety"
+                ? "Role Agents are loading."
+                : "Create your first coding Agent."}
             </div>
           )}
         </nav>

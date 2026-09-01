@@ -45,6 +45,7 @@ const REQUIRED_RUNTIME_RUNS = 3;
 type ActiveDecision = NonNullable<
   SessionDashboardSnapshot["agents"][number]["activeDecision"]
 >;
+type DemoTone = "success" | "blocked" | "active" | "waiting";
 type UsageField =
   | "inputTokens"
   | "cachedInputTokens"
@@ -167,6 +168,240 @@ function freshnessMessage(
     return "Resolved safely. The protected effect was not released.";
   }
   return `${GATE_COPY[snapshot.gate.state]}. Effects in this session: ${snapshot.gate.effectsInSession}.`;
+}
+
+function agentDemoStage(
+  agent: SessionDashboardSnapshot["agents"][number],
+): { state: string; detail: string; tone: DemoTone } {
+  const decision = agent.activeDecision;
+  if (decision !== null) {
+    if (agent.inFlightAttempt !== null) {
+      const status = agent.inFlightAttempt.status;
+      const terminalFailure =
+        status === "FAILED" ||
+        status === "INTERRUPTED" ||
+        status === "OUTPUT_REJECTED";
+      return {
+        state: decision.verdict,
+        detail: terminalFailure
+          ? `Refresh ${humanize(status)} · retained ${intervalLabel(decision.receipt)}`
+          : `Re-observing · retained ${intervalLabel(decision.receipt)}`,
+        tone:
+          terminalFailure || decision.verdict === "DENY" ? "blocked" : "active",
+      };
+    }
+    return {
+      state: decision.verdict,
+      detail: `Receipt ${intervalLabel(decision.receipt)}`,
+      tone: decision.verdict === "ALLOW" ? "success" : "blocked",
+    };
+  }
+  if (agent.inFlightAttempt !== null) {
+    const status = agent.inFlightAttempt.status;
+    if (
+      status === "FAILED" ||
+      status === "INTERRUPTED" ||
+      status === "OUTPUT_REJECTED"
+    ) {
+      return {
+        state:
+          status === "OUTPUT_REJECTED"
+            ? "OUTPUT REJECTED"
+            : status === "INTERRUPTED"
+              ? "RUN INTERRUPTED"
+              : "RUN FAILED",
+        detail: "No Decision accepted · gate stays closed",
+        tone: "blocked",
+      };
+    }
+    return {
+      state: "RUNNING",
+      detail: humanize(status),
+      tone: "active",
+    };
+  }
+  return { state: "WAITING", detail: "No accepted Decision", tone: "waiting" };
+}
+
+function gateDemoStage(
+  snapshot: SessionDashboardSnapshot,
+): { state: string; detail: string; tone: DemoTone } {
+  if (snapshot.jointValidity.state === "VALID_CURRENT") {
+    return {
+      state: "ONE SHARED WORLD",
+      detail: `${snapshot.jointValidity.lowerBound} ≤ v${snapshot.worldHead} < ${snapshot.jointValidity.upperBound}`,
+      tone: "success",
+    };
+  }
+  if (snapshot.jointValidity.state === "NO_CUT") {
+    return {
+      state: "NO SHARED WORLD",
+      detail: `L ${snapshot.jointValidity.lowerBound} ≥ U ${snapshot.jointValidity.upperBound}`,
+      tone: "blocked",
+    };
+  }
+  if (snapshot.jointValidity.state === "HISTORICAL_STALE") {
+    return {
+      state: "STALE WORLD",
+      detail: `Evidence no longer covers head v${snapshot.worldHead}`,
+      tone: "blocked",
+    };
+  }
+  return {
+    state: snapshot.gate.state === "CHECKING" ? "CHECKING" : "WAITING",
+    detail: `${snapshot.metrics.activeDecisions}/3 Decisions collected`,
+    tone: snapshot.gate.state === "CHECKING" ? "active" : "waiting",
+  };
+}
+
+function effectDemoStage(
+  snapshot: SessionDashboardSnapshot,
+): { state: string; detail: string; tone: DemoTone } {
+  if (snapshot.gate.state === "RELEASED") {
+    return {
+      state: "RELEASED",
+      detail: `${snapshot.gate.effectsInSession} effect · exactly once`,
+      tone: "success",
+    };
+  }
+  if (snapshot.gate.state === "READY") {
+    return {
+      state: "READY",
+      detail: "Permit issued · awaiting commit",
+      tone: "active",
+    };
+  }
+  if (snapshot.gate.state === "FAILED") {
+    return {
+      state: "FAIL-CLOSED",
+      detail: `${snapshot.gate.effectsInSession} effects released`,
+      tone: "blocked",
+    };
+  }
+  if (snapshot.gate.state === "LOCKED") {
+    return {
+      state: "LOCKED",
+      detail: `${snapshot.gate.effectsInSession} effects released`,
+      tone: "blocked",
+    };
+  }
+  return {
+    state: snapshot.gate.state,
+    detail: `${snapshot.gate.effectsInSession} effects released`,
+    tone: snapshot.gate.state === "CHECKING" ? "active" : "waiting",
+  };
+}
+
+function demoStory(snapshot: SessionDashboardSnapshot): {
+  headline: string;
+  tone: DemoTone;
+} {
+  if (snapshot.gate.state === "RELEASED") {
+    return {
+      headline: "3 Agents agree in the same world → RELEASE exactly once",
+      tone: "success",
+    };
+  }
+  if (snapshot.jointValidity.state === "NO_CUT") {
+    return {
+      headline:
+        snapshot.metrics.allowDecisions === 3
+          ? "3 Agents say ALLOW, but not in the same world → BLOCK"
+          : "3 Decisions, but no shared world → BLOCK",
+      tone: "blocked",
+    };
+  }
+  if (snapshot.gate.state === "FAILED") {
+    return {
+      headline: "Runtime failure → FAIL CLOSED · protected effect stays at zero",
+      tone: "blocked",
+    };
+  }
+  if (snapshot.metrics.denyDecisions > 0) {
+    return {
+      headline: "A Role Agent says DENY → protected effect stays locked",
+      tone: "blocked",
+    };
+  }
+  if (snapshot.coordinationMode === "SEQUENTIAL_FALLBACK") {
+    return {
+      headline: "3 Role Agents run sequentially → EpochGuard checks one shared world",
+      tone: snapshot.metrics.activeDecisions > 0 ? "active" : "waiting",
+    };
+  }
+  if (snapshot.coordinationMode === "PENDING") {
+    return {
+      headline: "3 Role Agents are starting → EpochGuard waits for one shared world",
+      tone: "waiting",
+    };
+  }
+  return {
+    headline: "3 Role Agents run in parallel → EpochGuard checks one shared world",
+    tone: snapshot.metrics.activeDecisions > 0 ? "active" : "waiting",
+  };
+}
+
+export function AgentDecisionFlow({
+  snapshot,
+}: {
+  snapshot: SessionDashboardSnapshot;
+}) {
+  const story = demoStory(snapshot);
+  const gate = gateDemoStage(snapshot);
+  const effect = effectDemoStage(snapshot);
+  const stages = [
+    ...snapshot.agents.map((agent, index) => ({
+      number: index + 1,
+      kind: "ROLE AGENT",
+      label: `${ROLE_LABELS[agent.role]} Agent`,
+      ...agentDemoStage(agent),
+    })),
+    {
+      number: 4,
+      kind: "MIDDLEWARE",
+      label: "EpochGuard Gate",
+      ...gate,
+    },
+    {
+      number: 5,
+      kind: "PROTECTED OUTPUT",
+      label: "Campaign Effect",
+      ...effect,
+    },
+  ];
+
+  return (
+    <section
+      className={`eg-demo-flow eg-demo-flow-${story.tone}`}
+      aria-label="Five-step live Agent decision flow"
+    >
+      <header className="eg-demo-flow-header">
+        <div>
+          <span className="eg-kicker">Live decision path · 3 Agents + Gate + Effect</span>
+          <h2>{story.headline}</h2>
+        </div>
+        <span className="eg-demo-scenario">
+          {snapshot.scenarioId === "normal-world-v1" ? "NORMAL WORLD" : "IMPOSSIBLE COLLAGE"}
+        </span>
+      </header>
+      <ol className="eg-demo-steps">
+        {stages.map((stage) => (
+          <li
+            key={stage.number}
+            className={`eg-demo-step eg-demo-step-${stage.tone}`}
+          >
+            <span className="eg-demo-number" aria-hidden="true">{stage.number}</span>
+            <div className="eg-demo-step-copy">
+              <span className="eg-demo-kind">{stage.kind}</span>
+              <strong>{stage.label}</strong>
+              <b className="eg-demo-state">{stage.state}</b>
+              <small>{stage.detail}</small>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
 }
 
 function RuntimeEvidence({
@@ -508,7 +743,7 @@ export function EpochGuardDashboard({
             </div>
           ) : null}
 
-          <RuntimeEvidence snapshot={snapshot} />
+          <AgentDecisionFlow snapshot={snapshot} />
 
           <div className="eg-summary-grid">
             <article className="eg-summary-card">
@@ -557,6 +792,8 @@ export function EpochGuardDashboard({
               />
             ))}
           </section>
+
+          <RuntimeEvidence snapshot={snapshot} />
 
           <div className="eg-inspector-grid">
             <section className="eg-panel eg-world-panel">

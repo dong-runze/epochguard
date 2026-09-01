@@ -331,6 +331,181 @@
   cursor: pointer;
 }
 
+.eg-demo-flow {
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid var(--eg-line);
+  border-radius: 12px;
+  background: var(--eg-paper-strong);
+  box-shadow: 0 10px 30px rgba(25, 42, 36, 0.075);
+}
+
+.eg-demo-flow-success {
+  border-color: #9bc9b9;
+}
+
+.eg-demo-flow-blocked {
+  border-color: #e0aaa2;
+}
+
+.eg-demo-flow-header {
+  min-height: 74px;
+  padding: 13px 17px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  color: #f4fbf8;
+  background: linear-gradient(110deg, #1a4a3f, #276b5b);
+}
+
+.eg-demo-flow-blocked .eg-demo-flow-header {
+  background: linear-gradient(110deg, #762f29, #a64a3e);
+}
+
+.eg-demo-flow-active .eg-demo-flow-header {
+  background: linear-gradient(110deg, #294f69, #3c708e);
+}
+
+.eg-demo-flow-waiting .eg-demo-flow-header {
+  background: linear-gradient(110deg, #4e5955, #68736f);
+}
+
+.eg-demo-flow-header .eg-kicker {
+  color: rgba(239, 251, 246, 0.75);
+  font-size: 9px;
+}
+
+.eg-demo-flow-header h2 {
+  margin: 4px 0 0;
+  color: #fff;
+  font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif;
+  font-size: clamp(18px, 1.45vw, 24px);
+  line-height: 1.12;
+  letter-spacing: -0.025em;
+}
+
+.eg-demo-scenario {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+}
+
+.eg-demo-steps {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  list-style: none;
+}
+
+.eg-demo-step {
+  position: relative;
+  min-width: 0;
+  min-height: 142px;
+  padding: 15px 24px 14px 14px;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  border-right: 1px solid var(--eg-line);
+  background: linear-gradient(180deg, #fff, #fafbf8);
+}
+
+.eg-demo-step:last-child {
+  border-right: 0;
+}
+
+.eg-demo-step:not(:last-child)::after {
+  content: "→";
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  right: -12px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #ccd4cf;
+  border-radius: 50%;
+  color: #52625d;
+  background: #fff;
+  font-size: 15px;
+  font-weight: 900;
+  transform: translateY(-50%);
+}
+
+.eg-demo-number {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border: 3px solid currentColor;
+  border-radius: 50%;
+  color: #68736f;
+  background: #fff;
+  font-family: ui-rounded, "SF Pro Rounded", system-ui, sans-serif;
+  font-size: 23px;
+  font-weight: 950;
+  line-height: 1;
+}
+
+.eg-demo-step-success .eg-demo-number,
+.eg-demo-step-success .eg-demo-state {
+  color: var(--eg-teal);
+}
+
+.eg-demo-step-blocked .eg-demo-number,
+.eg-demo-step-blocked .eg-demo-state {
+  color: var(--eg-red);
+}
+
+.eg-demo-step-active .eg-demo-number,
+.eg-demo-step-active .eg-demo-state {
+  color: var(--eg-blue);
+}
+
+.eg-demo-step-copy {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+}
+
+.eg-demo-kind {
+  color: #818b87;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+}
+
+.eg-demo-step-copy > strong {
+  margin-top: 3px;
+  color: #25312e;
+  font-size: 16px;
+  line-height: 1.15;
+}
+
+.eg-demo-state {
+  margin-top: 11px;
+  font-size: 15px;
+  line-height: 1.15;
+}
+
+.eg-demo-step-copy small {
+  margin-top: 5px;
+  color: #6d7874;
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .eg-runtime-evidence {
   margin-top: 9px;
   overflow: hidden;
@@ -1329,6 +1504,11 @@
     margin: 0;
   }
 
+  .eg-demo-steps {
+    grid-template-columns: repeat(5, minmax(180px, 1fr));
+    overflow-x: auto;
+  }
+
   .eg-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1372,6 +1552,12 @@
 
   .eg-revision-cluster {
     justify-content: flex-start;
+  }
+
+  .eg-demo-flow-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 9px;
   }
 
   .eg-agent-grid {
@@ -1450,6 +1636,10 @@
 
   .eg-runtime-evidence-header {
     align-items: flex-start;
+  }
+
+  .eg-demo-step {
+    min-height: 132px;
   }
 
   .eg-runtime-evidence-list {
